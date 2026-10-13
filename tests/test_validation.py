@@ -1,6 +1,7 @@
 """The cross-validation suite must pass completely -- and must be able to fail (negative controls)."""
 from __future__ import annotations
 
+import os
 import time
 import sys
 from pathlib import Path
@@ -32,7 +33,9 @@ def test_all_checks_pass(run):
 
 def test_suite_is_fast(run):
     _, elapsed = run
-    assert elapsed < 60, f"validation suite took {elapsed:.1f} s"
+    # 60 s on a desktop; shared CI runners (GitHub sets CI=true) are 2-3x slower, especially on Windows
+    limit = 300 if os.environ.get("CI") else 60
+    assert elapsed < limit, f"validation suite took {elapsed:.1f} s (limit {limit} s)"
 
 
 def test_builtin_checks_in_planned_order(run):

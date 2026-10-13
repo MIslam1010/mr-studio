@@ -640,7 +640,7 @@ class PlanningTab(BaseTab):
             print(err)
 
     def _plan_done(self, gen, res: P.PlanResult, key=None):
-        if gen != self._job:
+        if gen != self._job or not self._result_matches_arm(res):
             return
         if "grid" in res.extra and key is not None:
             self._grid_cache = (key, res.extra["grid"])
@@ -686,8 +686,16 @@ class PlanningTab(BaseTab):
             self.res_lbl.setText(msg)
             self.res_lbl.setStyleSheet("")
 
+    def _result_matches_arm(self, r) -> bool:
+        """A plan computed for another robot (e.g. finished just after the robot changed) must not be drawn."""
+        if r is None or getattr(r, "path", None) is None or self.world is None:
+            return r is not None
+        return np.asarray(r.path).shape[-1] == self.world.space.n
+
     def _redraw_result(self, *_):
         r = self.result
+        if r is not None and not self._result_matches_arm(r):
+            self.result = r = None
         for it in self.cs_path + self.cs_raw:
             self.cs.removeItem(it)
         self.cs_path, self.cs_raw = [], []
@@ -723,7 +731,7 @@ class PlanningTab(BaseTab):
     # ======================================================================== trajectory
     def _retime(self):
         r = self.result
-        if r is None or not r.success:
+        if r is None or not r.success or not self._result_matches_arm(r):
             return
         t, Q, dQ, _ = P.time_scale(r.path, self.Tf_spin.value(), self.scale_box.currentText(), 0.02,
                                    self.rest_cb.isChecked())
