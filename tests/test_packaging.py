@@ -159,6 +159,7 @@ def test_launcher_self_test_passes(tmp_path):
 
 
 # ----------------------------------------------------------------------------- scripts / CI / docs
+@pytest.mark.skipif(sys.platform == "win32", reason="macOS build script; Windows' bash is WSL and cannot read D:\\ paths")
 def test_build_macos_script():
     sh = PKG / "build_macos.sh"
     assert os.access(sh, os.X_OK)
