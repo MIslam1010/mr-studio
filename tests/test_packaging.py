@@ -240,12 +240,12 @@ def test_cmeel_dll_filter_on_a_windows_layout(tmp_path, monkeypatch):
     assert got == ["boost_python311.dll", "pinocchio_default.dll"]
 
 
-def test_windows_requirements_drop_only_pin(tmp_path):
+def test_windows_requirements_drop_conda_packages(tmp_path):
     dst = tmp_path / "req-win.txt"
     dropped = cfg.pip_requirements_without(str(ROOT / "requirements.txt"), str(dst))
-    assert [d.split("==")[0].strip() for d in dropped] == ["pin"]
+    assert sorted(d.split("==")[0].strip() for d in dropped) == ["PySide6", "pin"]
     kept = dst.read_text(encoding="utf-8")
-    assert "pin==" not in kept and "modern-robotics==" in kept and "pyside6==" in kept.lower()
+    assert "pin==" not in kept and "modern-robotics==" in kept and "pyside6==" not in kept.lower()
     assert "pinocchio=4.1.0" in cfg.CONDA_ON_WINDOWS.values()
     pin_req = re.search(r"^pin==(\S+)", (ROOT / "requirements.txt").read_text(encoding="utf-8"), re.M).group(1)
     assert cfg.CONDA_ON_WINDOWS["pin"] == f"pinocchio={pin_req}", "conda-forge Pinocchio must match requirements.txt"

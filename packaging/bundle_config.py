@@ -77,7 +77,9 @@ OPTIONAL_HIDDEN_IMPORTS = [
 
 # Pinocchio has NO Windows wheel on PyPI (the `pin` cmeel wheels exist for macOS and Linux only), so on
 # Windows it comes from conda-forge. Map: pip distribution in requirements.txt -> conda-forge spec.
-CONDA_ON_WINDOWS = {"pin": "pinocchio=4.1.0"}
+# PySide6 also comes from conda-forge on Windows: pip's PySide6 wheels clash with the Qt/ICU/MSVC runtime DLLs that
+# conda puts on PATH ("DLL load failed while importing QtCore: The specified procedure could not be found").
+CONDA_ON_WINDOWS = {"pin": "pinocchio=4.1.0", "PySide6": "pyside6"}
 
 # Package data. (package, include-globs relative to the package dir). Python sources are never listed.
 DATA_PACKAGES = [

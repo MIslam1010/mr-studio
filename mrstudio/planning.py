@@ -225,7 +225,8 @@ class Space:
     def canon(self, q):
         """Representative inside [lo, hi] (wrapping joints mapped into [-pi, pi))."""
         q = np.asarray(q, float)
-        return np.where(self.wrap, (q + np.pi) % TWO_PI - np.pi, q)
+        wrap = np.asarray(self.wrap)[: q.shape[-1]]        # also accepts projected (fewer-column) arrays, e.g. 3R -> 2D
+        return np.where(wrap, (q + np.pi) % TWO_PI - np.pi, q)
 
     def inside(self, Q):
         Q = self.canon(np.atleast_2d(Q))
