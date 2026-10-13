@@ -1,0 +1,7 @@
+# Extra tools needed only to BUILD the installers (not to run MR Studio from source).
+#   pip install -r requirements.txt -r packaging/requirements-build.txt
+pyinstaller>=6.11,<7            # freezes Python + libraries into MR Studio.app / MRStudio.exe
+pyinstaller-hooks-contrib>=2024.10   # community hooks: pyqtgraph, PyOpenGL, imageio-ffmpeg, sympy ...
+pyserial>=3.5,<4                # bundled into the app: serial-port list of the Hardware / Haptics tabs
+                                # (a frozen app cannot pip-install it later). For the myCobot back-end also
+                                # `pip install pymycobot` before building: it is then bundled automatically.

@@ -1,0 +1,13 @@
+# Keep the repository small: never commit the virtual environment or build output
+# (packaging/README.md: `git add .` must not pick up the 2 GB .venv).
+.venv/
+venv/
+__pycache__/
+*.py[cod]
+.pytest_cache/
+.DS_Store
+packaging/build/
+packaging/dist/
+ci-settings.ini
+*.egg-info/
+.conda-env/

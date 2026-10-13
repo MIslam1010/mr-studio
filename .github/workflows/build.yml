@@ -1,0 +1,136 @@
+# Builds the one-click installers of MR Studio on GitHub's machines:
+#   Windows -> MR-Studio-<version>-Windows-x64-setup.exe (+ portable .zip)
+#   macOS   -> MR-Studio-<version>-macOS-arm64.dmg
+# Every run first executes the full test suite (including the cross-validation checks) from source,
+# then freezes the app with PyInstaller and runs `--self-test` on the frozen executable.
+# Download the installers from the run's "Artifacts" box. Pushing a tag such as v1.0.0 also
+# attaches them to a GitHub Release.
+name: build installers
+
+on:
+  push:
+    branches: [main, master]
+    tags: ["v*"]
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  build:
+    name: ${{ matrix.os }}
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 60
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [windows-latest, macos-latest]
+        include:
+          - os: windows-latest
+            shell: bash -el {0}        # login shell: activates the conda environment of setup-miniconda
+          - os: macos-latest
+            shell: bash                # NOT a login shell: macOS path_helper would put /usr/bin before setup-python
+    env:
+      QT_QPA_PLATFORM: offscreen       # no display on CI machines
+      MPLBACKEND: Agg
+      PYTHONUTF8: "1"                  # tab titles use characters cp1252 cannot print (Windows)
+      PYTHONIOENCODING: utf-8
+      MRSTUDIO_SETTINGS: ${{ github.workspace }}/ci-settings.ini   # never touch real user settings
+    defaults:
+      run:
+        shell: ${{ matrix.shell }}
+    steps:
+      - uses: actions/checkout@v4
+
+      # macOS: python.org Python 3.11 + pip (Pinocchio's `pin` wheel exists for macOS)
+      - uses: actions/setup-python@v5
+        if: runner.os == 'macOS'
+        with:
+          python-version: "3.11"
+          cache: pip
+          cache-dependency-path: |
+            requirements.txt
+            packaging/requirements-build.txt
+
+      - name: Install dependencies (macOS)
+        if: runner.os == 'macOS'
+        run: |
+          python -m pip install --upgrade pip
+          python -m pip install -r requirements.txt -r packaging/requirements-build.txt
+
+      # Windows: Pinocchio has NO Windows wheel on PyPI -> conda-forge for Pinocchio, pip for the rest
+      - uses: conda-incubator/setup-miniconda@v3
+        if: runner.os == 'Windows'
+        with:
+          miniforge-version: latest
+          python-version: "3.11"
+          activate-environment: mrstudio
+          channels: conda-forge
+          conda-remove-defaults: "true"
+
+      - name: Install dependencies (Windows)
+        if: runner.os == 'Windows'
+        run: |
+          conda install -y -c conda-forge --override-channels $(python packaging/bundle_config.py conda-packages)
+          python packaging/bundle_config.py windows-requirements requirements.txt packaging/build/requirements-windows.txt
+          python -m pip install --upgrade pip
+          python -m pip install -r packaging/build/requirements-windows.txt -r packaging/requirements-build.txt
+
+      - name: Use Mesa software OpenGL (Windows runners have no GPU)
+        if: runner.os == 'Windows'
+        run: echo "QT_OPENGL=software" >> "$GITHUB_ENV"
+
+      - name: Run tests
+        run: python -m pytest -q tests
+
+      - name: Ensure Inno Setup is available
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          if (-not (Test-Path "${env:ProgramFiles(x86)}\Inno Setup 6\ISCC.exe") -and -not (Get-Command iscc -ErrorAction SilentlyContinue)) {
+            choco install innosetup --no-progress -y
+          }
+
+      - name: Build (Windows)
+        if: runner.os == 'Windows'
+        run: pwsh -NoProfile -File packaging/build_windows.ps1 -Python "$(python -c 'import sys; print(sys.executable)')" -NoInstall -SkipTests
+
+      - name: Build (macOS)
+        if: runner.os == 'macOS'
+        run: PYTHON=python ./packaging/build_macos.sh --no-install --skip-tests
+
+      - name: Upload installers
+        uses: actions/upload-artifact@v4
+        with:
+          name: MR-Studio-${{ runner.os }}
+          path: |
+            packaging/dist/*.dmg
+            packaging/dist/*.exe
+            packaging/dist/*.zip
+            packaging/dist/self-test-*.txt
+          if-no-files-found: error
+          retention-days: 30
+
+  release:
+    name: attach installers to the GitHub Release
+    if: startsWith(github.ref, 'refs/tags/v')
+    needs: build
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          path: installers
+          merge-multiple: true
+      - uses: softprops/action-gh-release@v2
+        with:
+          files: |
+            installers/*.dmg
+            installers/*.exe
+            installers/*.zip
