@@ -14,7 +14,8 @@ from __future__ import annotations
 import html
 import os
 
-_TB = "/Users/mislam/Documents/Edu/Lectures/Robotics/Textbooks"
+# Folder of the local PDF library: environment variable MRSTUDIO_REFERENCES_DIR, else ~/Documents/Edu/Lectures/Robotics/Textbooks
+_TB = os.environ.get("MRSTUDIO_REFERENCES_DIR") or os.path.expanduser("~/Documents/Edu/Lectures/Robotics/Textbooks")
 _SUPP = f"{_TB}/SBEG461 Supplementary References"
 
 REFERENCES: dict[str, dict] = {
