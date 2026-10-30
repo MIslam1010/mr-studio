@@ -1,13 +1,14 @@
 """Test-session hooks and shared fixtures.
 
-* ``qapp`` -- one session-wide QApplication, torn down cleanly (timers stopped, widgets closed, deferred deletes
-  processed, garbage collected) so that Qt/OpenGL objects are not destroyed during interpreter shutdown.
-* Exit status -- on some systems Qt objects destroyed at the end of the session segfault (exit code 139) after a
-  fully passing run (not fixed yet). As a guarded fallback the process exits with
-  ``os._exit(<pytest's real status>)`` right after the terminal summary. The status is *fail closed*: it starts at 1
-  and is replaced by ``session.exitstatus`` only once pytest has set it, so a crash before that is never
-  reported as success. Set the environment variable ``MRSTUDIO_PYTEST_HARD_EXIT=0`` to disable the hard exit
-  (default: on) and let the interpreter shut down normally, e.g. to debug the teardown segfault.
+* ``qapp`` -- one session-wide QApplication with an ordered teardown: timers stopped, then every window's / tab's
+  ``shutdown`` hook (JobRunner worker threads, simulation timers, hardware ports), then pending events. Top-level
+  widgets are *not* deleted explicitly: deleting a tab that holds pyqtgraph plots (e.g. ``PracticeTab``) from
+  here segfaulted (exit code 139, in ``QGraphicsGridLayout``'s destructor); the interpreter's normal shutdown
+  disposes of them cleanly.
+* Exit status -- pytest's own status. The old workaround, ``os._exit(<pytest's status>)`` right after the
+  terminal summary, is still available with ``MRSTUDIO_PYTEST_HARD_EXIT=1`` (default: off). It is *fail closed*:
+  the status starts at 1 and is replaced by ``session.exitstatus`` only once pytest has set it, so a crash before
+  that is never reported as success.
 * PySide6 check -- a PySide6 build that drops references to None (PySide6 6.12.0's Linux wheel) makes Python 3.11
   abort part-way through the GUI tests; the run stops at once with an explanation instead (see
   ``_pyside_drops_none_refs``).
@@ -32,7 +33,7 @@ def pytest_sessionfinish(session, exitstatus):
 
 
 def _hard_exit() -> bool:
-    return os.environ.get("MRSTUDIO_PYTEST_HARD_EXIT", "1").strip().lower() not in ("0", "false", "no", "off", "")
+    return os.environ.get("MRSTUDIO_PYTEST_HARD_EXIT", "0").strip().lower() not in ("0", "false", "no", "off", "")
 
 
 def _pyside_drops_none_refs() -> bool:
@@ -86,18 +87,20 @@ def qapp():
     app = QtWidgets.QApplication.instance() or QtWidgets.QApplication([])
     yield app
     if _hard_exit():
-        return   # the process ends with os._exit; tearing Qt/GL widgets down here segfaults on some systems
+        return   # the process ends with os._exit right after the terminal summary
+    from shiboken6 import isValid
     widgets = list(app.topLevelWidgets())
     for obj in [app] + widgets:
         for t in obj.findChildren(QtCore.QTimer):
             t.stop()
-    for w in widgets:
-        try:
-            w.close()
-            w.deleteLater()
-        except RuntimeError:   # already deleted on the C++ side
-            pass
-    app.sendPostedEvents(None, QtCore.QEvent.DeferredDelete)
+    for w in widgets:   # the app's quit hooks: worker threads joined, timers stopped, hardware released
+        fn = (getattr(w, "shutdown_pages", None) or getattr(w, "shutdown", None)) if isValid(w) else None
+        if callable(fn):
+            try:
+                fn()
+            except Exception:
+                pass
+    # No close()/deleteLater() of the top-level widgets here (see the module docstring).
     gc.collect()
     app.processEvents()
 

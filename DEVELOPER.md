@@ -15,7 +15,7 @@ Tab indices (`--tab`, 0-13): 0 FK, 1 Velocity, 2 IK, 3 Dynamics, 4 Control, 5 Cl
 8 Parallel, 9 Planning, 10 Haptics, 11 Hardware, 12 Practice, 13 Validation. Keyboard: Ctrl+1...9 jump to tabs 1-9,
 Ctrl+Alt+Left/Right go to the previous/next tab. The tab titles carry circled numbers (1-14), so tab N has title number N+1.
 Tests: `pip install -r requirements.txt -r requirements-dev.txt`, then `QT_QPA_PLATFORM=offscreen python -m pytest -q`.
-Set `MRSTUDIO_PYTEST_HARD_EXIT=0` to let pytest exit normally (the default hard `os._exit` works around a Qt teardown segfault, see `tests/conftest.py`).
+`MRSTUDIO_NO_GUI_TESTS=1` skips the GUI tests; `MRSTUDIO_PYTEST_HARD_EXIT=1` ends the run with `os._exit` (old teardown workaround, off by default). On Linux, PySide6 6.12.0's wheel aborts Python 3.11 (`none_dealloc`); use PySide6 6.11.3 there, as CI does (see `tests/conftest.py`).
 Tests that compare with the course materials look for them at `MRSTUDIO_COURSE_SHARED` (course_robots.py) and `MRSTUDIO_COURSE_SRC`.
 Course robots (SBEG 361/461) live in `mrstudio/course_models.py`; hardware drivers in `mrstudio/hardware/`; installers in `packaging/`.
 Look at the PNG with the Read tool. A broken tab shows its traceback inside the tab (see `gui/app.py`).
