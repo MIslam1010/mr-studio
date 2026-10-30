@@ -179,6 +179,7 @@ jobs:
       # ---- validate the FROZEN app (not the source tree): a missing library or data file shows up here ----
       - name: Validate frozen app (Windows)
         if: runner.os == 'Windows'
+        timeout-minutes: 15
         shell: pwsh
         run: |
           $exe = Join-Path $PWD "packaging\dist\MRStudio\MRStudio.exe"
@@ -189,11 +190,13 @@ jobs:
 
       - name: Validate frozen app (macOS)
         if: runner.os == 'macOS'
+        timeout-minutes: 15
         run: |
           "packaging/dist/MR Studio.app/Contents/MacOS/MRStudio" --validate --report "packaging/dist/validate-macOS.txt"
           tail -n 15 "packaging/dist/validate-macOS.txt"
 
       - name: Screenshot smoke test of the frozen app (14 tabs)
+        timeout-minutes: 15
         shell: pwsh
         run: |
           $dir = Join-Path $PWD "packaging/dist/screenshots-${{ runner.os }}"

@@ -69,6 +69,12 @@ def _ensure_streams() -> None:
             faulthandler.enable(file=_open_log(), all_threads=True)
         except (OSError, RuntimeError, ValueError):
             pass
+    # A Windows console is cp1252: one "→" in a check name would raise UnicodeEncodeError mid-report.
+    for stream in (sys.stdout, sys.stderr):
+        try:
+            stream.reconfigure(errors="replace")
+        except (AttributeError, ValueError):
+            pass
     if sys.stdout is not None and sys.stderr is not None:
         return
     log = _open_log()
