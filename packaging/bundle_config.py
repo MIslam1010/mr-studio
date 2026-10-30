@@ -79,7 +79,7 @@ OPTIONAL_HIDDEN_IMPORTS = [
 # Windows it comes from conda-forge. Map: pip distribution in requirements.txt -> conda-forge spec.
 # PySide6 also comes from conda-forge on Windows: pip's PySide6 wheels clash with the Qt/ICU/MSVC runtime DLLs that
 # conda puts on PATH ("DLL load failed while importing QtCore: The specified procedure could not be found").
-CONDA_ON_WINDOWS = {"pin": "pinocchio=4.1.0", "PySide6": "pyside6=6.12.*"}
+CONDA_ON_WINDOWS = {"pin": "pinocchio=4.1.0", "PySide6": "pyside6=6.11.*"}   # conda-forge has no 6.12 yet (Oct 2026); macOS uses PySide6 6.12.0 from PyPI
 
 # Package data. (package, include-globs relative to the package dir). Python sources are never listed.
 DATA_PACKAGES = [

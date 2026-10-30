@@ -233,7 +233,7 @@ def test_build_inputs_are_pinned():
     build = (PKG / "requirements-build.txt").read_text(encoding="utf-8")
     for name in ("pyinstaller", "pyinstaller-hooks-contrib"):
         assert re.search(rf"^{name}==\d", build, re.M), f"{name} must be pinned exactly"
-    assert cfg.CONDA_ON_WINDOWS["PySide6"] == "pyside6=6.12.*"
+    assert cfg.CONDA_ON_WINDOWS["PySide6"] == "pyside6=6.11.*"
 
 
 def test_version_is_consistent():
@@ -304,7 +304,7 @@ def test_windows_requirements_drop_conda_packages(tmp_path):
     assert sorted(d.split("==")[0].strip() for d in dropped) == ["PySide6", "pin"]
     kept = dst.read_text(encoding="utf-8")
     assert "pin==" not in kept and "modern-robotics==" in kept and "pyside6==" not in kept.lower()
-    assert "pinocchio=4.1.0" in cfg.CONDA_ON_WINDOWS.values() and "pyside6=6.12.*" in cfg.CONDA_ON_WINDOWS.values()
+    assert "pinocchio=4.1.0" in cfg.CONDA_ON_WINDOWS.values() and "pyside6=6.11.*" in cfg.CONDA_ON_WINDOWS.values()
     pin_req = re.search(r"^pin==(\S+)", (ROOT / "requirements.txt").read_text(encoding="utf-8"), re.M).group(1)
     assert cfg.CONDA_ON_WINDOWS["pin"] == f"pinocchio={pin_req}", "conda-forge Pinocchio must match requirements.txt"
 
