@@ -32,6 +32,20 @@ def _hard_exit() -> bool:
     return os.environ.get("MRSTUDIO_PYTEST_HARD_EXIT", "1").strip().lower() not in ("0", "false", "no", "off", "")
 
 
+def pytest_collection_modifyitems(config, items):
+    """MRSTUDIO_NO_GUI_TESTS=1 skips every test that needs a QApplication (the ``qapp`` fixture).
+
+    Used by the Linux CI job: Mesa's software OpenGL under Xvfb aborts when a 3-D view redraws. The GUI tests run
+    on the Windows and macOS build jobs instead, which are the platforms students use.
+    """
+    if os.environ.get("MRSTUDIO_NO_GUI_TESTS", "").strip() not in ("1", "true", "yes"):
+        return
+    skip = pytest.mark.skip(reason="GUI test (MRSTUDIO_NO_GUI_TESTS=1)")
+    for item in items:
+        if "qapp" in getattr(item, "fixturenames", ()):
+            item.add_marker(skip)
+
+
 @pytest.fixture(scope="session")
 def qapp():
     """Shared QApplication for all GUI tests (a module-level fixture of the same name overrides it locally)."""

@@ -111,6 +111,7 @@ class PracticeTab(BaseTab):
         self.exp_key_cb = checkbox("Also write a Markdown answer key", None, False)
         self.exp_lbl = value_label()
         self.exp_lbl.setObjectName("muted")
+        theme.notifier().projector_changed.connect(self._retone)
         pandoc = P.find_pandoc()
         self.exp_doc_btn.setToolTip(f"pandoc: {pandoc}" if pandoc else
                                     "pandoc not found — a Markdown file with solutions is written instead")
@@ -150,6 +151,16 @@ class PracticeTab(BaseTab):
         self.generate()
 
     # ------------------------------------------------------------------ state
+
+    def _tone(self, lbl, tone):
+        """Colour a label with the current palette's good/warn/bad colour (None = default)."""
+        lbl.setProperty("tone", tone)
+        lbl.setStyleSheet(f"color:{getattr(theme, tone + '_color')()}" if tone else "")
+
+    def _retone(self, *_):
+        for lbl in (self.exp_lbl,):
+            self._tone(lbl, lbl.property("tone"))
+
     def topic_key(self) -> str:
         i = self.topic.currentIndex()
         return P.MIXED if i == 0 else P.TOPIC_KEYS[i - 1]
@@ -322,7 +333,7 @@ class PracticeTab(BaseTab):
         return fn
 
     def _report(self, files, note=""):
-        self.exp_lbl.setStyleSheet(f"color:{theme.GOOD}")
+        self._tone(self.exp_lbl, "good")
         self.exp_lbl.setText(f"Wrote {len(files)} file(s){note}:\n" + "\n".join(os.path.basename(f) for f in files))
 
     def _export_md_dialog(self):
@@ -345,7 +356,7 @@ class PracticeTab(BaseTab):
             return
         for b in (self.exp_md_btn, self.exp_doc_btn):
             b.setEnabled(False)
-        self.exp_lbl.setStyleSheet("")
+        self._tone(self.exp_lbl, None)
         self.exp_lbl.setText("Exporting…")
         w = _ExportWorker(fn, self)
         w.done.connect(lambda files: self._report(files, note))
@@ -355,7 +366,7 @@ class PracticeTab(BaseTab):
         w.start()
 
     def _export_failed(self, msg):     # pandoc missing / failed / disk error -> show it, don't crash the app
-        self.exp_lbl.setStyleSheet(f"color:{theme.BAD}")
+        self._tone(self.exp_lbl, "bad")
         self.exp_lbl.setText(f"Export failed: {msg}")
 
     def _export_finished(self):

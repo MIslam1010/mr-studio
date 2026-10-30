@@ -74,8 +74,9 @@ class FKTab(BaseTab):
         self.T_view = MatrixView(4, 4, 4)
         self.pose_lbl = value_label()
         self.check_lbl = value_label()
-        self.check_lbl.setStyleSheet(f"color:{theme.GOOD}")
+        self._tone(self.check_lbl, "good")
         self.screw_lbl = value_label()
+        theme.notifier().projector_changed.connect(self._retone)
 
         controls = QtWidgets.QWidget()
         cl = QtWidgets.QVBoxLayout(controls)
@@ -110,6 +111,16 @@ class FKTab(BaseTab):
         self.on_robot_changed(self.ctx.robot)
 
     # ------------------------------------------------------------------ robot
+
+    def _tone(self, lbl, tone):
+        """Colour a label with the current palette's good/warn/bad colour (None = default)."""
+        lbl.setProperty("tone", tone)
+        lbl.setStyleSheet(f"color:{getattr(theme, tone + '_color')()}" if tone else "")
+
+    def _retone(self, *_):
+        for lbl in (self.check_lbl,):
+            self._tone(lbl, lbl.property("tone"))
+
     def on_robot_changed(self, robot):
         if self.graphic is not None:
             self.graphic.remove()

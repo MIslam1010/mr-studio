@@ -182,8 +182,9 @@ class VelocityTab(BaseTab):
         self.cb_vel = checkbox("Draw ṗ (green) and ω_s (violet) at the end-effector", self.update_scene, True)
         self.twist_tab = MatrixView(2, 6, 2, row_labels=["V_s", "V_b"], col_labels=TWIST_ROWS)
         self.twist_lbl = value_label()
+        theme.notifier().projector_changed.connect(self._retone)
         self.twist_chk = value_label()
-        self.twist_chk.setStyleSheet(f"color:{theme.GOOD}")
+        self._tone(self.twist_chk, "good")
 
         # ---------------------------------------------------------------- statics
         self.f_spins = [spin(-500, 500, 0, 1, 5, " N") for _ in range(3)]
@@ -205,7 +206,7 @@ class VelocityTab(BaseTab):
         self.f_cap.setObjectName("muted")
         self.f_cap.setWordWrap(True)
         self.tau_chk = value_label()
-        self.tau_chk.setStyleSheet(f"color:{theme.GOOD}")
+        self._tone(self.tau_chk, "good")
 
         # ---------------------------------------------------------------- singularity tolerance
         self.tol_spin = spin(1e-4, 0.2, 0.01, 4, 0.005)
@@ -281,7 +282,7 @@ class VelocityTab(BaseTab):
         jt.addTab(self.Js_view, "Space Jacobian J_s(θ)  (Eq. 5.11)")
         jt.addTab(self.Jb_view, "Body Jacobian J_b(θ)  (Eq. 5.18)")
         self.jac_chk = value_label()
-        self.jac_chk.setStyleSheet(f"color:{theme.GOOD}")
+        self._tone(self.jac_chk, "good")
         jw = QtWidgets.QWidget()
         jl = QtWidgets.QVBoxLayout(jw)
         jl.setContentsMargins(0, 0, 0, 0)
@@ -327,6 +328,16 @@ class VelocityTab(BaseTab):
         self.on_robot_changed(self.ctx.robot)
 
     # ================================================================== robot / state
+
+    def _tone(self, lbl, tone):
+        """Colour a label with the current palette's good/warn/bad colour (None = default)."""
+        lbl.setProperty("tone", tone)
+        lbl.setStyleSheet(f"color:{getattr(theme, tone + '_color')()}" if tone else "")
+
+    def _retone(self, *_):
+        for lbl in (self.twist_chk, self.tau_chk, self.jac_chk):
+            self._tone(lbl, lbl.property("tone"))
+
     def on_robot_changed(self, robot):
         self._stop_timers()
         self._cancel_workspace()

@@ -73,10 +73,13 @@ jobs:
       - name: Lint (syntax errors and undefined names)
         run: ruff check .
 
+      # Numerical and non-window tests only: Mesa's software OpenGL under Xvfb aborts when a 3-D view redraws.
+      # Every GUI test runs on the Windows and macOS build jobs below (the platforms students use).
       - name: Run tests
         env:
           QT_QPA_PLATFORM: xcb
           LIBGL_ALWAYS_SOFTWARE: "1"
+          MRSTUDIO_NO_GUI_TESTS: "1"
         run: xvfb-run -a -s "-screen 0 1920x1080x24" python -m pytest -q -ra --durations=15
 
   build:

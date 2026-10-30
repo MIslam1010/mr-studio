@@ -271,6 +271,7 @@ class HardwareTab(BaseTab):
         self.calib_save_btn = button("Save calibration", lambda: self.save_calibration())
         self.calib_lbl = value_label()
         self.calib_lbl.setTextInteractionFlags(QtCore.Qt.TextSelectableByMouse)
+        theme.notifier().projector_changed.connect(self._retone)
 
         controls = QtWidgets.QWidget()
         cl = QtWidgets.QVBoxLayout(controls)
@@ -371,6 +372,16 @@ class HardwareTab(BaseTab):
         self._update_buttons()
 
     # ================================================================== scene
+
+    def _tone(self, lbl, tone):
+        """Colour a label with the current palette's good/warn/bad colour (None = default)."""
+        lbl.setProperty("tone", tone)
+        lbl.setStyleSheet(f"color:{getattr(theme, tone + '_color')()}" if tone else "")
+
+    def _retone(self, *_):
+        for lbl in (self.conn_lbl, self.calib_lbl, self.ready_lbl):
+            self._tone(lbl, lbl.property("tone"))
+
     def _draw_keepout(self):
         r = self.sup.keepout_radius
         a = np.linspace(0, 2 * np.pi, 121)
@@ -395,10 +406,10 @@ class HardwareTab(BaseTab):
         if not sim and not sdk_available() and self.sdk_factory is None:
             self.conn_lbl.setText("pymycobot is not installed — install it with "
                                   "<tt>.venv/bin/python -m pip install pymycobot</tt> (or use the Simulated back-end).")
-            self.conn_lbl.setStyleSheet(f"color:{theme.WARN}")
+            self._tone(self.conn_lbl, "warn")
         elif not connected:
             self.conn_lbl.setText("not connected")
-            self.conn_lbl.setStyleSheet("")
+            self._tone(self.conn_lbl, None)
 
     def _is_mycobot(self) -> bool:
         return isinstance(self.driver, MyCobotDriver)
@@ -436,7 +447,7 @@ class HardwareTab(BaseTab):
             except Exception:
                 pass
             self.conn_lbl.setText(str(e).replace("\n", "<br>"))
-            self.conn_lbl.setStyleSheet(f"color:{theme.BAD}")
+            self._tone(self.conn_lbl, "bad")
             self.connect_btn.blockSignals(True)
             self.connect_btn.setChecked(False)
             self.connect_btn.blockSignals(False)
@@ -450,12 +461,12 @@ class HardwareTab(BaseTab):
         where = f" on {drv.port} at {drv.baud} baud" if hasattr(drv, "port") else ""
         self._event("connect", f"{drv.name}{where}")
         self.conn_lbl.setText(f"connected: {drv.name}{where}")
-        self.conn_lbl.setStyleSheet(f"color:{theme.GOOD}")
+        self._tone(self.conn_lbl, "good")
         if getattr(drv, "offset_calibrated", True) is False:
             self.conn_lbl.setText(self.conn_lbl.text() + f"<br>⚠ no calibration file ({self.calib_path}): the "
                                   "servo signs and zero offsets are unknown, so Run is blocked. Compare the measured "
                                   "pose with the 3-D view, set the signs and offsets below and Save.")
-            self.conn_lbl.setStyleSheet(f"color:{theme.WARN}")
+            self._tone(self.conn_lbl, "warn")
         self.connect_btn.blockSignals(True)
         self.connect_btn.setChecked(True)
         self.connect_btn.setText("Disconnect")
@@ -548,14 +559,14 @@ class HardwareTab(BaseTab):
                 cb.setChecked(bool(sg < 0))
                 sp.setValue(float(off))
             self.calib_lbl.setText(f"Loaded {self.calib_path}")
-            self.calib_lbl.setStyleSheet("")
+            self._tone(self.calib_lbl, None)
         elif Path(self.calib_path).exists():
             self.calib_lbl.setText(f"✗ {self.calib_path} is unreadable — fix the values and Save.")
-            self.calib_lbl.setStyleSheet(f"color:{theme.BAD}")
+            self._tone(self.calib_lbl, "bad")
         else:
             self.calib_lbl.setText(f"No calibration file yet ({self.calib_path}). Run on the myCobot is blocked "
                                    "until the signs and offsets are commissioned and saved.")
-            self.calib_lbl.setStyleSheet(f"color:{theme.WARN}")
+            self._tone(self.calib_lbl, "warn")
 
     def save_calibration(self, path: str | None = None) -> bool:
         """Write the calibration of the UI to the JSON file and apply it to a connected myCobot."""
@@ -568,10 +579,10 @@ class HardwareTab(BaseTab):
             cal.save(self.calib_path)
         except (OSError, ValueError) as e:
             self.calib_lbl.setText(f"✗ could not save: {e}")
-            self.calib_lbl.setStyleSheet(f"color:{theme.BAD}")
+            self._tone(self.calib_lbl, "bad")
             return False
         self.calib_lbl.setText(f"Saved {self.calib_path}")
-        self.calib_lbl.setStyleSheet(f"color:{theme.GOOD}")
+        self._tone(self.calib_lbl, "good")
         self._event("calibration", f"saved {self.calib_path}: sign {cal.sign.astype(int).tolist()}, "
                                    f"offset {cal.offset_deg.tolist()} deg")
         if self._is_mycobot():
@@ -622,7 +633,7 @@ class HardwareTab(BaseTab):
         ok = n_ok == len(self.check_boxes) and not self.sup.static_problems()
         self.ready_lbl.setText(f"{n_ok} of {len(self.check_boxes)} confirmed — " +
                                ("ready to run" if ok else "Run is blocked until every item is ticked"))
-        self.ready_lbl.setStyleSheet(f"color:{theme.GOOD if ok else theme.WARN}")
+        self._tone(self.ready_lbl, "good" if ok else "warn")
         self._update_buttons()
 
     def _update_buttons(self):

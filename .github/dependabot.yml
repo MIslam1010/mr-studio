@@ -1,19 +1,34 @@
 version: 2
+# One grouped pull request per ecosystem and month, so updates arrive as a few reviewable batches instead of one
+# pull request per package. Major versions of Python packages are skipped: the exact pins in requirements.txt are
+# the ones the 510 validation checks were run with, so a major upgrade is a deliberate change, not a routine bump.
 updates:
   - package-ecosystem: github-actions
     directory: /
     schedule:
-      interval: weekly
+      interval: monthly
     groups:
       actions:
         patterns: ["*"]
   - package-ecosystem: pip
     directory: /
     schedule:
-      interval: weekly
-    open-pull-requests-limit: 5
+      interval: monthly
+    groups:
+      python:
+        patterns: ["*"]
+        update-types: ["minor", "patch"]
+    ignore:
+      - dependency-name: "*"
+        update-types: ["version-update:semver-major"]
   - package-ecosystem: pip
     directory: /packaging
     schedule:
-      interval: weekly
-    open-pull-requests-limit: 3
+      interval: monthly
+    groups:
+      build-tools:
+        patterns: ["*"]
+        update-types: ["minor", "patch"]
+    ignore:
+      - dependency-name: "*"
+        update-types: ["version-update:semver-major"]
