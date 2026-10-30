@@ -61,7 +61,7 @@ python-dateutil==2.9.0.post0
 python-discovery==1.6.1
 PyYAML==6.0.3
 robot_descriptions==2.0.0
-roboticstoolbox-python==1.4.4
+roboticstoolbox-python==1.5.0
 rospkg==1.6.3
 rtb-data==2.0.0
 scipy==1.17.1
