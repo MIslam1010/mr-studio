@@ -12,7 +12,7 @@ from .. import theme
 from ..base import BaseTab
 from ..jobs import JobRunner
 from ..viewer import SceneView
-from ..widgets import (MatrixView, SliderRow, button, checkbox, combo, group, hbox, plot, spin,
+from ..widgets import (_sub, MatrixView, SliderRow, button, checkbox, combo, group, hbox, plot, spin,
                        value_label)
 from .closed_anim import ClosedAnimMixin
 from .closed_common import CURVE, FOUR_PRESETS, LINK_COLS, _break_jumps, _deg, _wrapped  # noqa: F401
@@ -493,7 +493,3 @@ class ClosedChainTab(ClosedDrawMixin, ClosedPlotsMixin, ClosedAnimMixin, BaseTab
         parent = getattr(super(), "shutdown", None)
         if parent is not None:
             parent()
-
-
-def _sub(i: int) -> str:
-    return str(i).translate(str.maketrans("0123456789", "₀₁₂₃₄₅₆₇₈₉"))

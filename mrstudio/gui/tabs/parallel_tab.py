@@ -14,7 +14,7 @@ from .. import theme
 from ..base import BaseTab
 from ..jobs import JobRunner
 from ..viewer import SceneView
-from ..widgets import (MatrixView, SliderRow, button, checkbox, combo, group, hbox, pen, plot, spin,
+from ..widgets import (_sub, MatrixView, SliderRow, button, checkbox, combo, group, hbox, pen, plot, spin,
                        value_label)
 
 THEORY = r"""
@@ -75,10 +75,6 @@ THEORY += further_reading([
 
 RPR_COLS = [theme.SERIES[0], theme.SERIES[1], theme.SERIES[2]]
 GHOST_HUES = 6
-
-
-def _sub(i: int) -> str:
-    return str(i).translate(str.maketrans("0123456789", "₀₁₂₃₄₅₆₇₈₉"))
 
 
 def _page(*widgets):

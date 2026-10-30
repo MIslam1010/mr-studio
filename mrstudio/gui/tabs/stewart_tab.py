@@ -13,7 +13,7 @@ from .. import theme
 from ..base import BaseTab
 from ..jobs import JobRunner
 from ..viewer import SceneView
-from ..widgets import (MatrixView, SliderRow, button, checkbox, combo, group, hbox, pen, plot, spin,
+from ..widgets import (_sub, MatrixView, SliderRow, button, checkbox, combo, group, hbox, pen, plot, spin,
                        value_label)
 
 THEORY = r"""
@@ -578,7 +578,3 @@ class StewartTab(BaseTab):
         self.push_cursor.setValue(sim["t"][k])
         self.fk_lbl.setText(f"Push simulation: t = {sim['t'][k]:.2f} s (shown at half speed)")
         self._update()
-
-
-def _sub(i: int) -> str:
-    return str(i).translate(str.maketrans("0123456789", "₀₁₂₃₄₅₆₇₈₉"))

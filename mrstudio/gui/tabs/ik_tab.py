@@ -14,18 +14,13 @@ from .. import theme
 from ..base import BaseTab
 from ..jobs import JobRunner
 from ..viewer import RobotGraphic, SceneView
-from ..widgets import SliderRow
+from ..widgets import _sub, SliderRow
 from .ik_math import (_TASK_DIM, _deg, _fmt_theta, _redundancy, _task, _textbook_planar, analytic_vs_numeric_lines,
                       circle_frame, cross_check_lines, iterate_rows, pose_from_rows, redundancy_text, robust_ik,
                       self_motion_step, spread_samples, target_label_text, target_row_spec, target_row_values)
 from .ik_panels import TOLS, _fit_table, _ghost, _rgba, build_panels, plot_convergence
 from .ik_theory import THEORY
 
-_SUB = str.maketrans("0123456789", "₀₁₂₃₄₅₆₇₈₉")
-
-
-def _sub(i: int) -> str:
-    return str(i).translate(_SUB)
 
 
 class IKTab(BaseTab):

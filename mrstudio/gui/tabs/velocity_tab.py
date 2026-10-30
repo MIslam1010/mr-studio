@@ -14,18 +14,13 @@ from .. import theme
 from ..base import BaseTab
 from ..jobs import JobRunner
 from ..viewer import RobotGraphic, SceneView
-from ..widgets import (JointSliders, MatrixView, button, checkbox, combo, group, hbox, plot, spin,
+from ..widgets import (_sub, JointSliders, MatrixView, button, checkbox, combo, group, hbox, plot, spin,
                        value_label)
 
 TWIST_ROWS = ["ωx", "ωy", "ωz", "vx", "vy", "vz"]
 MIXED_LABELS = ["ωx", "ωy", "ωz", "vx", "vy", "vz"]   # EE-centred, {s}-aligned axes
-_SUB = str.maketrans("0123456789", "₀₁₂₃₄₅₆₇₈₉")
 _CMAP = colormaps["plasma"]
 _CMAP_RANGE = (0.12, 0.98)          # skip the near-black end (dark background)
-
-
-def _sub(i: int) -> str:
-    return str(i).translate(_SUB)
 
 
 def _vec(v, d=3) -> str:
