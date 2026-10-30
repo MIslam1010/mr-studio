@@ -11,6 +11,7 @@ from ...references import further_reading
 from ... import parallel as par
 from .. import theme
 from ..base import BaseTab
+from ..jobs import JobRunner
 from ..viewer import SceneView
 from ..widgets import (MatrixView, SliderRow, button, checkbox, combo, group, hbox, pen, plot, spin,
                        value_label)
@@ -102,6 +103,8 @@ class StewartTab(BaseTab):
         self.view = SceneView()
         self.sols: list = []
         self._dance_k = 0
+        self.fk_jobs = JobRunner(self)          # "all FK solutions" search (background)
+        self.push_jobs = JobRunner(self)        # push forward-dynamics simulation (background)
 
         self.mode_box = combo(["Inverse kinematics: pose → leg lengths", "Forward kinematics: leg lengths → pose"])
         self.mode_box.currentIndexChanged.connect(self._mode_changed)
@@ -216,6 +219,9 @@ class StewartTab(BaseTab):
         self.push_timer = QtCore.QTimer(self)
         self.push_timer.timeout.connect(self._push_step)
         self.push_sim = None
+        app = QtWidgets.QApplication.instance()
+        if app is not None and not hasattr(BaseTab, "shutdown"):   # older BaseTab without the quit hook
+            app.aboutToQuit.connect(self.shutdown)
         self.view.frame_scene(0.72, planar=False, center=(0, 0, 0.3))
         self._mode_changed(0)
         self._prepare_dance()
@@ -282,7 +288,8 @@ class StewartTab(BaseTab):
 
     def _update(self):
         sp, T = self.sp, self.T
-        f = sp.leg_forces(T, self._payload(T))
+        chk = sp.leg_forces_checked(T, self._payload(T))      # flags kappa > 1e6 (Type-II singularity)
+        f = chk.value
         det, kappa = sp.singularity(T)
         det0 = sp.singularity(sp.T_home)[0]
         rel = det / det0
@@ -298,7 +305,9 @@ class StewartTab(BaseTab):
                               f"roll/pitch/yaw = ({np.degrees(pv[3]):+.1f}°, {np.degrees(pv[4]):+.1f}°, "
                               f"{np.degrees(pv[5]):+.1f}°)\n"
                               f"det(Jn) = {det:+.3f} ({rel:.2f} × home)\ncond(Jn) = {kappa:.1f}")
-        if abs(rel) < 0.1 or kappa > 60:
+        if chk.warning:
+            txt, col = chk.warning, theme.BAD
+        elif abs(rel) < 0.1 or kappa > 60:
             txt, col = "⚠ Close to an actuator (Type II) singularity: det J → 0, leg forces blow up", theme.BAD
         elif abs(rel) < 0.35 or kappa > 20:
             txt, col = "Poorly conditioned pose (κ large)", theme.WARN
@@ -353,20 +362,32 @@ class StewartTab(BaseTab):
         if on:
             self._solve_all()
         else:
+            self.fk_jobs.cancel()
             self.sols = []
             self.all_lbl.setText("")
             self.view.remove_prefix("sg.ghost")
 
     def _solve_all(self):
+        """Search all assembly modes for the current leg lengths in a background thread; a newer request
+        (leg lengths changed) supersedes the running one, and a result for other leg lengths is dropped."""
         if not self.cb_all.isChecked():
             return
-        QtWidgets.QApplication.setOverrideCursor(QtCore.Qt.WaitCursor)
-        try:
-            t0 = time.perf_counter()
-            sols = self.sp.fk_all(self.s, n_starts=150, seed=0, include=self.T)
-            dt = time.perf_counter() - t0
-        finally:
-            QtWidgets.QApplication.restoreOverrideCursor()
+        s_req, T_req, sp = self.s.copy(), self.T.copy(), self.sp
+        t0 = time.perf_counter()
+
+        def job(progress, cancelled):
+            return sp.fk_all(s_req, n_starts=150, seed=0, include=T_req, cancelled=cancelled, progress=progress)
+
+        self.all_lbl.setText("searching for all assembly modes (background thread) …")
+        self.fk_jobs.run(job, on_done=lambda sols: self._all_done(s_req, sols, time.perf_counter() - t0),
+                         on_error=lambda e: self.all_lbl.setText("FK search failed:\n" + e.strip().splitlines()[-1]),
+                         on_progress=lambda f: self.all_lbl.setText(
+                             f"searching for all assembly modes (background thread) … {100 * f:.0f} %"),
+                         label="FK solutions")
+
+    def _all_done(self, s_req, sols, dt):
+        if not self.cb_all.isChecked() or not np.allclose(s_req, self.s, atol=1e-12):
+            return                                       # leg lengths changed meanwhile: a new search follows
         self.sols = [S for S in sols if np.abs(S - self.T).max() > 1e-6]
         n_up = sum(1 for S in sols if S[2, 3] > 0)
         self.all_lbl.setText(f"{len(sols)} distinct real solutions of s(T) = s from 150 random starts "
@@ -445,6 +466,19 @@ class StewartTab(BaseTab):
     def on_hide(self):
         self._stop_dance()
         self._stop_push()
+        if self.fk_jobs.is_busy():                       # restarted by the next pose change / toggle
+            self.fk_jobs.cancel()
+            self.all_lbl.setText("")
+
+    def shutdown(self):
+        """Application quit: stop timers, cancel both background jobs (brief waits only)."""
+        self.timer.stop()
+        self.push_timer.stop()
+        self.fk_jobs.shutdown(500)
+        self.push_jobs.shutdown(500)
+        parent = getattr(super(), "shutdown", None)
+        if parent is not None:
+            parent()
 
     # ================================================================ dynamics
     def _body(self):
@@ -473,20 +507,38 @@ class StewartTab(BaseTab):
         self.push_btn.setText("■ Stop" if on else "▶ Simulate push")
         if not on:
             self.push_timer.stop()
+            if self.push_jobs.is_busy():
+                self.push_jobs.cancel()
+                self.push_lbl.setText("simulation cancelled")
             return
         self._stop_dance()
         if self.mode_box.currentIndex() != 0:
             self.mode_box.setCurrentIndex(0)
         dur = self.push_dur.value()
-        QtWidgets.QApplication.setOverrideCursor(QtCore.Qt.WaitCursor)
-        try:
-            t0 = time.perf_counter()
-            sim = self.sp.push_simulation(self._body(), leg=self.push_leg.currentIndex(), df=self.push_df.value(),
-                                          t_pulse=(0.1, 0.1 + dur), t_final=2.5, h=0.004,
-                                          servo=self.cb_servo.isChecked())
-            ms = (time.perf_counter() - t0) * 1e3
-        finally:
-            QtWidgets.QApplication.restoreOverrideCursor()
+        sp, body = self.sp, self._body()
+        leg, df, servo = self.push_leg.currentIndex(), self.push_df.value(), self.cb_servo.isChecked()
+        t0 = time.perf_counter()
+
+        def job(progress, cancelled):
+            return sp.push_simulation(body, leg=leg, df=df, t_pulse=(0.1, 0.1 + dur), t_final=2.5, h=0.004,
+                                      servo=servo, cancelled=cancelled, progress=progress)
+
+        self.push_lbl.setStyleSheet("")
+        self.push_lbl.setText("forward dynamics (RK4 on SE(3)) in a background thread …")
+        self.push_jobs.run(job, on_done=lambda sim: self._push_ready(sim, dur, servo, time.perf_counter() - t0),
+                           on_error=self._push_failed,
+                           on_progress=lambda f: self.push_lbl.setText(
+                               f"forward dynamics (RK4 on SE(3)) in a background thread … {100 * f:.0f} %"),
+                           label="push simulation")
+
+    def _push_failed(self, err):
+        self.push_lbl.setText("simulation failed:\n" + err.strip().splitlines()[-1])
+        self._stop_push()
+
+    def _push_ready(self, sim, dur, servo, seconds):
+        if not self.push_btn.isChecked():
+            return
+        ms = seconds * 1e3
         self.push_sim = sim
         ds = (sim["s"] - sim["s"][0]) * 1e3
         self.pPush.clear()
@@ -497,7 +549,7 @@ class StewartTab(BaseTab):
         self.push_cursor = self.pPush.addLine(x=0, pen=pg.mkPen(theme.WARN, width=1))
         self.bottom_tabs.setCurrentIndex(1)
         stopped = sim["t"][-1] < 2.5 - 1e-9
-        mode = "PD servo" if self.cb_servo.isChecked() else "open loop"
+        mode = "PD servo" if servo else "open loop"
         txt = f"{mode}: {len(sim['t'])} RK4 steps (h = 4 ms) in {ms:.0f} ms; max |Δs| = {np.abs(ds).max():.1f} mm"
         if stopped:
             txt += f"\n⚠ stopped at t = {sim['t'][-1]:.2f} s: a leg left its stroke (unstable without feedback)"

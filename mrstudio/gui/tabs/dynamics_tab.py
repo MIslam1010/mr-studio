@@ -1,13 +1,12 @@
 """Tab 4 -- inverse and forward dynamics of open chains (MR Ch. 8).
 
-Also hosts two small helpers shared with the control tab:
-  * Worker  -- QThread running a long computation with progress / cancel (keeps the UI responsive)
-  * Player  -- QTimer playback of a precomputed time series (play/pause, time slider, speed)
+Re-exports helpers shared with the control tabs (defined in gui/jobs.py and gui/widgets.py):
+  * AsyncMixin -- one background job per tab (JobRunner), progress bar + cancel, stale results dropped
+  * Player     -- QTimer playback of a precomputed time series (play/pause, time slider, speed)
 """
 from __future__ import annotations
 
 import time
-import traceback
 
 import numpy as np
 import pyqtgraph as pg
@@ -16,10 +15,13 @@ from PySide6 import QtCore, QtWidgets
 from ...references import further_reading
 from ... import trajectory as tj
 from ...dynamics import DynamicsEngine, simulate
+from ...robots import get_robot
 from .. import theme
 from ..base import BaseTab
+from ..jobs import AsyncMixin
 from ..viewer import GhostRobot, RobotGraphic, SceneView
-from ..widgets import JointSliders, button, checkbox, combo, group, hbox, pen, plot, spin, value_label
+from ..widgets import (JointSliders, Player, button, checkbox, combo, compact, default_goal, form, group, hbox,
+                       limit_lines, no_si, pen, plot, spin, time_cursor, value_label)
 
 THEORY = r"""
 <h2>Robot dynamics — Newton–Euler &amp; Lagrange</h2>
@@ -57,7 +59,7 @@ The state $(\theta,\dot{\theta})$ is integrated numerically:</p>
 $$\theta_{k+1}=\theta_k+\Delta t\,\dot{\theta}_k,\qquad \dot{\theta}_{k+1}=\dot{\theta}_k+\Delta t\,\ddot{\theta}_k$$
 <p><b>Semi-implicit (symplectic) Euler</b>:</p>
 $$\dot{\theta}_{k+1}=\dot{\theta}_k+\Delta t\,\ddot{\theta}_k,\qquad \theta_{k+1}=\theta_k+\Delta t\,\dot{\theta}_{k+1}$$
-<p>plus classical RK4 and adaptive RK45 (Dormand–Prince 8(5,3), SciPy).</p>
+<p>plus classical RK4 and adaptive RK45 (Dormand–Prince 5(4), SciPy, rtol = 10⁻¹⁰).</p>
 <h3>Energy — a built-in correctness test</h3>
 $$\mathcal{P}=-\sum_i m_i\,g^{T}p_{c_i}(\theta),\qquad \frac{d}{dt}(\mathcal{K}+\mathcal{P})=\dot{\theta}^{T}(\tau-B\dot{\theta})$$
 <p>With $\tau=0$ and no damping the total energy must stay constant: explicit Euler <i>gains</i> energy every step,
@@ -81,257 +83,21 @@ THEORY += further_reading([
 
 
 # ============================================================================ shared helpers
-class Worker(QtCore.QThread):
-    """Run fn(progress, cancelled) in a background thread.  Results come back through queued signals."""
-    progressed = QtCore.Signal(float)
-    done = QtCore.Signal(object)
-    failed = QtCore.Signal(str)
-
-    def __init__(self, fn, parent=None):
-        super().__init__(parent)
-        self.fn = fn
-        self._cancel = False
-
-    def cancel(self):
-        self._cancel = True
-
-    def run(self):
-        try:
-            res = self.fn(self.progressed.emit, lambda: self._cancel)
-        except Exception:
-            self.failed.emit(traceback.format_exc())
-            return
-        self.done.emit(res)
-
-
-class AsyncMixin:
-    """One background job at a time, with a progress bar and a cancel button."""
-
-    def _init_async(self):
-        self.worker: Worker | None = None
-        self.progress = QtWidgets.QProgressBar()
-        self.progress.setRange(0, 1000)
-        self.progress.setTextVisible(True)
-        self.progress.setMaximumHeight(16)
-        self.cancel_btn = button("Cancel", self._cancel_job)
-        self.busy_row = QtWidgets.QWidget()
-        lay = QtWidgets.QHBoxLayout(self.busy_row)
-        lay.setContentsMargins(0, 0, 0, 0)
-        lay.addWidget(self.progress, 1)
-        lay.addWidget(self.cancel_btn)
-        self.busy_row.setVisible(False)
-        self._job_gen = 0
-
-    def run_async(self, label: str, fn, on_done):
-        """fn(progress, cancelled) runs in a QThread; on_done(result) runs in the GUI thread."""
-        if self.worker is not None and self.worker.isRunning():
-            self.worker.cancel()
-            self.worker.wait(3000)
-        self._job_gen += 1
-        gen = self._job_gen
-        w = Worker(fn, self)
-        w.progressed.connect(lambda f: self.progress.setValue(int(1000 * f)))
-        w.done.connect(lambda res: self._job_done(gen, res, on_done))
-        w.failed.connect(lambda err: self._job_failed(gen, err))
-        w.finished.connect(lambda: self._job_finished(gen))
-        self.progress.setValue(0)
-        self.progress.setFormat(label + "  %p%")
-        self.busy_row.setVisible(True)
-        self.worker = w
-        w.start()
-
-    def wait_job(self, timeout_s: float = 120.0):
-        """Block (processing events) until the current job finished -- used by scripted tests."""
-        app = QtWidgets.QApplication.instance()
-        t0 = time.time()
-        while self.worker is not None and (self.worker.isRunning() or self.busy_row.isVisible()):
-            app.processEvents()
-            time.sleep(0.005)
-            if time.time() - t0 > timeout_s:
-                raise TimeoutError("background job did not finish")
-        app.processEvents()
-
-    def _job_done(self, gen, res, on_done):
-        if gen != self._job_gen:
-            return
-        try:
-            on_done(res)
-        except Exception:
-            self._job_failed(gen, traceback.format_exc())
-
-    def _job_failed(self, gen, err):
-        if gen != self._job_gen:
-            return
-        print(err)
-        self.status(f"⚠ computation failed: {err.strip().splitlines()[-1]}", theme.BAD)
-
-    def _job_finished(self, gen):
-        if gen == self._job_gen:
-            self.busy_row.setVisible(False)
-
-    def _cancel_job(self):
-        if self.worker is not None:
-            self.worker.cancel()
-
-    def cancel_jobs(self):
-        self._job_gen += 1
-        if self.worker is not None and self.worker.isRunning():
-            self.worker.cancel()
-            self.worker.wait(3000)
-        self.busy_row.setVisible(False)
-
-    def status(self, text, color=None):  # overridden
-        pass
-
-
-class Player(QtCore.QObject):
-    """Plays back a precomputed time series in real time (QTimer, 30 ms) -- emits frame(index)."""
-    frame = QtCore.Signal(int)
-    SPEEDS = ["0.1×", "0.25×", "0.5×", "1×", "2×"]
-
-    def __init__(self, parent=None):
-        super().__init__(parent)
-        self.t = np.zeros(1)
-        self.k = 0
-        self._t_sim = 0.0
-        self._t_wall = 0.0
-        self.timer = QtCore.QTimer(self)
-        self.timer.setInterval(30)
-        self.timer.timeout.connect(self._tick)
-        self.btn = button("▶ Play", self._toggled, checkable=True)
-        self.slider = QtWidgets.QSlider(QtCore.Qt.Horizontal)
-        self.slider.setRange(0, 0)
-        self.slider.valueChanged.connect(self._seek)
-        self.speed = combo(self.SPEEDS)
-        self.speed.setCurrentText("1×")
-        self.loop = checkbox("loop", checked=True)
-        self.lbl = value_label("no motion computed yet")
-        self.widget = QtWidgets.QWidget()
-        v = QtWidgets.QVBoxLayout(self.widget)
-        v.setContentsMargins(0, 0, 0, 0)
-        v.addLayout(hbox(self.btn, QtWidgets.QLabel("speed"), self.speed, self.loop, None))
-        v.addWidget(self.slider)
-        v.addWidget(self.lbl)
-
-    def set_times(self, t, autoplay: bool = True):
-        self.t = np.asarray(t, float)
-        self.slider.blockSignals(True)
-        self.slider.setRange(0, len(self.t) - 1)
-        self.slider.setValue(0)
-        self.slider.blockSignals(False)
-        self._t_sim = 0.0
-        self.set_index(0)
-        if autoplay:
-            if self.btn.isChecked():
-                self._t_wall = time.perf_counter()
-            else:
-                self.btn.setChecked(True)
-
-    def playing(self) -> bool:
-        return self.btn.isChecked()
-
-    def stop(self):
-        if self.btn.isChecked():
-            self.btn.setChecked(False)
-
-    def _toggled(self, on):
-        self.btn.setText("❚❚ Pause" if on else "▶ Play")
-        if on and len(self.t) > 1:
-            if self.k >= len(self.t) - 1:
-                self.k = 0
-            self._t_sim = self.t[self.k]
-            self._t_wall = time.perf_counter()
-            self.timer.start()
-        else:
-            self.timer.stop()
-
-    def _tick(self):
-        now = time.perf_counter()
-        sp = float(self.speed.currentText().rstrip("×"))
-        self._t_sim += (now - self._t_wall) * sp
-        self._t_wall = now
-        T = self.t[-1]
-        if self._t_sim > T:
-            if self.loop.isChecked():
-                if self._t_sim > T + 0.8 * sp:      # short pause at the end, then restart
-                    self._t_sim = 0.0
-            else:
-                self.set_index(len(self.t) - 1)
-                self.stop()
-                return
-        k = int(np.clip(np.searchsorted(self.t, min(self._t_sim, T)), 0, len(self.t) - 1))
-        if k != self.k or self._t_sim == 0.0:
-            self.set_index(k)
-
-    def set_index(self, k):
-        self.k = int(k)
-        self.slider.blockSignals(True)
-        self.slider.setValue(self.k)
-        self.slider.blockSignals(False)
-        self.lbl.setText(f"t = {self.t[self.k]:6.3f} s  /  {self.t[-1]:.3f} s")
-        self.frame.emit(self.k)
-
-    def _seek(self, k):
-        self._t_sim = self.t[int(k)]
-        self.set_index(k)
-
-
-def form(*rows) -> QtWidgets.QFormLayout:
-    f = QtWidgets.QFormLayout()
-    f.setContentsMargins(0, 0, 0, 0)
-    f.setHorizontalSpacing(8)
-    f.setVerticalSpacing(3)
-    for r in rows:
-        if isinstance(r, tuple):
-            lab, w = r
-            if isinstance(w, QtWidgets.QLayout):
-                f.addRow(lab, w)
-            else:
-                f.addRow(lab, w)
-        else:
-            f.addRow(r)
-    return f
-
-
-def compact(w, chars: int = 16):
-    """Keep long combo boxes from widening the control column."""
-    w.setSizeAdjustPolicy(QtWidgets.QComboBox.AdjustToMinimumContentsLengthWithIcon)
-    w.setMinimumContentsLength(chars)
-    return w
-
-
-def default_goal(robot) -> np.ndarray:
-    d = np.resize([0.9, -0.7, 0.8, 0.6, -0.6, 0.8, 0.5], robot.n)
-    if robot.planar:
-        d = np.resize([-1.3, -1.1, 0.9], robot.n)
-    lo, hi = robot.joint_limits[:, 0], robot.joint_limits[:, 1]
-    return np.clip(robot.home + d, lo + 0.05, hi - 0.05)
-
-
-def no_si(pw):
-    """Plain axis numbers (pyqtgraph's automatic SI prefixes mangle labels such as '1/s')."""
-    for ax in ("left", "bottom"):
-        pw.getAxis(ax).enableAutoSIPrefix(False)
-    return pw
-
-
-def time_cursor(pw):
-    ln = pg.InfiniteLine(pos=0, angle=90, pen=pg.mkPen((255, 255, 255, 90), width=1))
-    pw.addItem(ln, ignoreBounds=True)
-    return ln
-
-
-def limit_lines(pw, robot, scale=1.0):
-    for i in range(robot.n):
-        for sgn in (1, -1):
-            pw.addItem(pg.InfiniteLine(pos=sgn * robot.tau_max[i] * scale, angle=0, pen=pen(i, 1.0, "dash")),
-                       ignoreBounds=True)
+# AsyncMixin now lives in gui/jobs.py (built on JobRunner) and Player / form / compact / default_goal / no_si /
+# time_cursor / limit_lines in gui/widgets.py; they are re-exported here for older imports.
+__all__ = ["AsyncMixin", "Player", "form", "compact", "default_goal", "no_si", "time_cursor", "limit_lines",
+           "DynamicsTab"]
 
 
 FD_LAWS = ["τ = 0  (falls freely — chaotic pendulum)", "τ = g(θ)  (gravity compensation — floats)",
            "τ = A·τmax  (constant)", "τ = A·τmax·sin(2πft + φᵢ)  (sinusoidal)"]
 INTEGRATORS = {"Euler (mr.EulerStep)": "euler", "Semi-implicit (symplectic) Euler": "semi-implicit",
-               "Runge–Kutta 4": "rk4", "RK45 adaptive (SciPy DOP853)": "rk45"}
+               "Runge–Kutta 4": "rk4", "RK45 adaptive (SciPy Dormand–Prince)": "rk45"}
+
+#: robots offered for the integrator comparison: (label, robot name or None = current robot, Δt [s] or None = setting)
+CMP_TARGETS = [("current robot, Δt from the settings", None, None),
+               ("Planar 2R arm, Δt = 10 ms (drift clearly visible)", "Planar 2R arm", 0.010),
+               ("UR5, Δt = 10 ms", "UR5 (6R industrial)", 0.010)]
 
 
 # ============================================================================ computations (worker threads)
@@ -367,6 +133,11 @@ def compute_inverse(robot, backend, th_s, th_g, Tf, scaling, Ftip, progress, can
                 resid=float(np.abs(tau - (Mdd + c + g + JF)).max()))
 
 
+def _short_name(name: str) -> str:
+    """'UR5 (6R industrial)' -> 'UR5' (label for the comparison plot)."""
+    return name.split(" (")[0].replace(" arm", "")
+
+
 def coriolis_vector(eng, th, dth, g=None):
     """c(theta, dtheta).  MR: mr.VelQuadraticForces.  Pinocchio: RNEA(theta, dtheta, 0) - g(theta)
     (avoids DynamicsEngine.coriolis, which leaves the Pinocchio model's gravity set to zero)."""
@@ -391,18 +162,27 @@ def make_tau_fn(eng, robot, law: int, amp: float, freq: float, add_g: bool):
 
 
 def simulate_chunked(eng, th0, dth0, tau_fn, T, dt, method, damping, progress, cancelled, chunks=20, p0=0.0, p1=1.0):
-    """dynamics.simulate() run in chunks so that progress can be reported and the run cancelled."""
-    Tc = T / chunks
+    """dynamics.simulate() run in chunks so that progress can be reported and the run cancelled.
+
+    Every chunk is a whole number of steps (steps_per_chunk = round(T/dt/chunks)), and the time offset advances
+    by exactly steps·dt, so the samples sit on the same grid k·dt as one long simulate() call (no drift)."""
+    total = max(1, int(round(T / dt)))
+    per = max(1, int(round(total / chunks)))
     parts = []
-    th, dth, t_off = np.array(th0, float), np.array(dth0, float), 0.0
-    for c in range(chunks):
-        off = t_off
-        r = simulate(eng, th, dth, lambda t, q, dq, off=off: tau_fn(t + off, q, dq), Tc, dt, method,
+    th, dth = np.array(th0, float), np.array(dth0, float)
+    done, c = 0, 0
+    n_chunks = -(-total // per)
+    while done < total:
+        steps = min(per, total - done)
+        off = done * dt
+        r = simulate(eng, th, dth, lambda t, q, dq, off=off: tau_fn(t + off, q, dq), steps * dt, dt, method,
                      damping=damping)
         r.t = r.t + off
         parts.append(r if c == 0 else _drop_first(r))
-        th, dth, t_off = r.theta[-1], r.dtheta[-1], off + Tc
-        progress(p0 + (p1 - p0) * (c + 1) / chunks)
+        th, dth = r.theta[-1], r.dtheta[-1]
+        done += steps
+        c += 1
+        progress(p0 + (p1 - p0) * c / n_chunks)
         if cancelled():
             return None
     out = parts[0]
@@ -440,6 +220,7 @@ def energy_balance(res, damping):
 class DynamicsTab(AsyncMixin, BaseTab):
     title = "④ Dynamics"
     needs_dynamics = True
+    uses_engine = True
 
     def __init__(self, ctx):
         super().__init__(ctx)
@@ -497,11 +278,15 @@ class DynamicsTab(AsyncMixin, BaseTab):
         self.fd_btn = button("Simulate", self.run_forward, primary=True)
         self.cmp_btn = button("Compare integrators", self.compare_integrators,
                               tooltip="τ = 0, no damping: total energy must be conserved")
+        self.cmp_target = compact(combo([lab for lab, _, _ in CMP_TARGETS]), 18)
+        self.cmp_target.setToolTip("Robot / time step used by “Compare integrators”. Explicit Euler's energy drift "
+                                   "is easiest to see on the planar 2R arm with Δt = 10 ms.")
         self.fd_lbl = value_label()
         fd_box = group("Forward dynamics — simulation (MR 8.5)",
                        form(("Torque law", self.law), ("Amplitude A", self.amp), ("Frequency f", self.freq),
                             self.add_g, ("Initial θ̇₀ (all joints)", self.dth0), ("Viscous damping b", self.damp),
-                            ("Integrator", self.integ), ("Time step Δt", self.dt), ("Duration", self.Tsim)),
+                            ("Integrator", self.integ), ("Time step Δt", self.dt), ("Duration", self.Tsim),
+                            ("Compare on", self.cmp_target)),
                        hbox(self.fd_btn, self.cmp_btn), self.fd_lbl)
 
         # ---- display / playback -------------------------------------------------------------
@@ -525,8 +310,7 @@ class DynamicsTab(AsyncMixin, BaseTab):
         self.p_dec = plot("τ = M(θ)θ̈ + c(θ,θ̇) + g(θ) + Jᵀ(θ)F_tip", "τ [N·m]")
         self.p_th = plot("Forward dynamics: joint angles θ(t)", "θ [deg]")
         self.p_en = plot("Energy  (𝒦 kinetic, 𝒫 potential)", "E [J]")
-        self.p_cmp = plot("Integrator comparison: |E(t) − E(0)|, τ = 0, no damping", "|ΔE| [J]")
-        self.p_cmp.setLogMode(y=True)
+        self.p_cmp = plot("Integrator comparison: E(t) − E(0), τ = 0, no damping", "E(t) − E(0) [J]", legend=False)
         self.cursors = [time_cursor(p) for p in (self.p_tau, self.p_dec, self.p_th, self.p_en)]
         for p in (self.p_tau, self.p_dec, self.p_th, self.p_en, self.p_cmp):
             no_si(p)
@@ -552,7 +336,6 @@ class DynamicsTab(AsyncMixin, BaseTab):
         self._mass_timer.setSingleShot(True)
         self._mass_timer.setInterval(60)
         self._mass_timer.timeout.connect(self.update_mass_panel)
-        ctx.backend_changed.connect(self._backend_changed)
         self._law_changed()
         self.on_robot_changed(ctx.robot)
 
@@ -635,7 +418,7 @@ class DynamicsTab(AsyncMixin, BaseTab):
         Md = (ep.mass_matrix(th + h * dq) - ep.mass_matrix(th - h * dq)) / (2 * h)
         Nm = Md - 2 * ep.coriolis_matrix(th, dq)
         skew = float(np.abs(Nm + Nm.T).max())
-        ok, bad = f"<span style='color:{theme.GOOD}'>✓</span>", f"<span style='color:{theme.BAD}'>✗</span>"
+        ok, bad = f"<span style='color:{theme.good_color()}'>✓</span>", f"<span style='color:{theme.bad_color()}'>✗</span>"
         eng = "Pinocchio (CRBA)" if self.ctx.backend == "pinocchio" else "Modern Robotics (n RNEA calls)"
         self.mass_lbl.setText(
             f"<b>Engine shown:</b> {eng}<br>"
@@ -648,8 +431,9 @@ class DynamicsTab(AsyncMixin, BaseTab):
             f"<br><br><b>Computation time of M(θ)</b><br>"
             f"&nbsp;&nbsp;Modern Robotics (n = {n} RNEA calls): {t_mr * 1e3:.2f} ms<br>"
             f"&nbsp;&nbsp;Pinocchio CRBA (C++): {t_pin * 1e6:.1f} µs<br>"
-            f"&nbsp;&nbsp;speed-up ×{t_mr / max(t_pin, 1e-9):.0f}<br><br>"
-            f"<span style='color:{theme.MUTED}'>Diagonal mᵢᵢ = apparent inertia of joint i; off-diagonal terms "
+            f"&nbsp;&nbsp;measured speed-up ×{t_mr / max(t_pin, 1e-9):.0f} (typically ~1000×; depends on n "
+            f"and the machine)<br><br>"
+            f"<span style='color:{theme.muted_color()}'>Diagonal mᵢᵢ = apparent inertia of joint i; off-diagonal terms "
             f"couple the joints (MR 8.1.3). Move the start sliders to watch M(θ) change.</span>")
 
     # ------------------------------------------------------------------ robot / engine
@@ -668,6 +452,8 @@ class DynamicsTab(AsyncMixin, BaseTab):
         self.dec_joint.addItems([f"joint {i + 1}" for i in range(robot.n)])
         self.dec_joint.setCurrentIndex(1 if robot.n > 1 else 0)
         self.dec_joint.blockSignals(False)
+        # small arms show Euler's drift with the current settings; for big ones default to the planar 2R demo
+        self.cmp_target.setCurrentIndex(0 if robot.n <= 3 else 1)
         self.view.frame_scene(robot.reach, planar=robot.planar,
                               center=(0, 0, 0.25 * robot.reach * (not robot.planar)))
         gdir = robot.gravity / np.linalg.norm(robot.gravity)
@@ -688,7 +474,7 @@ class DynamicsTab(AsyncMixin, BaseTab):
         self._mass_timer.start()
         QtCore.QTimer.singleShot(50, self.run_inverse)      # show something meaningful right away
 
-    def _backend_changed(self, backend):
+    def on_backend_changed(self, backend):
         self._mass_timer.start()
         name = "Pinocchio" if backend == "pinocchio" else "Modern Robotics"
         self.status(f"Dynamics engine: {name}" + ("  (pure Python — long simulations run in the background)"
@@ -783,15 +569,15 @@ class DynamicsTab(AsyncMixin, BaseTab):
         msgs = [f"<b>{'Pinocchio RNEA' if res['backend'] == 'pinocchio' else 'mr.InverseDynamics'}</b>: "
                 f"{len(tr.t)} calls in {res['t_id'] * 1e3:.1f} ms"]
         msgs.append("peak |τᵢ|/τmax,ᵢ: " + " ".join(
-            f"<span style='color:{theme.BAD if w > 1 else theme.TEXT}'>{100 * w:.0f}%</span>" for w in worst))
+            f"<span style='color:{theme.bad_color() if w > 1 else theme.text_color()}'>{100 * w:.0f}%</span>" for w in worst))
         if worst.max() > 1:
             j = int(np.argmax(worst))
             k = int(np.argmax(ratio[:, j]))
-            msgs.append(f"<span style='color:{theme.BAD}'>⚠ joint {j + 1} exceeds its limit "
+            msgs.append(f"<span style='color:{theme.bad_color()}'>⚠ joint {j + 1} exceeds its limit "
                         f"({worst[j]:.2f}×τmax at t = {tr.t[k]:.2f} s) — increase T or use TOPP (tab ⑤)</span>")
         else:
-            msgs.append(f"<span style='color:{theme.GOOD}'>✓ all torques within actuator limits</span>")
-        msgs.append(f"<span style='color:{theme.GOOD}'>✓</span> ‖τ − (Mθ̈+c+g+JᵀF)‖ = {res['resid']:.1e}")
+            msgs.append(f"<span style='color:{theme.good_color()}'>✓ all torques within actuator limits</span>")
+        msgs.append(f"<span style='color:{theme.good_color()}'>✓</span> ‖τ − (Mθ̈+c+g+JᵀF)‖ = {res['resid']:.1e}")
         self.id_lbl.setText("<br>".join(msgs))
         self._plot_decomposition()
         self.anim = ("id", res)
@@ -843,9 +629,9 @@ class DynamicsTab(AsyncMixin, BaseTab):
             t0 = time.perf_counter()
             eng.forward(th0, np.zeros(robot.n), np.zeros(robot.n))
             per = time.perf_counter() - t0
-            evals = {"euler": 1, "semi-implicit": 1, "rk4": 4, "rk45": 12}[s["method"]] * s["T"] / s["dt"]
+            evals = {"euler": 1, "semi-implicit": 1, "rk4": 4, "rk45": 5}[s["method"]] * s["T"] / s["dt"]
             self.status(f"MR engine: ≈ {evals * per * 1.3:.0f} s for this simulation (Pinocchio: < 1 s) — "
-                        "running in the background, you can cancel", theme.WARN)
+                        "running in the background, you can cancel", theme.warn_color())
         self.run_async(f"Simulating ({s['method']})", job, self._forward_done)
 
     def _forward_done(self, res):
@@ -873,14 +659,14 @@ class DynamicsTab(AsyncMixin, BaseTab):
         eng = "Pinocchio ABA" if res["backend"] == "pinocchio" else "mr.ForwardDynamics"
         head = f"<b>{eng}</b> + {s['method']}: {len(r.t)} samples ({s['T']:.1f} s) in {res['elapsed']:.2f} s<br>"
         if k_bad < len(r.t):
-            self.fd_lbl.setText(head + f"<span style='color:{theme.BAD}'>⚠ the integration diverged at "
+            self.fd_lbl.setText(head + f"<span style='color:{theme.bad_color()}'>⚠ the integration diverged at "
                                 f"t = {r.t[k_bad]:.2f} s — Δt too large for this stiff system: reduce Δt "
                                 "or use RK4/RK45</span>")
         else:
             drift = float(np.abs(bal - bal[0]).max())
             ok = drift < 1e-3 * max(1.0, np.abs(E).max())
             self.fd_lbl.setText(head + f"energy {'balance ' if not conservative else ''}drift max|ΔE| = "
-                                f"<span style='color:{theme.GOOD if ok else theme.WARN}'>{drift:.2e} J</span>"
+                                f"<span style='color:{theme.good_color() if ok else theme.warn_color()}'>{drift:.2e} J</span>"
                                 + ("" if ok else "  (reduce Δt or use RK4)"))
         res["k_bad"] = k_bad
         self.anim = ("fd", res)
@@ -888,9 +674,14 @@ class DynamicsTab(AsyncMixin, BaseTab):
         self.player.set_times(r.t)
 
     def compare_integrators(self):
-        robot = self.ctx.robot
-        th0 = self.start_sl.values()
+        label, name, dt_fixed = CMP_TARGETS[max(self.cmp_target.currentIndex(), 0)]
+        current = self.ctx.robot
+        robot = current if name is None or name == current.name else get_robot(name)
+        own = robot is current
+        th0 = self.start_sl.values() if own else default_goal(robot)
         s = self._fd_settings()
+        if dt_fixed is not None:
+            s["dt"] = dt_fixed
         self.player.stop()
 
         def job(prog, canc):
@@ -905,7 +696,7 @@ class DynamicsTab(AsyncMixin, BaseTab):
                 if r is None:
                     return None
                 out[m] = (r, time.perf_counter() - t0)
-            return dict(runs=out, s=s)
+            return dict(runs=out, s=s, robot=robot.name, own=own)
         self.run_async("Comparing integrators", job, self._compare_done)
 
     def _compare_done(self, res):
@@ -913,27 +704,31 @@ class DynamicsTab(AsyncMixin, BaseTab):
             return
         p = self.p_cmp
         p.clear()
-        if p.plotItem.legend is not None:
-            p.plotItem.legend.clear()
-        rows = []
+        rows, keys = [], []
         names = {v: k for k, v in INTEGRATORS.items()}
         for i, (m, (r, el)) in enumerate(res["runs"].items()):
             k_bad = diverged_at(r)
             E = r.ke + r.pe
-            dE = np.abs(E[:k_bad] - E[0]) + 1e-16
-            p.plot(r.t[:k_bad], dE, pen=pen(i, 2.2), name=names[m])
-            txt = (f"max|ΔE| = {dE.max():.2e} J" if k_bad == len(r.t) else
-                   f"<span style='color:{theme.BAD}'>diverged at t = {r.t[k_bad]:.2f} s</span>")
+            dE = E[:k_bad] - E[0]                       # signed: explicit Euler gains energy, others oscillate ~0
+            p.plot(r.t[:k_bad], dE, pen=pen(i, 2.2))
+            txt = (f"max|ΔE| = {np.abs(dE).max():.2e} J, final ΔE = {dE[-1]:+.2e} J" if k_bad == len(r.t) else
+                   f"<span style='color:{theme.bad_color()}'>diverged at t = {r.t[k_bad]:.2f} s</span>")
             rows.append(f"<span style='color:{theme.SERIES[i]}'>■</span> {names[m]}: {txt}  ({el:.2f} s)")
+            keys.append(f"<span style='color:{theme.SERIES[i]}'>■</span> {names[m].split(' (')[0]}")
+        # legend above the plot area (in the title row) so it never hides the curves
+        p.setTitle("E(t) − E(0), τ = 0, no damping &nbsp;&nbsp; " + " &nbsp; ".join(keys), color=theme.TEXT,
+                   size="10pt")
         s = res["s"]
-        self.cmp_lbl.setText(f"τ = 0, b = 0, Δt = {s['dt'] * 1e3:.1f} ms, T = {s['T']:.1f} s (Pinocchio ABA). "
-                             "Explicit Euler pumps energy in; symplectic Euler oscillates but stays bounded; "
-                             "RK4/RK45 conserve it.<br>" + "<br>".join(rows))
+        robot_txt = _short_name(res["robot"])
+        self.cmp_lbl.setText(f"{robot_txt}: τ = 0, b = 0, Δt = {s['dt'] * 1e3:.1f} ms, T = {s['T']:.1f} s "
+                             "(Pinocchio ABA). Explicit Euler pumps energy in (ΔE grows); symplectic Euler "
+                             "oscillates but stays bounded; RK4/RK45 conserve it.<br>" + "<br>".join(rows))
         self.bottom.setCurrentIndex(4)
-        r = res["runs"]["rk4"][0]
-        ee = np.array([self.ctx.robot.fk(q)[:3, 3] for q in r.theta])
-        self.anim = ("fd", dict(sim=r, ee=ee))
-        self.player.set_times(r.t)
+        if res["own"] and res["robot"] == self.ctx.robot.name:     # animate only the robot shown in the 3-D view
+            r = res["runs"]["rk4"][0]
+            ee = np.array([self.ctx.robot.fk(q)[:3, 3] for q in r.theta])
+            self.anim = ("fd", dict(sim=r, ee=ee))
+            self.player.set_times(r.t)
 
     # ------------------------------------------------------------------ animation
     def show_frame(self, k):
@@ -973,3 +768,8 @@ class DynamicsTab(AsyncMixin, BaseTab):
 
     def on_hide(self):
         self.player.stop()
+
+    def shutdown(self):
+        self.player.stop()
+        self._mass_timer.stop()
+        super().shutdown()

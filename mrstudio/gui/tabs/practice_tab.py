@@ -39,6 +39,8 @@ $$[\mathcal{V}_b] = \log\left(T_{sb}^{-1}(\theta^{i})T_{sd}\right),\quad \theta^
 <p><b>Ch. 11</b> second-order error dynamics (11.8) p. 412, overshoot and settling time pp. 414–415,
 PD control (11.26) p. 425, computed torque (11.33)–(11.35) p. 431:</p>
 $$\ddot{\theta}_e + 2\zeta\omega_n\dot{\theta}_e + \omega_n^{2}\theta_e = 0$$
+<p>Settling-time answers give both MR's rule of thumb $t_s\approx 4/(\zeta\omega_n)$ (from the envelope
+$e^{-\zeta\omega_n t}$) and the exact 2 % settling time; gain-design problems meet the exact value.</p>
 <h3>Quizzes</h3>
 <p><b>Export</b> writes N problems from the starting seed.  With <i>Mixed</i> topics question k is always on the
 same topic, so versions A, B, … of a quiz have the same structure and different numbers.  The Word file

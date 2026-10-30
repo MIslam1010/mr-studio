@@ -196,14 +196,69 @@ def test_workflow_yaml():
     on = wf.get("on", wf.get(True))   # PyYAML reads the key `on` as True
     assert {"push", "pull_request", "workflow_dispatch"} <= set(on)
     job = wf["jobs"]["build"]
-    assert set(job["strategy"]["matrix"]["os"]) == {"windows-latest", "macos-latest"}
+    assert set(job["strategy"]["matrix"]["os"]) == {"windows-2022", "macos-14"}
+    assert job["needs"] == "test" and "pull_request" in job["if"]      # installers: not on every PR
+    test_job = wf["jobs"]["test"]
+    assert test_job["runs-on"] == "ubuntu-latest"
+    test_runs = " ".join(s.get("run", "") for s in test_job["steps"])
+    assert "pytest" in test_runs and "ruff check" in test_runs and "libegl1" in test_runs
+    assert "requirements-dev.txt" in test_runs
     steps = job["steps"]
     py = [s for s in steps if s.get("uses", "").startswith("actions/setup-python")]
     assert py and str(py[0]["with"]["python-version"]) == "3.11"
     runs = " ".join(s.get("run", "") for s in steps)
-    assert "pytest" in runs and "build_windows.ps1" in runs and "build_macos.sh" in runs
+    assert "build_windows.ps1" in runs and "build_macos.sh" in runs
+    assert "--validate" in runs and "--screenshot" in runs and "validate-" in runs
     up = [s for s in steps if s.get("uses", "").startswith("actions/upload-artifact")]
-    assert up and "packaging/dist/*.dmg" in up[0]["with"]["path"]
+    assert up and "packaging/dist/*.dmg" in up[0]["with"]["path"] and "validate-*.txt" in up[0]["with"]["path"]
+    release = wf["jobs"]["release"]
+    rel = [s for s in release["steps"] if s.get("uses", "").startswith("softprops/action-gh-release")][0]
+    assert rel["with"]["generate_release_notes"] is True and rel["with"]["fail_on_unmatched_files"] is True
+    assert "SHA256SUMS.txt" in rel["with"]["files"]
+    # every action is pinned to a full version tag or SHA, never to a moving major tag
+    for j in wf["jobs"].values():
+        for st in j["steps"]:
+            if "uses" in st:
+                ref = st["uses"].split("@", 1)[1]
+                assert re.fullmatch(r"v\d+\.\d+\.\d+|[0-9a-f]{40}", ref), st["uses"]
+
+
+def test_dependabot_covers_actions_and_pip():
+    yaml = pytest.importorskip("yaml")
+    cfg_ = yaml.safe_load((ROOT / ".github/dependabot.yml").read_text(encoding="utf-8"))
+    assert {u["package-ecosystem"] for u in cfg_["updates"]} == {"github-actions", "pip"}
+
+
+def test_build_inputs_are_pinned():
+    build = (PKG / "requirements-build.txt").read_text(encoding="utf-8")
+    for name in ("pyinstaller", "pyinstaller-hooks-contrib"):
+        assert re.search(rf"^{name}==\d", build, re.M), f"{name} must be pinned exactly"
+    assert cfg.CONDA_ON_WINDOWS["PySide6"] == "pyside6=6.12.*"
+
+
+def test_version_is_consistent():
+    import tomllib
+    proj = tomllib.loads((ROOT / "pyproject.toml").read_text(encoding="utf-8"))["project"]
+    assert proj["version"] == cfg.VERSION
+    assert f'version: "{cfg.VERSION}"' in (ROOT / "CITATION.cff").read_text(encoding="utf-8")
+    assert subprocess.run([sys.executable, str(PKG / "bundle_config.py"), "version"], capture_output=True,
+                          text=True, check=True).stdout.strip() == cfg.VERSION
+
+
+def test_third_party_notices_are_bundled():
+    assert (ROOT / "THIRD_PARTY_NOTICES.md").is_file()
+    assert "THIRD_PARTY_NOTICES.md" in cfg.EXTRA_FILES
+    assert "THIRD_PARTY_NOTICES.md" in (PKG / "mrstudio.spec").read_text(encoding="utf-8")
+    iss = (PKG / "mrstudio.iss").read_text(encoding="utf-8")
+    assert "THIRD_PARTY_NOTICES.md" in iss and "PrivilegesRequiredOverridesAllowed" not in iss
+    assert "CloseApplications=yes" in iss and "LicenseFile" not in iss
+
+
+def test_launcher_log_location_and_faulthandler():
+    import launcher
+    path = launcher._log_file()
+    assert path.endswith("mrstudio.log") and "MR Studio" in path
+    assert "faulthandler" in (PKG / "launcher.py").read_text(encoding="utf-8")
 
 
 def test_lock_file_agrees_with_requirements():
@@ -247,7 +302,7 @@ def test_windows_requirements_drop_conda_packages(tmp_path):
     assert sorted(d.split("==")[0].strip() for d in dropped) == ["PySide6", "pin"]
     kept = dst.read_text(encoding="utf-8")
     assert "pin==" not in kept and "modern-robotics==" in kept and "pyside6==" not in kept.lower()
-    assert "pinocchio=4.1.0" in cfg.CONDA_ON_WINDOWS.values()
+    assert "pinocchio=4.1.0" in cfg.CONDA_ON_WINDOWS.values() and "pyside6=6.12.*" in cfg.CONDA_ON_WINDOWS.values()
     pin_req = re.search(r"^pin==(\S+)", (ROOT / "requirements.txt").read_text(encoding="utf-8"), re.M).group(1)
     assert cfg.CONDA_ON_WINDOWS["pin"] == f"pinocchio={pin_req}", "conda-forge Pinocchio must match requirements.txt"
 

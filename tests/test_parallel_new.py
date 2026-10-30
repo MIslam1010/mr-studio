@@ -85,8 +85,53 @@ def test_stewart_tab_push_button():
     from mrstudio.gui.tabs.stewart_tab import StewartTab
     tab = StewartTab(AppContext())
     tab.push_btn.setChecked(True)
-    assert tab.push_sim is not None
+    tab.push_jobs.wait(60)                 # the simulation runs in a background thread
+    assert tab.push_sim is not None and tab.push_timer.isActive()
     tab._push_step()
     tab.push_btn.setChecked(False)
     tab.on_hide()
     app.processEvents()
+
+
+def test_stewart_legs_in_compression_holding_platform_at_home():
+    """Physical sign: legs below a platform hold it up by pushing, i.e. compression (f > 0 by the
+    convention F_s = J^T f).  Checked against an independent force/moment balance."""
+    sp = parallel.StewartPlatform()
+    T = sp.T_home
+    F = sp.payload_wrench(T, 25.0)                     # gravity wrench (m, f) in {s} on platform + payload
+    chk = sp.leg_forces_checked(T, F)
+    f = chk.value
+    assert chk.warning is None and chk.kappa < 1e3
+    assert np.all(f > 0)                               # every leg pushes (compression)
+    x, _, u = sp.legs(T)                               # u_i: unit vector from base joint to platform joint
+    assert np.all(u[:, 2] > 0)                         # legs point up, so pushing = +u_i on the platform
+    force = (f[:, None] * u).sum(axis=0)
+    moment = (f[:, None] * np.cross(x, u)).sum(axis=0)
+    assert np.allclose(force + F[3:], 0, atol=1e-9) and np.allclose(moment + F[:3], 0, atol=1e-9)
+    total = (25.0 + sp.platform_mass) * parallel.G_ACC
+    assert f @ u[:, 2] == pytest.approx(total)
+    # symmetric home pose, centred load: all six legs share it equally
+    assert np.allclose(f, f[0])
+
+
+def test_stewart_statics_flags_type2_singularity():
+    sp = parallel.StewartPlatform()
+    # yawing the platform by 90 deg about z at home makes the legs coplanar-ish: Type-II singularity nearby
+    best = None
+    for yaw in np.radians(np.linspace(60, 120, 241)):
+        T = parallel.pose(z=sp.z_home, yaw=yaw)
+        k = np.linalg.cond(sp.jacobian_normalised(T))
+        if best is None or k > best[0]:
+            best = (k, T)
+    chk = sp.leg_forces_checked(best[1], sp.payload_wrench(best[1], 10.0))
+    assert chk.kappa == pytest.approx(best[0], rel=1e-6)
+    assert chk.kappa > parallel.KAPPA_WARN and chk.warning is not None      # yaw = 90 deg: singular
+    assert parallel.condition_warning(1e7) is not None and parallel.condition_warning(10.0) is None
+
+
+def test_delta_statics_condition_flag():
+    d = delta.DeltaRobot()
+    p = d.p_home
+    chk = d.static_torques_checked(d.ik(p), p, [0.0, 0.0, -10.0])
+    assert chk.warning is None and np.isfinite(chk.kappa)
+    assert np.allclose(chk.value, d.static_torques(d.ik(p), p, [0.0, 0.0, -10.0]))

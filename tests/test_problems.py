@@ -83,8 +83,50 @@ def test_trajectory_peaks_and_control_formulas():
     assert np.allclose(p.answer["vmax"], 1.5 * D / T) and np.allclose(p.answer["amax"], 6 * D / T**2)
     for s in range(6):
         c = P.generate("control", s, 3)
-        assert abs(4 / (c.answer["zeta"] * c.answer["wn"]) - c.data["ts"]) < 1e-9
+        # MR rule of thumb t_s ~ 4/(zeta wn) is reported, but the gains meet the *exact* 2 % settling time
+        assert abs(4 / (c.answer["zeta"] * c.answer["wn"]) - c.answer["ts"]) < 1e-9
+        assert abs(c.answer["ts_exact"] - c.data["ts"]) < 1e-9
         assert abs(c.answer["kd"] - 2 * c.answer["zeta"] * np.sqrt(c.answer["kp"])) < 1e-9
+        assert c.answer["zeta"] != pytest.approx(1.0)          # the rule is far off for zeta = 1: avoided
+
+
+def _free_response(A, t_end, n=200001):
+    from scipy.integrate import solve_ivp
+    sol = solve_ivp(lambda t, x: A @ x, (0, t_end), [1.0, 0.0], rtol=1e-12, atol=1e-14, dense_output=True)
+    tt = np.linspace(0, t_end, n)
+    return tt, sol.sol(tt)[0]
+
+
+def test_exact_settling_time_against_integration():
+    for zeta, wn in ((0.2, 3.0), (0.5, 1.0), (0.7, 4.0), (1.0, 2.0), (1.5, 5.0)):
+        A = np.array([[0, 1], [-wn**2, -2 * zeta * wn]])
+        ts = P.exact_settling_time(zeta, wn)
+        tt, e = _free_response(A, 3 * ts)
+        last = tt[np.nonzero(np.abs(e) > 0.02)[0][-1]]
+        assert abs(last - ts) < 2 * (tt[1] - tt[0]), (zeta, wn)
+    # critically damped: exact = 5.834/wn, the 4/wn rule is ~31 % optimistic
+    assert P.exact_settling_time(1.0, 1.0) == pytest.approx(5.8339, abs=1e-4)
+
+
+def test_control_regime_label_and_critical_gain():
+    for d in (1, 2, 3):
+        for s in range(10):
+            c = P.generate("control", s, d)
+            dd, a = c.data, c.answer
+            if "M" in dd:
+                zeta = (dd["b"] + dd["Kd"]) / (2 * np.sqrt(dd["Kp"] * dd["M"]))
+            else:
+                zeta = dd["kd"] / (2 * np.sqrt(dd["kp"]))
+            expect = ("critically damped" if abs(zeta - 1) < 1e-9 else "underdamped" if zeta < 1 else "overdamped")
+            assert a["kind"] == expect, (d, s, zeta)
+            if d == 2:      # (c) k_d for critical damping: the error dynamics get a double root
+                A = np.array([[0, 1], [-dd["kp"], -a["kd_critical"]]])
+                lam = np.linalg.eigvals(A)
+                assert abs(lam[0] - lam[1]) < 1e-6 * abs(lam[0])
+                assert abs(a["kd_critical"] - 2 * np.sqrt(dd["kp"])) < 1e-12
+                # the settling time stated for (c) is consistent with zeta = 1
+                tt, e = _free_response(A, 20 / np.sqrt(dd["kp"]))
+                assert np.all(e > -1e-9)                       # no overshoot when critically damped
 
 
 def test_jacobian_singular_cases_are_singular():

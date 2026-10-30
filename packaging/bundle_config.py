@@ -79,7 +79,7 @@ OPTIONAL_HIDDEN_IMPORTS = [
 # Windows it comes from conda-forge. Map: pip distribution in requirements.txt -> conda-forge spec.
 # PySide6 also comes from conda-forge on Windows: pip's PySide6 wheels clash with the Qt/ICU/MSVC runtime DLLs that
 # conda puts on PATH ("DLL load failed while importing QtCore: The specified procedure could not be found").
-CONDA_ON_WINDOWS = {"pin": "pinocchio=4.1.0", "PySide6": "pyside6"}
+CONDA_ON_WINDOWS = {"pin": "pinocchio=4.1.0", "PySide6": "pyside6=6.12.*"}
 
 # Package data. (package, include-globs relative to the package dir). Python sources are never listed.
 DATA_PACKAGES = [
@@ -91,12 +91,15 @@ DATA_PACKAGES = [
     ("rtbdata", ["xacro/**/*.urdf", "meshes/UNIMATE/puma560/*", "meshes/FRANKA-EMIKA/Panda/*"]),
 ]
 
+# Single files copied to the bundle root (relative to the repository root): licence notices (LGPL/GPL components).
+EXTRA_FILES = ["LICENSE", "THIRD_PARTY_NOTICES.md"]
+
 # Distributions whose metadata is read at run time (About box, HTML validation report:
 # importlib.metadata.version(...)). Without it the About box shows "—".
 METADATA_DISTS = [
     "modern-robotics", "pin", "roboticstoolbox-python", "toppra", "numpy", "scipy", "sympy",
     "matplotlib", "PySide6", "pyqtgraph", "PyOpenGL", "imageio", "imageio-ffmpeg", "pillow",
-    "spatialmath-python",
+    "spatialmath-python", "pyserial",
 ]
 
 # Metadata that may legitimately be absent: conda-forge's pinocchio is not a pip distribution called "pin"

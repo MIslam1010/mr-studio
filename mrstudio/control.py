@@ -194,6 +194,31 @@ def run_controller(robot: SerialRobot, traj, kind: str, Kp: float, Ki: float, Kd
 
 
 # ============================================================================ validation
+def _mr_simulate_control(thetalist, dthetalist, g, Ftipmat, Mlist, Glist, Slist, thetamatd, dthetamatd,
+                         ddthetamatd, gtilde, Mtildelist, Gtildelist, Kp, Ki, Kd, dt, intRes):
+    """mr.SimulateControl's computation, line for line, minus its final matplotlib plot.
+
+    The textbook function ends with plt.plot/plt.show (and np.random colours); calling it from the validation
+    worker thread would need a process-wide matplotlib backend switch, so the loop is transcribed here using the
+    same mr.ComputedTorque / mr.ForwardDynamics / mr.EulerStep calls.  Returns (taumat, thetamat), N x n."""
+    Ftipmat = np.array(Ftipmat).T
+    thetamatd, dthetamatd, ddthetamatd = (np.array(x).T for x in (thetamatd, dthetamatd, ddthetamatd))
+    m, n = thetamatd.shape
+    th, dth = np.array(thetalist, float).copy(), np.array(dthetalist, float).copy()
+    eint = np.zeros(m)
+    taumat, thetamat = np.zeros((m, n)), np.zeros((m, n))
+    for i in range(n):
+        tau = mr.ComputedTorque(th, dth, eint, gtilde, Mtildelist, Gtildelist, Slist, thetamatd[:, i],
+                                dthetamatd[:, i], ddthetamatd[:, i], Kp, Ki, Kd)
+        for _ in range(intRes):
+            ddth = mr.ForwardDynamics(th, dth, tau, g, Ftipmat[:, i], Mlist, Glist, Slist)
+            th, dth = mr.EulerStep(th, dth, ddth, 1.0 * dt / intRes)
+        taumat[:, i] = tau
+        thetamat[:, i] = th
+        eint = eint + dt * (thetamatd[:, i] - th)
+    return taumat.T, thetamat.T
+
+
 def validation_checks() -> list[Check]:
     from . import trajectory as tj
     from .robots import get_robot
@@ -218,22 +243,17 @@ def validation_checks() -> list[Check]:
     dt = tr.t[1] - tr.t[0]
     Gt = [G * 1.2 for G in r2.Glist]
     th0 = tr.theta[0] + 0.05
-    import matplotlib.pyplot as plt   # mr.SimulateControl plots its result: keep it silent
-    plt.switch_backend("agg")
-    show, plt.show = plt.show, (lambda *a, **k: None)
-    try:
-        taumat, thetamat = mr.SimulateControl(th0, np.zeros(2), r2.gravity, np.zeros((61, 6)), r2.Mlist, r2.Glist,
-                                              r2.Slist, tr.theta, tr.dtheta, tr.ddtheta, r2.gravity, r2.Mlist, Gt,
-                                              25.0, 4.0, 10.0, dt, 4)
-    finally:
-        plt.show = show
-        plt.close("all")
+    taumat, thetamat = _mr_simulate_control(th0, np.zeros(2), r2.gravity, np.zeros((61, 6)), r2.Mlist, r2.Glist,
+                                            r2.Slist, tr.theta, tr.dtheta, tr.ddtheta, r2.gravity, r2.Mlist, Gt,
+                                            25.0, 4.0, 10.0, dt, 4)
     ctrl = Controller("Computed torque", DynamicsEngine(r2, "mr", Glist=Gt), 25.0, 4.0, 10.0)
     res = simulate_control(DynamicsEngine(r2, "pinocchio"), ctrl, tr.t, tr.theta, tr.dtheta, tr.ddtheta, th0,
                            np.zeros(2), substeps=4, integrator="euler")
     err = max(np.abs(res.theta[1:] - thetamat[:-1]).max(), np.abs(res.tau[:-1] - taumat[:-1]).max() / 10)
     out.append(Check("Closed loop (Pinocchio plant, Euler) reproduces mr.SimulateControl (2R, wrong model ×1.2)",
-                     "MR 11.4.2 / 8.5", float(err), 1e-8, "61 control steps, intRes = 4, Ki ≠ 0", CAT))
+                     "MR 11.4.2 / 8.5", float(err), 1e-8,
+                     "61 control steps, intRes = 4, Ki ≠ 0; reference = mr.SimulateControl's own loop "
+                     "(mr.ComputedTorque, mr.ForwardDynamics, mr.EulerStep) without its matplotlib plot", CAT))
 
     # 3. computed torque with a perfect model tracks exactly; decentralised PD does not
     tr = tj.make_trajectory(r, r.home, r.home + np.array([0.6, -0.5, 0.6, 0.4, -0.5, 0.7]), 1.5, 751, "joint",

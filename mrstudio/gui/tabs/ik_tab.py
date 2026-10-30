@@ -3,7 +3,6 @@ multiple solutions, analytic planar IK, redundancy (null-space self-motion) and 
 from __future__ import annotations
 
 import time
-import traceback
 
 import modern_robotics as mr
 import numpy as np
@@ -14,6 +13,7 @@ from ... import kinematics as kin
 from ...robots import trans
 from .. import theme
 from ..base import BaseTab
+from ..jobs import JobRunner
 from ..viewer import RobotGraphic, SceneView
 from ..widgets import (JointSliders, MatrixView, SliderRow, button, checkbox, combo, group, hbox, pen, plot,
                        spin, value_label)
@@ -28,6 +28,12 @@ def _sub(i: int) -> str:
 
 def _deg(th, d=1) -> str:
     return "(" + ", ".join(f"{np.degrees(x):+.{d}f}" for x in th) + ")"
+
+
+def _fmt_theta(robot, th) -> str:
+    """Joint vector with units: revolute in degrees, prismatic in metres."""
+    return "(" + ", ".join(f"{x:+.3f} m" if p else f"{np.degrees(x):+.2f}°"
+                           for x, p in zip(th, robot.is_prismatic)) + ")"
 
 
 def _rgba(hexcol: str, a: float):
@@ -101,8 +107,8 @@ THEORY = r"""
 <h2>Inverse kinematics</h2>
 <span class="ref">Modern Robotics, Ch. 6: §6.1 analytic IK, §6.2 numerical IK, §6.3 inverse velocity kinematics</span>
 <p>Given a desired end-effector configuration $T_{sd}$, find $\theta$ with $T(\theta)=T_{sd}$.  Unlike forward
-kinematics there may be <b>no</b> solution, a <b>finite number</b> (up to 8 for a 6R arm) or <b>infinitely many</b>
-(redundant arms).</p>
+kinematics there may be <b>no</b> solution, a <b>finite number</b> (up to 8 for UR/PUMA-type arms; a general 6R
+arm can have 16) or <b>infinitely many</b> (redundant arms).</p>
 <h3>Analytic IK: planar 2R (§6.1)</h3>
 <p>Law of cosines for the elbow, then the shoulder:</p>
 $$\cos\theta_2=\frac{x^{2}+y^{2}-L_1^{2}-L_2^{2}}{2L_1L_2}$$
@@ -118,10 +124,13 @@ digits doubles — the convergence curves bend straight down on the log plot).</
 <h3>Algorithm IKinBody (§6.2.2)</h3>
 <p>For poses the error is the body twist that moves {b} to {d} in unit time:</p>
 $$[\mathcal{V}_b]=\log\left(T_{sb}^{-1}(\theta^{i})\,T_{sd}\right),\qquad \theta^{i+1}=\theta^{i}+J_b^{\dagger}(\theta^{i})\,\mathcal{V}_b$$
-<p>until $\|\omega_b\|<\epsilon_\omega$ and $\|v_b\|<\epsilon_v$.  <b>IKinSpace</b> uses
+<p>until $\|\omega_b\|\leq\epsilon_\omega$ and $\|v_b\|\leq\epsilon_v$.  <b>IKinSpace</b> uses
 $\mathcal{V}_s=\left[\mathrm{Ad}_{T_{sb}}\right]\mathcal{V}_b$ with $J_s$; since
-$J_s=\left[\mathrm{Ad}_{T_{sb}}\right]J_b$ it produces the same iterates.  The app re-runs the official
-<b>mr.IKinBody / mr.IKinSpace</b> on the same data and prints $\|\Delta\theta\|$.</p>
+$J_s=\left[\mathrm{Ad}_{T_{sb}}\right]J_b$ the Newton steps are the same, but it stops on
+$\|\omega_s\|\leq\epsilon_\omega$ and $\|v_s\|\leq\epsilon_v$.  $\|\omega_s\|=\|\omega_b\|$, while
+$v_s=R\,v_b+p\times R\,\omega_b$ depends on where the {s} origin is, so the two versions may stop at different
+iterates.  The app re-runs the official <b>mr.IKinBody / mr.IKinSpace</b> on the same data and prints
+$\|\Delta\theta\|$.</p>
 <h3>Pseudo-inverse (§6.2.1)</h3>
 $$J^{\dagger}=J^{T}\left(JJ^{T}\right)^{-1}\ (n>m),\qquad J^{\dagger}=\left(J^{T}J\right)^{-1}J^{T}\ (n<m)$$
 <p>For $n>m$ it returns the minimum-norm $\Delta\theta$ among all that achieve the task.</p>
@@ -148,25 +157,6 @@ THEORY += further_reading([
 
 
 
-class _Worker(QtCore.QThread):
-    """Runs fn(worker) in a background thread."""
-    done = QtCore.Signal(object)
-    failed = QtCore.Signal(str)
-
-    def __init__(self, fn, parent=None):
-        super().__init__(parent)
-        self.fn = fn
-        self.cancelled = False
-
-    def run(self):
-        try:
-            out = self.fn(self)
-            if not self.cancelled:
-                self.done.emit(out)
-        except Exception:
-            self.failed.emit(traceback.format_exc())
-
-
 class IKTab(BaseTab):
     title = "③ IK"
 
@@ -177,8 +167,8 @@ class IKTab(BaseTab):
         self.theta = np.zeros(0)
         self.T_target = np.eye(4)
         self.t_rows: dict[str, SliderRow] = {}
-        self._workers: list[_Worker] = []
-        self._all_worker = None
+        self.jobs = JobRunner(self)              # "Find all solutions": one background search at a time
+        self._all_req = None                     # (robot name, T_sd) of the running / last search
         self._solutions: list[np.ndarray] = []
         self._ghosts: list = []
         self._anim = None
@@ -198,7 +188,8 @@ class IKTab(BaseTab):
         # ---------------------------------------------------------------- configuration
         self.sliders = JointSliders()
         self.sliders.changed.connect(self._sliders_moved)
-        cbtns = hbox(button("Home", lambda: self._set_theta(self.ctx.robot.home)),
+        cbtns = hbox(button("Ready pose", lambda: self._set_theta(self.ctx.robot.home),
+                            tooltip="a convenient non-singular start pose; the MR home configuration is θ = 0, T = M"),
                      button("Random", lambda: self._set_theta(self.ctx.robot.random_config())),
                      button("Clear ghosts", self.clear_ghosts))
 
@@ -206,7 +197,7 @@ class IKTab(BaseTab):
         self.method = combo(["Newton–Raphson · body frame (IKinBody)", "Newton–Raphson · space frame (IKinSpace)",
                              "Damped least squares (DLS)"], self._method_changed)
         self.lam = spin(0.001, 2.0, 0.05, 3, 0.01)
-        self.guess = combo(["current θ (sliders)", "home θ", "random θ"])
+        self.guess = combo(["current θ (sliders)", "ready-pose θ", "random θ"])
         self.eomg = combo(TOLS)
         self.eomg.setCurrentText("1e-6")
         self.ev = combo(TOLS)
@@ -231,7 +222,10 @@ class IKTab(BaseTab):
 
         # ---------------------------------------------------------------- multiple solutions
         self.all_btn = button("Find all solutions", self.find_all,
-                              tooltip="Newton–Raphson from 60 random seeds, distinct wrapped solutions kept")
+                              tooltip="Newton–Raphson from random seeds until 60 starts in a row find no new "
+                                      "branch (at most 600); distinct wrapped solutions within the limits kept")
+        self.all_cancel = button("Cancel", self._cancel_all)
+        self.all_cancel.setVisible(False)
         self.sol_list = QtWidgets.QListWidget()
         self.sol_list.setMaximumHeight(170)
         self.sol_list.itemClicked.connect(self._solution_clicked)
@@ -254,7 +248,8 @@ class IKTab(BaseTab):
         cl.addWidget(group("Target pose T_sd  (drawn as {d})", self.target_box, tbtns, self.cb_live,
                            self.target_lbl))
         cl.addWidget(group("Solver  (MR §6.2)", form, self.solve_btn, self.result_lbl, self.mr_lbl))
-        cl.addWidget(group("Multiple solutions  (MR §6.1)", self.all_btn, self.all_lbl, self.sol_list,
+        cl.addWidget(group("Multiple solutions  (MR §6.1)", hbox(self.all_btn, self.all_cancel), self.all_lbl,
+                           self.sol_list,
                            self.analytic_lbl))
         cl.addWidget(group("Redundancy: null-space self-motion  (MR §6.3)", self.self_btn, self.drift_lbl))
         cl.addWidget(group("Real-time IK", hbox(self.circle_btn, QtWidgets.QLabel("r"), self.radius),
@@ -303,8 +298,8 @@ class IKTab(BaseTab):
         self.circle_timer = QtCore.QTimer(self)
         self.circle_timer.timeout.connect(self._circle_step)
         app = QtWidgets.QApplication.instance()
-        if app is not None:
-            app.aboutToQuit.connect(self._shutdown_workers)
+        if app is not None and not hasattr(BaseTab, "shutdown"):   # older BaseTab without the quit hook
+            app.aboutToQuit.connect(self.shutdown)
         self._method_changed()
         self.on_robot_changed(self.ctx.robot)
 
@@ -507,16 +502,18 @@ class IKTab(BaseTab):
         self._last = res
         ok = res.success
         self.result_lbl.setStyleSheet(f"color:{theme.GOOD if ok else theme.BAD}")
-        last = (f"‖ω_b‖ = {res.err_w[-1]:.1e}, ‖v_b‖ = {res.err_v[-1]:.1e}" if not args["position_only"]
+        f = "s" if res.frame == "space" else "b"
+        last = (f"‖ω_{f}‖ = {res.err_w[-1]:.1e}, ‖v_{f}‖ = {res.err_v[-1]:.1e}" if not args["position_only"]
                 else f"‖p_d − p‖ = {res.err_v[-1]:.1e} m")
-        th_w = kin.wrap_angles(res.theta)                         # same pose, angles in (−180°, 180°]
+        # same pose: revolute joints wrapped to [−180°, 180°), shifted by ±360° into the limits when possible
+        th_w = kin.wrap_joints(robot, res.theta)
         lo, hi = robot.joint_limits[:, 0], robot.joint_limits[:, 1]
         bad = [i + 1 for i in range(robot.n) if th_w[i] < lo[i] - 1e-9 or th_w[i] > hi[i] + 1e-9]
         self._final = th_w
         self.result_lbl.setText(
             (f"✓ converged in {res.iterations} iterations ({1e3 * dt:.1f} ms)\n" if ok else
              f"✗ not converged after {res.iterations} iterations\n  (unreachable target or poor θ⁰ — try DLS "
-             f"or another guess)\n") + f"{res.method}: {last}\nθ = {_deg(th_w, 2)}° (wrapped)"
+             f"or another guess)\n") + f"{res.method}: {last}\nθ = {_fmt_theta(robot, th_w)} (wrapped)"
             + (f"\n⚠ outside the joint limits of joint(s) {', '.join(map(str, bad))}: Newton–Raphson ignores "
                "limits — 'Find all solutions' keeps only feasible branches" if bad else ""))
         self._cross_check(robot, res, th0, args)
@@ -533,7 +530,7 @@ class IKTab(BaseTab):
             th_mr, ok_mr = fn(lst, robot.M, self.T_target, th0, args["eomg"], args["ev"])
             th_mr = np.asarray(th_mr, float)
             if args["damping"] > 0:
-                d = np.linalg.norm(kin.wrap_angles(th_mr - res.theta))
+                d = kin.joint_distance(robot, th_mr, res.theta)
                 if not ok_mr:
                     same = f"{name} did not converge from this θ⁰" + (" — DLS did ✓" if res.success else "")
                 elif not res.success:
@@ -577,10 +574,11 @@ class IKTab(BaseTab):
         ew = np.maximum(np.asarray(res.err_w), 1e-17)
         ev = np.maximum(np.asarray(res.err_v), 1e-17)
         if not args["position_only"]:
+            f = "s" if res.frame == "space" else "b"
             pw.plot(k, ew, pen=pen(0), symbol="o", symbolSize=6, symbolBrush=theme.SERIES[0],
-                    symbolPen=None, name="‖ω_b‖ [rad]")
+                    symbolPen=None, name=f"‖ω_{f}‖ [rad]")
             pw.plot(k, ev, pen=pen(1), symbol="s", symbolSize=6, symbolBrush=theme.SERIES[1],
-                    symbolPen=None, name="‖v_b‖ [m]")
+                    symbolPen=None, name=f"‖v_{f}‖ [m]")
             pw.plot([0, kmax], [args["eomg"]] * 2, pen=pen(0, 1, "dash"), name="ε_ω")
             pw.plot([0, kmax], [args["ev"]] * 2, pen=pen(1, 1, "dash"), name="ε_v")
         else:
@@ -607,7 +605,12 @@ class IKTab(BaseTab):
             rows.append([str(i)] + [f"{x:+.3f}" if p else f"{np.degrees(x):+.2f}" for x, p in zip(th, self.ctx.robot.is_prismatic)]
                         + [f"{res.err_w[i]:.2e}", f"{res.err_v[i]:.2e}"])
         A = np.array(rows, dtype=object)
+        robot = self.ctx.robot
+        f = "s" if res.frame == "space" else "b"
+        err = ["(unused)", "‖p_d − p‖"] if res.method.endswith("(position)") else [f"‖ω_{f}‖", f"‖v_{f}‖"]
         self.iter_table.set_matrix(A)
+        self.iter_table.set_labels(cols=["i"] + [f"θ{_sub(i + 1)} [{robot.display_unit(i)}]"
+                                                for i in range(robot.n)] + err)
         _fit_table(self.iter_table)
         self.iter_table.scrollToBottom()
 
@@ -649,32 +652,44 @@ class IKTab(BaseTab):
     # ================================================================== all solutions
     def find_all(self):
         robot = self.ctx.robot
+        if self.jobs.is_busy():                      # one search at a time (the button is disabled anyway)
+            return
         self._stop_modes()
-        self._cancel_all()
         T = self.T_target.copy()
         po = _task(robot) in ("position", "point2d")
-        n_starts = 40 if robot.n > 6 else 60
+        redundant = robot.n > _TASK_DIM[_task(robot)]
+        # redundant arms have a continuum of solutions: a fixed number of samples, no "until nothing new" rule
+        kw = dict(n_starts=40, max_starts=40) if redundant else dict(n_starts=60, patience=60, max_starts=600)
 
-        def job(w):
-            sols = kin.ik_all_solutions(robot, T, n_starts=n_starts, position_only=po)
-            return robot.name, T, sols
+        def job(progress, cancelled):
+            return kin.ik_all_solutions(robot, T, position_only=po, cancelled=cancelled, progress=progress, **kw)
 
-        w = _Worker(job, self)
-        w.done.connect(self._all_done)
-        w.failed.connect(lambda e: (self.all_lbl.setText("failed:\n" + e[-400:]), self.all_btn.setEnabled(True)))
-        w.finished.connect(lambda w=w: self._workers.remove(w) if w in self._workers else None)
-        self._workers.append(w)
-        self._all_worker = w
+        self._all_req = (robot.name, T)
         self.all_btn.setEnabled(False)
-        self.all_lbl.setText(f"Newton–Raphson from {n_starts} random seeds (background thread) …")
-        w.start()
+        self.all_cancel.setVisible(True)
+        self.all_lbl.setStyleSheet("")
+        self.all_lbl.setText("Newton–Raphson from random seeds (background thread)"
+                             + ("" if redundant else ": until 60 starts in a row find no new branch") + " …")
+        self.jobs.run(job, on_done=lambda sols, req=self._all_req: self._all_done(req, sols),
+                      on_error=self._all_failed,
+                      on_progress=lambda f: self.all_lbl.setText(
+                          f"Newton–Raphson from random seeds (background thread) … {100 * f:.0f} % of the "
+                          f"{kw['max_starts']}-start cap"),
+                      label="IK branches")
 
-    def _all_done(self, out):
+    def _all_failed(self, err):
+        self._all_finished()
+        self.all_lbl.setText("failed:\n" + err[-400:])
+
+    def _all_finished(self):
         self.all_btn.setEnabled(True)
-        self._all_worker = None
-        name, T, sols = out
+        self.all_cancel.setVisible(False)
+
+    def _all_done(self, req, sols):
+        self._all_finished()
         robot = self.ctx.robot
-        if name != robot.name:
+        name, T = req
+        if name != robot.name or req is not self._all_req:      # robot or request changed meanwhile
             return
         self.clear_ghosts()
         self.sol_list.clear()
@@ -682,7 +697,7 @@ class IKTab(BaseTab):
         redundant = robot.n > _TASK_DIM[_task(robot)]
         if found > 8:          # redundant arm: keep 8 well-spread samples (farthest-point sampling)
             chosen = [0]
-            D = np.array([[np.linalg.norm(kin.wrap_angles(a - b)) for b in sols] for a in sols])
+            D = np.array([[kin.joint_distance(robot, a, b) for b in sols] for a in sols])
             while len(chosen) < 8:
                 chosen.append(int(np.argmax(D[:, chosen].min(axis=1))))
             sols = [sols[i] for i in chosen]
@@ -693,25 +708,27 @@ class IKTab(BaseTab):
             _ghost(self.view, robot, f"ik.sol{i}", _rgba(col, 0.85), 3.0, theta=s)
             pm = QtGui.QPixmap(12, 12)
             pm.fill(QtGui.QColor(col))
-            it = QtWidgets.QListWidgetItem(QtGui.QIcon(pm), f"#{i + 1}  {_deg(s)}°")
+            it = QtWidgets.QListWidgetItem(QtGui.QIcon(pm), f"#{i + 1}  {_fmt_theta(robot, s)}")
             it.setData(QtCore.Qt.UserRole, i)
             self.sol_list.addItem(it)
         if found == 0:
-            self.all_lbl.setText("No solution found — the target is probably outside the workspace.")
+            self.all_lbl.setText("No solution found by the numerical search — the target is probably outside "
+                                 "the workspace (or every branch violates the joint limits).")
         elif redundant:
             self.all_lbl.setText(f"Redundant arm (n = {robot.n} > {_TASK_DIM[_task(robot)]}): a continuum of "
                                  f"solutions (self-motion manifold). {found} distinct samples found"
                                  + (", 8 well-spread ones shown." if found > 8 else "."))
         else:
-            self.all_lbl.setText(f"{found} distinct solution(s) within the joint limits "
-                                 f"(max. 8 for a 6R arm; 2 for planar 2R/3R). Click one to move the arm.")
+            self.all_lbl.setText(f"{found} distinct solution(s) within the joint limits, found by numerical "
+                                 "search (may be incomplete).  Up to 8 for UR/PUMA-type arms (a general 6R arm "
+                                 "can have 16); 2 for planar 2R/3R.  Click one to move the arm.")
         # analytic vs numeric for the textbook planar arms
         if _textbook_planar(robot):
             phi = np.arctan2(T[1, 0], T[0, 0]) if robot.n == 3 else None
             an = kin.ik_analytic_planar(robot, T[0, 3], T[1, 3], phi)
             lines = ["Analytic IK (MR §6.1) vs numeric:"]
             for a, lab in zip(an, ["elbow-down θ₂>0", "elbow-up   θ₂<0"]):
-                d = min((np.linalg.norm(kin.wrap_angles(a - s)) for s in sols), default=np.nan)
+                d = min((kin.joint_distance(robot, a, s) for s in sols), default=np.nan)
                 lines.append(f"{lab}: {_deg(a)}°\n   ↔ numeric ‖Δθ‖ = {d:.1e} {'✓' if d < 1e-5 else '✗'}")
             if not an:
                 lines.append("target unreachable (|c₂| > 1)")
@@ -876,15 +893,20 @@ class IKTab(BaseTab):
             self.circle_btn.setChecked(False)
 
     def _cancel_all(self):
-        if self._all_worker is not None:
-            self._all_worker.cancelled = True
-            self._all_worker = None
-        self.all_btn.setEnabled(True)
+        """Drop the running branch search (non-blocking: the worker stops at its next start)."""
+        if self.jobs.is_busy():
+            self.jobs.cancel()
+            self.all_lbl.setText("search cancelled")
+        self._all_req = None
+        self._all_finished()
 
-    def _shutdown_workers(self):
-        for w in list(self._workers):
-            w.cancelled = True
-            w.wait(5000)
+    def shutdown(self):
+        """Application quit: stop timers, cancel the search (waits at most a fraction of a second)."""
+        self._stop_modes()
+        self.jobs.shutdown(500)
+        parent = getattr(super(), "shutdown", None)
+        if parent is not None:
+            parent()
 
     def on_hide(self):
         self._stop_modes()

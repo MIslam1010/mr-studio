@@ -5,15 +5,20 @@
   shortest duration that respects the allowed joint speed f·θ̇_rated is
   T = 15 max_i |Δθ_i| / (8 f θ̇_rated,i)   (then rounded up with a safety factor).
 * ``HardwareRun`` -- streams a sampled trajectory to an ``ArmDriver`` at a fixed rate (>= 20 Hz as
-  the briefs require), reads the joints back and logs (t, cmd, meas, stop).  It does not own a timer:
-  the GUI calls ``step()`` from a QTimer, tests call it in a loop with a ``ManualClock``.
+  the briefs require), reads the joints back and logs (t, cmd, meas, stop) plus diagnostics (fresh flag,
+  tick dt, raw servo degrees, events).  It does not own a timer: the GUI's streaming worker thread calls
+  ``safe_step()`` at the stream rate; tests (and the GUI with a ``ManualClock``) call it in a loop.
 """
 from __future__ import annotations
+
+import threading
+import time
+from datetime import datetime
 
 import modern_robotics as mr
 import numpy as np
 
-from .base import ArmDriver
+from .base import ArmDriver, HardwareError
 from .logger import HardwareLog
 from .safety import SafetySupervisor, retime_to_speed
 
@@ -64,10 +69,46 @@ def sample(t, q, tq: float) -> np.ndarray:
     return np.array([np.interp(tq, t, q[:, j]) for j in range(q.shape[1])])
 
 
+class LatestValue:
+    """Thread-safe latest-value mailbox: ``put`` overwrites, ``take`` returns the newest value (or None)
+    and empties the box.  The streaming worker publishes samples through it, so a slow GUI only ever
+    draws the newest sample and never queues up stale ones."""
+
+    def __init__(self):
+        self._lock = threading.Lock()
+        self._value = None
+
+    def put(self, value) -> None:
+        with self._lock:
+            self._value = value
+
+    def take(self):
+        with self._lock:
+            v, self._value = self._value, None
+            return v
+
+
 class HardwareRun:
-    """One run: trajectory -> driver, with logging and the stop logic (HW-6)."""
+    """One run: trajectory -> driver, with logging, the stop logic (HW-6) and the run-time guards.
+
+    Guards (on top of the trajectory checks of ``SafetySupervisor.preflight``):
+
+    * **step clamp** -- |cmd_k − cmd_k−1| <= speed_cap · min(dt, 40 ms) per joint, whatever the trajectory
+      or the timing does (the first reference is the measured pose at start);
+    * **stall freeze** -- a tick gap > 100 ms (GUI or USB stall) does not advance the trajectory time, so
+      the set-point never jumps ahead to catch up with the wall clock;
+    * **tracking watchdog** -- |cmd − meas| > 10° on any joint for > 150 ms stops and latches the arm;
+    * **communication errors** -- ``safe_step`` turns any exception into a latched stop and ends the run.
+
+    ``step()`` is called by one thread at a time (the streaming worker, or the GUI timer / a test loop);
+    ``request_stop()`` may come from any thread.
+    """
     HOLD_AFTER = 0.5          # s of logging after the trajectory ends
     LOG_AFTER_STOP = 1.0      # s of logging after a stop (deceleration for HW-6)
+    STEP_DT_MAX = 0.04        # s: the per-tick step clamp allows at most speed_cap * 40 ms
+    STALL_GAP = 0.10          # s: a longer tick gap freezes the trajectory time
+    TRACK_ERR = np.radians(10.0)
+    TRACK_TIME = 0.15         # s the tracking error may exceed TRACK_ERR
 
     def __init__(self, driver: ArmDriver, supervisor: SafetySupervisor, t, q, *,
                  auto_stop_at: float | None = None, clock=None):
@@ -76,61 +117,139 @@ class HardwareRun:
         self.auto_stop_at = auto_stop_at if auto_stop_at and auto_stop_at > 0 else None
         self.clock = clock if clock is not None else getattr(driver, "clock", None)
         if self.clock is None:
-            import time
             self.clock = time.monotonic
         self.log = HardwareLog(driver.spec.n)
         self.t0 = None
         self.t_stop = None
         self.finished = False
         self.reason = ""
+        self.error: str | None = None             # set when the run ended on an exception
+        self.stop_confirmed: bool | None = None   # outcome of the last halt request
+        self.tau = 0.0                            # trajectory time (frozen during stalls)
+        self.stalls = 0
+        self._t_prev = 0.0
+        self._cmd_prev = None
+        self._err_since = np.full(driver.spec.n, np.nan)
+        self._stop_lock = threading.Lock()
 
     @property
     def duration(self) -> float:
         return float(self.t_traj[-1])
 
-    def start(self) -> None:
-        self.t0 = self.clock()
-        self.step()
+    def event(self, kind: str, msg: str = "") -> None:
+        t = None if self.t0 is None else round(self.clock() - self.t0, 4)
+        self.log.events.append(dict(t=t, wall=datetime.now().isoformat(timespec="milliseconds"),
+                                    kind=kind, msg=msg))
 
-    def request_stop(self, reason: str = "stop pressed") -> None:
-        """Stop button / e-stop: latch the driver now; keep logging the deceleration."""
-        self.driver.stop()
-        if self.t_stop is None and self.t0 is not None:
-            self.t_stop = self.clock() - self.t0
-            self.reason = reason
+    def start(self, q_now=None) -> None:
+        """Start the clock and send the first set-point.  ``q_now`` (measured pose) seeds the step clamp."""
+        self.t0 = self.clock()
+        self._t_prev = 0.0
+        self._cmd_prev = None if q_now is None else np.asarray(q_now, float).copy()
+        self.event("start", f"duration {self.duration:.2f} s, speed cap {100 * self.sup.speed_fraction:.0f} %")
+        self.safe_step()
+
+    def request_stop(self, reason: str = "stop pressed") -> bool:
+        """Stop button / e-stop / guard: latch the driver now; keep logging the deceleration.
+        Returns whether the halt reached the arm (never raises)."""
+        with self._stop_lock:
+            first = self.t_stop is None and self.t0 is not None
+            if first:
+                self.t_stop = self.clock() - self.t0
+                self.reason = reason
+            elif self.t0 is None and not self.finished:     # stopped before the worker started it
+                self.finished = True
+                self.reason = reason
+        try:
+            ok = bool(self.driver.stop())
+        except Exception:
+            ok = False
+        self.stop_confirmed = ok
+        if first or not ok:
+            self.event("stop", reason + ("" if ok else " — HALT NOT CONFIRMED"))
+        return ok
+
+    def fail(self, exc: BaseException) -> None:
+        """End the run on an exception: latch (best effort) and stop logging."""
+        msg = str(exc) if isinstance(exc, HardwareError) else f"{type(exc).__name__}: {exc}"
+        self.error = msg
+        self.event("error", msg)
+        self.request_stop(f"communication error: {msg}")
+        self.finished = True
+
+    def safe_step(self):
+        """``step()`` that never raises: any exception latches the arm and finishes the run."""
+        try:
+            return self.step()
+        except Exception as e:
+            self.fail(e)
+            return None
 
     def step(self) -> tuple[float, np.ndarray, np.ndarray] | None:
         if self.finished or self.t0 is None:
             return None
         t = self.clock() - self.t0
-        if self.auto_stop_at is not None and self.t_stop is None and t >= self.auto_stop_at:
+        gap = t - self._t_prev
+        self._t_prev = t
+        if gap > self.STALL_GAP:
+            self.stalls += 1
+            self.event("stall", f"tick gap {1e3 * gap:.0f} ms: trajectory time held at {self.tau:.3f} s")
+        elif gap > 0:
+            self.tau += gap
+        if self.auto_stop_at is not None and self.t_stop is None and self.tau >= self.auto_stop_at:
             self.request_stop(f"automatic stop test at t = {self.auto_stop_at:.2f} s")
         stopped = self.t_stop is not None
         if stopped:
-            cmd = self.log.cmd[-1] if len(self.log) else sample(self.t_traj, self.q_traj, t)
+            if self.driver.ensure_halted() and self.stop_confirmed is False:   # halt before any further read
+                self.stop_confirmed = True                                        # (a failed one is retried)
+                self.event("stop", "halt confirmed on retry")
+            if self._cmd_prev is not None:
+                cmd = self._cmd_prev
+            else:
+                cmd = self.log.cmd[-1] if len(self.log) else sample(self.t_traj, self.q_traj, self.tau)
         else:
-            cmd = self.sup.clamp(sample(self.t_traj, self.q_traj, t))
+            cmd = self.sup.clamp(sample(self.t_traj, self.q_traj, self.tau))
+            if self._cmd_prev is not None:
+                lim = self.sup.speed_cap * min(max(gap, 0.0), self.STEP_DT_MAX)
+                cmd = self._cmd_prev + np.clip(cmd - self._cmd_prev, -lim, lim)
             self.driver.send_joints(cmd, self.sup.speed_fraction)
+            self._cmd_prev = cmd
         meas = self.driver.read_joints()
-        self.log.append(t, cmd, meas, stop=stopped)
+        fresh = bool(getattr(self.driver, "last_read_fresh", True))
+        self.log.append(t, cmd, meas, stop=stopped, fresh=fresh, dt=gap,
+                        servo_cmd=getattr(self.driver, "last_cmd_servo_deg", None),
+                        servo_meas=getattr(self.driver, "last_meas_servo_deg", None) if fresh else None)
+        if not stopped:
+            self._watch_tracking(t, cmd, meas)
+            stopped = self.t_stop is not None
         if stopped and t - self.t_stop >= self.LOG_AFTER_STOP:
             self.finished = True
-        elif not stopped and t >= self.duration + self.HOLD_AFTER:
+        elif not stopped and self.tau >= self.duration + self.HOLD_AFTER:
             self.finished = True
             self.reason = "trajectory complete"
+            self.event("complete")
         return t, cmd, meas
+
+    def _watch_tracking(self, t, cmd, meas) -> None:
+        over = np.abs(np.asarray(cmd) - np.asarray(meas)) > self.TRACK_ERR
+        self._err_since = np.where(over, np.where(np.isnan(self._err_since), t, self._err_since), np.nan)
+        late = over & (t - self._err_since > self.TRACK_TIME)
+        if late.any():
+            j = int(np.argmax(late))
+            self.request_stop(f"tracking error J{j + 1} = {np.degrees(abs(cmd[j] - meas[j])):.1f}° > "
+                              f"{np.degrees(self.TRACK_ERR):.0f}° for > {1e3 * self.TRACK_TIME:.0f} ms")
 
 
 def run_offline(driver, supervisor, t, q, *, rate: float = 50.0, auto_stop_at=None) -> HardwareRun:
     """Run a whole session against a driver whose clock is a ``ManualClock`` (tests, Validation)."""
     clock = driver.clock
     run = HardwareRun(driver, supervisor, t, q, auto_stop_at=auto_stop_at, clock=clock)
-    run.start()
+    run.start(driver.read_joints())
     while not run.finished:
         clock.advance(1.0 / rate)
-        run.step()
+        run.safe_step()
     return run
 
 
 __all__ = ["quintic_duration", "quintic_move", "concat", "with_approach", "sample", "HardwareRun",
-           "run_offline", "retime_to_speed"]
+           "LatestValue", "run_offline", "retime_to_speed"]

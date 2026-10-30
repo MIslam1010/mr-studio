@@ -1,8 +1,6 @@
 """Tab 2 -- velocity kinematics, statics, singularities and manipulability (MR Ch. 5)."""
 from __future__ import annotations
 
-import traceback
-
 import modern_robotics as mr
 import numpy as np
 import pyqtgraph as pg
@@ -14,6 +12,7 @@ from ...references import further_reading
 from ... import kinematics as kin
 from .. import theme
 from ..base import BaseTab
+from ..jobs import JobRunner
 from ..viewer import RobotGraphic, SceneView
 from ..widgets import (JointSliders, MatrixView, button, checkbox, combo, group, hbox, plot, spin,
                        value_label)
@@ -90,6 +89,8 @@ $$\dot{p}=\omega_s\times p+v_s=R_{sb}\,v_b$$
 <h3>Statics (§5.2)</h3>
 <p>Power is conserved, $\tau^{T}\dot{\theta}=\mathcal{F}_s^{T}\mathcal{V}_s$, so the joint torques that
 let the end-effector apply the wrench $\mathcal{F}=(m,f)$ to the environment (no gravity) are</p>
+<p>In the panel, $f$ and $m$ are the tip force and moment acting at the end-effector point $p$, with axes
+parallel to {s}; the table shows the same wrench as $\mathcal{F}_s$, i.e. moved to the {s} origin:</p>
 $$\tau=J_s^{T}(\theta)\,\mathcal{F}_s=J_b^{T}(\theta)\,\mathcal{F}_b\quad(5.26)$$
 $$\mathcal{F}_s=(m_s+p\times f,\ f),\qquad \mathcal{F}_b=\left[\mathrm{Ad}_{T_{sb}}\right]^{T}\mathcal{F}_s$$
 <h3>Singularities (§5.3)</h3>
@@ -99,14 +100,22 @@ $J=U\Sigma V^{T}$, the columns of $U$ whose $\sigma_i=0$ are the end-effector tw
 directions are resisted by the structure with zero torque.</p>
 $$\mathrm{rank}\,J(\theta)<\min(m,n)\ \Leftrightarrow\ \sigma_{min}(J)=0$$
 <p>Examples: two collinear revolute axes, three coplanar parallel axes (UR5/PUMA elbow
-stretched), the wrist centre on joint axis 1 (shoulder), aligned wrist axes (UR5 $\theta_5=0$).
-"Find nearest singularity" minimises $\sigma_{min}^{2}(J(\theta))+w\|\theta-\theta_0\|^{2}$ with SciPy.</p>
+stretched), the wrist centre on joint axis 1 (shoulder), aligned wrist axes (UR5 $\theta_5=0$).</p>
+<p><b>Units.</b> The rank of $J$ does not depend on units, but $\sigma_{min}$ of the full $6\times n$ $J$ does:
+its rows mix rad/s ($\omega$) and m/s ($v$), so a fixed threshold would change with the length unit (§5.4).
+The test therefore uses the dimensionless $\tilde{J}=\mathrm{diag}(I,\,I/L)\,J$ ($L$ = reach), and also reports
+$\sigma_{min}(J_\omega)$ and $\sigma_{min}(J_v)$ separately, each in its own unit.
+"Find nearest singularity" minimises $\sigma_{min}^{2}(\tilde{J}(\theta))+w\|\theta-\theta_0\|^{2}$ with SciPy
+(in a background thread).</p>
 <h3>Manipulability ellipsoid (§5.4)</h3>
-<p>The unit sphere of joint rates $\|\dot{\theta}\|=1$ maps to the ellipsoid</p>
-$$\dot{q}^{T}A^{-1}\dot{q}=1,\qquad A=JJ^{T}\quad(5.27)$$
+<p>The unit sphere of joint rates $\|\dot{\theta}\|=1$ maps to the ellipsoid of end-effector velocities $v$</p>
+$$v^{T}A^{-1}v=1,\qquad A=JJ^{T}\quad(5.27)$$
 <p>with semi-axes $\sqrt{\lambda_i(A)}=\sigma_i(J)$ along the eigenvectors of $A$.  Linear (angular)
 ellipsoid: $J$ = rows $v$ ($\omega$) of $J_b$ rotated into {s}.  The <b>force ellipsoid</b>
-$f^{T}Af=1$ ($B=A^{-1}$) has the same axes and reciprocal lengths: fast directions are weak.</p>
+$f^{T}Af=1$ ($B=A^{-1}$) has the same axes and reciprocal lengths: fast directions are weak.  At a
+singularity a semi-axis of the force ellipsoid is <b>infinite</b> (the structure resists any force along it
+with zero torque); it is drawn clamped, in red, marked ∞.  The ellipsoid shape is exact; it is drawn at a
+fixed scale set at the ready pose.</p>
 $$\mu_1(A)=\sqrt{\frac{\lambda_{max}(A)}{\lambda_{min}(A)}}\geq 1$$
 $$\mu_2(A)=\frac{\lambda_{max}(A)}{\lambda_{min}(A)}=\mu_1^{2}$$
 $$\mu_3(A)=\sqrt{\lambda_1\lambda_2\cdots}=\sqrt{\det A}$$
@@ -124,26 +133,6 @@ THEORY += further_reading([
 
 
 
-class _Worker(QtCore.QThread):
-    """Runs fn(worker) in a background thread. fn may emit worker.progress(obj)."""
-    progress = QtCore.Signal(object)
-    done = QtCore.Signal(object)
-    failed = QtCore.Signal(str)
-
-    def __init__(self, fn, parent=None):
-        super().__init__(parent)
-        self.fn = fn
-        self.cancelled = False
-
-    def run(self):
-        try:
-            out = self.fn(self)
-            if not self.cancelled:
-                self.done.emit(out)
-        except Exception:
-            self.failed.emit(traceback.format_exc())
-
-
 class VelocityTab(BaseTab):
     title = "② Velocity"
 
@@ -153,8 +142,8 @@ class VelocityTab(BaseTab):
         self.graphic = None
         self.theta = np.zeros(0)
         self._ell_scale: dict = {}
-        self._workers: list[_Worker] = []
-        self._ws_worker = None
+        self.ws_jobs = JobRunner(self)           # workspace sampling (one job at a time)
+        self.sing_jobs = JobRunner(self)         # nearest-singularity search (L-BFGS-B, off the GUI thread)
         self._ws_P, self._ws_W = [], []
 
         # ---------------------------------------------------------------- joints
@@ -162,11 +151,13 @@ class VelocityTab(BaseTab):
         self.sliders.changed.connect(self._sliders_moved)
         self.move_btn = button("▶ Move", self.toggle_move, checkable=True,
                                tooltip="Integrate θ ← θ + θ̇ Δt and watch ṗ stay tangent to the path")
-        btns = hbox(button("Home", lambda: self.set_theta(self.ctx.robot.home)),
+        btns = hbox(button("Ready pose", lambda: self.set_theta(self.ctx.robot.home),
+                           tooltip="a convenient non-singular start pose; the MR home configuration is θ = 0, T = M"),
                     button("Random", lambda: self.set_theta(self.ctx.robot.random_config())),
                     self.move_btn)
         self.sing_btn = button("⚠  Find nearest singularity", self.find_singularity, primary=True,
-                               tooltip="scipy.optimize.minimize of σ_min²(J(θ)) + w‖θ−θ₀‖², then animate")
+                               tooltip="scipy.optimize.minimize of σ_min²(J̃(θ)) + w‖θ−θ₀‖² (background "
+                                       "thread), then animate")
         self.sing_lbl = value_label()
 
         # ---------------------------------------------------------------- ellipsoid
@@ -178,6 +169,9 @@ class VelocityTab(BaseTab):
             cb.setSizeAdjustPolicy(QtWidgets.QComboBox.AdjustToMinimumContentsLengthWithIcon)
             cb.setMinimumContentsLength(8)
         self.mu_lbl = value_label()
+        self.ell_cap = QtWidgets.QLabel("shape exact; drawn at a fixed scale relative to the ready pose")
+        self.ell_cap.setObjectName("muted")
+        self.ell_cap.setWordWrap(True)
 
         # ---------------------------------------------------------------- twists
         self.qd_box = QtWidgets.QWidget()
@@ -206,12 +200,21 @@ class VelocityTab(BaseTab):
         self.cb_force = checkbox("Draw the applied force (orange) / moment (pink)", self.update_scene, True)
         self.tau_tab = MatrixView(1, 6, 1, row_labels=["τ"], col_labels=[str(i + 1) for i in range(6)])
         self.tau_lbl = value_label()
+        self.f_cap = QtWidgets.QLabel("The table shows the same wrench about the {s} origin: "
+                                      "F_s = (m + p×f, f)  (p = EE point).")
+        self.f_cap.setObjectName("muted")
+        self.f_cap.setWordWrap(True)
         self.tau_chk = value_label()
         self.tau_chk.setStyleSheet(f"color:{theme.GOOD}")
 
         # ---------------------------------------------------------------- singularity tolerance
         self.tol_spin = spin(1e-4, 0.2, 0.01, 4, 0.005)
         self.tol_spin.valueChanged.connect(self.update_scene)
+        self.tol_spin.setToolTip("threshold on σ_min of the dimensionless J̃ = diag(I, I/L) J, L = reach")
+        self.sing_note = QtWidgets.QLabel("σ_min of the raw 6×n J mixes rad/s and m/s (MR §5.4), so the test uses "
+                                          "J̃ = diag(I, I/L)·J (L = reach) and also lists σ_min(J_ω), σ_min(J_v).")
+        self.sing_note.setObjectName("muted")
+        self.sing_note.setWordWrap(True)
 
         # ---------------------------------------------------------------- workspace
         self.ws_n = QtWidgets.QSpinBox()
@@ -247,13 +250,14 @@ class VelocityTab(BaseTab):
         for sp in self.f_spins + self.m_spins:
             sp.setMaximumWidth(80)
         cl.addWidget(group("Manipulability ellipsoid  (MR §5.4)", self.cb_ell,
-                           self.ell_kind, self.ell_type, self.mu_lbl))
+                           self.ell_kind, self.ell_type, self.mu_lbl, self.ell_cap))
         cl.addWidget(group("Joint rates θ̇ [rad/s] → twists  (MR §5.1)", self.qd_box, self.cb_vel,
                            self.twist_tab, self.twist_lbl, self.twist_chk))
-        cl.addWidget(group("Statics: EE applies (m, f) in {s}  (MR §5.2)", fgrid,
-                           self.cb_force, self.tau_tab, self.tau_lbl, self.tau_chk))
+        cl.addWidget(group("Statics  (MR §5.2)",
+                           QtWidgets.QLabel("Tip wrench at the EE point, axes ∥ {s}: f [N], m [N·m]"), fgrid,
+                           self.f_cap, self.cb_force, self.tau_tab, self.tau_lbl, self.tau_chk))
         cl.addWidget(group("Singularity test  (MR §5.3)",
-                           hbox(QtWidgets.QLabel("σ_min tolerance"), self.tol_spin, None)))
+                           hbox(QtWidgets.QLabel("σ_min(J̃) tolerance"), self.tol_spin, None), self.sing_note))
         cl.addWidget(group("Workspace (Monte-Carlo, coloured by μ₃)",
                            hbox(self.ws_n, self.ws_btn, self.ws_clear_btn), self.ws_bar,
                            self.ws_legend, hbox(self.ws_lo, None, self.ws_hi), self.ws_lbl))
@@ -284,7 +288,7 @@ class VelocityTab(BaseTab):
         jl.addWidget(jt, 1)
         jl.addWidget(self.jac_chk)
 
-        self.sv_plot = plot("Singular values of J", "σᵢ", "i", legend=False)
+        self.sv_plot = plot("Singular values of J̃ = diag(I, I/L)·J", "σᵢ (dimensionless)", "i", legend=False)
         self.sv_plot.setMouseEnabled(x=False, y=False)
         self.sv_bars = pg.BarGraphItem(x=[1], height=[0], width=0.6)
         self.sv_plot.addItem(self.sv_bars)
@@ -318,14 +322,15 @@ class VelocityTab(BaseTab):
         self._sing_anim = None
         self._trace: list = []
         app = QtWidgets.QApplication.instance()
-        if app is not None:
-            app.aboutToQuit.connect(self._shutdown_workers)
+        if app is not None and not hasattr(BaseTab, "shutdown"):   # older BaseTab without the quit hook
+            app.aboutToQuit.connect(self.shutdown)
         self.on_robot_changed(self.ctx.robot)
 
     # ================================================================== robot / state
     def on_robot_changed(self, robot):
         self._stop_timers()
         self._cancel_workspace()
+        self._cancel_singularity()
         if self.graphic is not None:
             self.graphic.remove()
         self.view.remove_prefix("vel.")
@@ -486,7 +491,13 @@ class VelocityTab(BaseTab):
     # ------------------------------------------------------------------ singularity analysis
     def _update_singularity(self, robot, th, R, p):
         J, labels = kin.task_jacobian(robot, th)
+        # dimensionless J~ = diag(I, I/L) J: sigma_min of the raw J would mix rad/s and m/s (MR Sec. 5.4)
+        J = np.array([1.0 / robot.reach if lab.startswith("v") else 1.0 for lab in labels])[:, None] * J
         U, s, _ = np.linalg.svd(J)
+        sw, sv = kin.split_singular_values(robot, th)
+        k_w, k_v = min(robot.n, len(sw)), min(robot.n, len(sv))
+        blocks = ("  ·  σ_min(J_ω) = " + (f"{sw[k_w - 1]:.3g}" if k_w else "—") + " rad/s per rad/s, "
+                  f"σ_min(J_v) = {sv[k_v - 1]:.3g} m/s per rad/s")
         m = min(J.shape)
         tol = self.tol_spin.value()
         rank = int(np.sum(s > tol))
@@ -530,13 +541,13 @@ class VelocityTab(BaseTab):
                     d = ang / np.linalg.norm(ang)
                     self.view.set_polyline(f"vel.lost{k}.w", [p - 1.3 * L * d, p + 1.3 * L * d],
                                            (1.0, 0.42, 0.42, 0.9), 3)
-            self.banner.setText(f"⚠  SINGULAR CONFIGURATION — rank J = {rank} < {m}, σ_min = {s[m - 1]:.2e}.  "
-                                f"Lost directions (red): " + "  |  ".join(parts))
+            self.banner.setText(f"⚠  SINGULAR CONFIGURATION — rank J = {rank} < {m}, σ_min(J̃) = {s[m - 1]:.2e}"
+                                f"{blocks}.  Lost directions (red, v scaled by 1/L): " + "  |  ".join(parts))
             self.banner.setStyleSheet(f"background:#5c1d24; color:#ffffff; font-weight:700; padding:5px 8px;"
                                       f"border:1px solid {theme.BAD}; border-radius:5px;")
         else:
             self.banner.setText(f"Regular configuration — rank J = {m} (full) for the {task},  "
-                                f"σ_min = {s[m - 1]:.4f} > tol {tol:g}")
+                                f"σ_min(J̃) = {s[m - 1]:.4f} > tol {tol:g}{blocks}")
             self.banner.setStyleSheet(f"background:#183326; color:{theme.GOOD}; font-weight:600; padding:5px 8px;"
                                       "border:1px solid #2e6b4a; border-radius:5px;")
 
@@ -552,30 +563,41 @@ class VelocityTab(BaseTab):
             g = float(np.exp(np.mean(np.log(nz)))) if nz.size else 1.0      # geometric mean of semi-axes
             self._ell_scale[key] = 0.2 * robot.reach * (g if force else 1.0 / g)
         k = self._ell_scale[key]
-        radii = np.clip(el.radii * k, 0.0, 1.5 * robot.reach)
+        inf = el.unbounded                                       # force ellipsoid at a singularity
+        clamp = 1.5 * robot.reach
+        radii = np.clip(np.where(inf, clamp, el.radii * k), 0.0, clamp)
         sym = "B" if force else "A"
         planar_ang = robot.planar and kind == "angular"
         mu3 = (1.0 / el.mu3 if el.mu3 > 1e-12 else np.inf) if force else el.mu3
+        semi = ", ".join("∞" if not np.isfinite(r) else f"{r:+.3f}" for r in np.sort(el.radii)[::-1])
         txt = (f"μ₁({sym}) = {el.mu1:9.3f}  isotropy    (§5.4)\n"
                f"μ₂({sym}) = {el.mu2:9.3f}  condition   (§5.4)\n"
                f"μ₃({sym}) = {mu3:9.4f}  volume      (§5.4)\n"
-               f"semi-axes {_vec(np.sort(el.radii)[::-1], 3)}")
+               f"semi-axes ({semi})")
         if force:
             txt += "\nB = A⁻¹: same axes, lengths 1/σᵢ"
+        if inf.any():
+            txt += "\n∞: singular direction — any force along it is resisted with zero torque (drawn clamped, red)"
         if planar_ang:
             txt += "\nplanar arm: ω = ω_z only → segment along z"
         self.mu_lbl.setText(txt)
+        self.view.remove_prefix("vel.ellinf")
         if self.cb_ell.isChecked():
             col = (1.0, 0.62, 0.25, 0.33) if force else (0.3, 0.79, 0.94, 0.33)
             self.view.set_ellipsoid("vel.ell", el.center, el.axes, radii, col)
-            pts = []
+            pts, pinf = [], []
             for i in range(3):
                 if radii[i] > 1e-4:
-                    pts += [el.center - radii[i] * el.axes[:, i], el.center + radii[i] * el.axes[:, i]]
+                    seg = [el.center - radii[i] * el.axes[:, i], el.center + radii[i] * el.axes[:, i]]
+                    (pinf if inf[i] else pts).extend(seg)
             if pts:
                 self.view.set_polyline("vel.ellax", pts, (*col[:3], 0.95), 2, mode="lines")
             else:
                 self.view.remove("vel.ellax")
+            if pinf:
+                self.view.set_polyline("vel.ellinf.ax", pinf, (1.0, 0.35, 0.35, 0.95), 3, mode="lines")
+                for j, q in enumerate(pinf[1::2]):
+                    self.view.set_label(f"vel.ellinf.lbl{j}", q, "∞", theme.BAD)
         else:
             self.view.remove("vel.ell")
             self.view.remove("vel.ellax")
@@ -590,30 +612,52 @@ class VelocityTab(BaseTab):
         bounds = list(zip(lo, hi))
         th_start = np.clip(th0, lo, hi)
 
-        def smin2(th):
-            return kin.singular_values(robot, th)[-1] ** 2
+        def job(progress, cancelled):
+            def smin2(th):
+                if cancelled():
+                    raise InterruptedError
+                return kin.scaled_singular_values(robot, th)[-1] ** 2
 
-        QtWidgets.QApplication.setOverrideCursor(QtCore.Qt.WaitCursor)
-        try:
             r1 = minimize(lambda th: smin2(th) + 0.02 * np.sum((th - th0) ** 2), th_start, method="L-BFGS-B",
                           bounds=bounds, options=dict(maxiter=300))
+            progress(0.5)
             r2 = minimize(smin2, r1.x, method="L-BFGS-B", bounds=bounds,
                           options=dict(maxiter=300, ftol=1e-18, gtol=1e-12))
-        finally:
-            QtWidgets.QApplication.restoreOverrideCursor()
-        th1 = r2.x
-        s1 = kin.singular_values(robot, th1)[-1]
-        snapped = np.where(np.abs(th1 - th0) < 2e-3, th0, th1)     # joints the optimiser did not use
-        if kin.singular_values(robot, snapped)[-1] <= max(10 * s1, 1e-8):
-            th1 = snapped
-        s0 = kin.singular_values(robot, th0)[-1]
-        s1 = kin.singular_values(robot, th1)[-1]
+            th1 = r2.x
+            s1 = kin.scaled_singular_values(robot, th1)[-1]
+            snapped = np.where(np.abs(th1 - th0) < 2e-3, th0, th1)     # joints the optimiser did not use
+            if kin.scaled_singular_values(robot, snapped)[-1] <= max(10 * s1, 1e-8):
+                th1 = snapped
+            return th1, r1.nfev + r2.nfev
+
+        self.sing_btn.setEnabled(False)
+        self.sing_lbl.setText("searching (L-BFGS-B in a background thread) …")
+        self.sing_jobs.run(job, on_done=lambda out, name=robot.name, th0=th0: self._sing_done(name, th0, *out),
+                           on_error=self._sing_failed, label="nearest singularity")
+
+    def _sing_failed(self, err):
+        self.sing_btn.setEnabled(True)
+        self.sing_lbl.setText("search failed:\n" + err.strip().splitlines()[-1])
+
+    def _sing_done(self, name, th0, th1, nfev):
+        self.sing_btn.setEnabled(True)
+        robot = self.ctx.robot
+        if name != robot.name or len(th0) != robot.n:
+            return
+        s0 = kin.scaled_singular_values(robot, th0)[-1]
+        s1 = kin.scaled_singular_values(robot, th1)[-1]
         d = np.degrees(th1 - th0)
         moved = ", ".join(f"θ{_sub(i + 1)} {d[i]:+.1f}°" for i in np.argsort(-np.abs(d)) if abs(d[i]) > 0.5)
-        self.sing_lbl.setText(f"σ_min: {s0:.3e} → {s1:.2e}  ({r1.nfev + r2.nfev} evaluations)\n"
+        self.sing_lbl.setText(f"σ_min(J̃): {s0:.3e} → {s1:.2e}  ({nfev} evaluations)\n"
                               f"‖Δθ‖ = {np.linalg.norm(d):.1f}°:  {moved or 'already singular'}")
-        self._sing_anim = dict(th0=th0, th1=th1, k=0, N=50)
+        self._sing_anim = dict(th0=self.theta.copy(), th1=th1, k=0, N=50)
         self.sing_timer.start(30)
+
+    def _cancel_singularity(self):
+        if self.sing_jobs.is_busy():
+            self.sing_jobs.cancel()
+            self.sing_lbl.setText("")
+        self.sing_btn.setEnabled(True)
 
     def _sing_step(self):
         a = self._sing_anim
@@ -647,8 +691,11 @@ class VelocityTab(BaseTab):
         th = self.theta + 0.03 * qd
         lo = np.maximum(robot.joint_limits[:, 0], -2 * np.pi)
         hi = np.minimum(robot.joint_limits[:, 1], 2 * np.pi)
-        if np.any(th <= lo) or np.any(th >= hi):
+        hit = np.flatnonzero((th <= lo) | (th >= hi))
+        if hit.size:
             self.move_btn.setChecked(False)
+            self.sing_lbl.setText("Move stopped: " + ", ".join(f"θ{_sub(i + 1)}" for i in hit)
+                                  + (" reached its limit" if hit.size == 1 else " reached their limits"))
             return
         self.set_theta(th)
 
@@ -661,51 +708,58 @@ class VelocityTab(BaseTab):
         n = self.ws_n.value()
         chunk = 500
         nchunks = int(np.ceil(n / chunk))
+        buf: list = []          # chunks of *this* job only (appended by the worker, read by the GUI thread)
 
-        def job(w: _Worker):
+        def job(progress, cancelled):
             for k in range(nchunks):
-                if w.cancelled:
+                if cancelled():
                     return None
-                P, W = kin.workspace_samples(robot, min(chunk, n - k * chunk), seed=1000 + k)
-                w.progress.emit((robot.name, k + 1, nchunks, P, W))
+                buf.append(kin.workspace_samples(robot, min(chunk, n - k * chunk), seed=1000 + k))
+                progress((k + 1) / nchunks)
             return robot.name
 
-        w = _Worker(job, self)
-        w.progress.connect(self._ws_progress)
-        w.done.connect(self._ws_done)
-        w.failed.connect(lambda e: self.ws_lbl.setText("workspace failed:\n" + e[-300:]))
-        self._ws_worker = w
-        self._workers.append(w)
-        w.finished.connect(lambda w=w: self._workers.remove(w) if w in self._workers else None)
         self.ws_btn.setEnabled(False)
         self.ws_bar.setRange(0, nchunks)
         self.ws_bar.setValue(0)
         self.ws_lbl.setText("sampling in a background thread …")
-        w.start()
+        # the runner drops progress / results of superseded jobs, and each job has its own buffer,
+        # so chunks of a cancelled job can never leak into the next cloud
+        self.ws_jobs.run(job, on_done=lambda name, buf=buf: self._ws_done(name, buf),
+                         on_error=self._ws_failed,
+                         on_progress=lambda f, buf=buf, name=robot.name: self._ws_progress(name, buf),
+                         label="workspace")
 
-    def _ws_progress(self, data):
-        name, k, nchunks, P, W = data
-        if self._ws_worker is None or self._ws_worker.cancelled or name != self.ctx.robot.name:
+    def _ws_failed(self, err):
+        self.ws_btn.setEnabled(True)
+        self.ws_lbl.setText("workspace failed:\n" + err[-300:])
+
+    def _ws_progress(self, name, buf):
+        if name != self.ctx.robot.name:
             return
-        self._ws_P.append(P)
-        self._ws_W.append(W)
+        chunks = list(buf)
+        if not chunks:
+            return
+        self._ws_P = [c[0] for c in chunks]
+        self._ws_W = [c[1] for c in chunks]
         P = np.vstack(self._ws_P)
         W = np.concatenate(self._ws_W)
         wmax = max(W.max(), 1e-12)
         self.view.set_points("vel.ws", P, _cmap(W / wmax), 3.5)
-        self.ws_bar.setValue(k)
+        self.ws_bar.setValue(len(chunks))
         self.ws_hi.setText(f"μ₃ = {wmax:.3f}")
         self.ws_lbl.setText(f"{len(P)} samples · reach of cloud {np.linalg.norm(P, axis=1).max():.3f} m")
 
-    def _ws_done(self, name):
+    def _ws_done(self, name, buf):
         self.ws_btn.setEnabled(True)
-        if name is None or name != self.ctx.robot.name or not self._ws_P:
+        if name is None or name != self.ctx.robot.name:
+            return
+        self._ws_progress(name, buf)
+        if not self._ws_P:
             return
         P = np.vstack(self._ws_P)
         W = np.concatenate(self._ws_W)
         self.ws_lbl.setText(f"{len(P)} samples · max reach {np.linalg.norm(P, axis=1).max():.3f} m · "
                             f"{100 * np.mean(W < 0.05 * W.max()):.1f} % of samples near-singular (μ₃ < 5 % of max)")
-        self._ws_worker = None
 
     def clear_workspace(self):
         self._cancel_workspace()
@@ -715,15 +769,18 @@ class VelocityTab(BaseTab):
         self.ws_lbl.setText("")
 
     def _cancel_workspace(self):
-        if self._ws_worker is not None:
-            self._ws_worker.cancelled = True
-            self._ws_worker = None
+        if self.ws_jobs.is_busy():
+            self.ws_jobs.cancel()
         self.ws_btn.setEnabled(True)
 
-    def _shutdown_workers(self):
-        for w in list(self._workers):
-            w.cancelled = True
-            w.wait(5000)
+    def shutdown(self):
+        """Application quit: stop timers and cancel both background jobs (brief waits only)."""
+        self._stop_timers()
+        self.ws_jobs.shutdown(500)
+        self.sing_jobs.shutdown(500)
+        parent = getattr(super(), "shutdown", None)
+        if parent is not None:
+            parent()
 
     # ================================================================== show / hide
     def _stop_timers(self):

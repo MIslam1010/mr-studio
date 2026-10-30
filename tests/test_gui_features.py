@@ -111,10 +111,11 @@ def test_recorder_mp4_and_gif(qapp, tmp_path):
 
     rec = Recorder()
     rec.start(grab, fps=25)
-    t0 = time.perf_counter()
-    while time.perf_counter() - t0 < 0.8:
+    deadline = time.monotonic() + 10.0          # generous upper bound only; the loop is driven by frames
+    while rec.frames < 12 and time.monotonic() < deadline:
         qapp.processEvents()
         time.sleep(0.005)
+    assert rec.frames >= 12, f"recorder captured only {rec.frames} frames in 10 s"
     tmp = rec.stop()
     assert tmp and os.path.getsize(tmp) > 0 and rec.frames >= 10
     import shutil

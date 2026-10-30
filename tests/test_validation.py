@@ -90,6 +90,54 @@ def test_missing_optional_module_is_skipped_not_failed():
     assert s["skipped"] == 1 and s["total"] == 0 and s["all_passed"]
 
 
+#: number of checks in a full run when this test was written (504 before the 2026-10 review fixes, + 3 gravity
+#: vs hand-CoM checks, + 3 s̈ finite-difference checks). Adding checks is fine; losing some is not.
+MIN_CHECKS = 510
+
+
+def test_no_optional_module_is_skipped(run):
+    """A missing optional module turns into a quiet SKIP in the GUI; in the test suite it must be an error."""
+    checks, _ = run
+    skipped = [c.name for c in checks if V.is_skipped(c)]
+    assert not skipped, skipped
+    # every optional module contributed checks (modules may file them under their own category name, e.g.
+    # trajectory.py -> "Trajectory & control"; _optional_checks tags the last one with "[module: N checks ...]")
+    for modname, cat in V.OPTIONAL_MODULES:
+        assert any(f"[{modname}: " in (c.detail or "") for c in checks), f"{modname} ({cat}) contributed no checks"
+    assert len(checks) >= MIN_CHECKS, f"{len(checks)} checks < {MIN_CHECKS}"
+
+
+def test_informational_checks_not_counted(run):
+    checks, _ = run
+    info = [c for c in checks if V.is_informational(c)]
+    assert info and all("Euler" in c.name for c in info)
+    s = V.summary(checks)
+    assert s["informational"] == len(info)
+    assert s["total"] == len(checks) - len(info) - s["skipped"]
+
+
+def test_run_all_can_be_cancelled():
+    calls = []
+
+    def cancelled():
+        calls.append(1)
+        return len(calls) > 2
+
+    out = V.run_all(cancelled=cancelled)
+    assert len(out) == 2
+
+
+def test_gravity_hand_check_has_teeth(monkeypatch):
+    """Moving one link's mass in the hand sum (not in the engines) must be detected."""
+    robot = get_robot("UR5 (6R industrial)")
+    err, tol, _ = V.gravity_vs_hand_com(robot)
+    assert err <= tol
+    good = type(robot).masses
+    monkeypatch.setattr(type(robot), "masses", property(lambda r: good.fget(r) * np.r_[1.0, 1.0, 1.01, 1, 1, 1]))
+    err, tol, _ = V.gravity_vs_hand_com(robot)
+    assert err > tol
+
+
 # ---------------------------------------------------------------- negative controls: the checks have teeth
 def test_detects_wrong_jacobian(monkeypatch):
     robot = get_robot("UR5 (6R industrial)")

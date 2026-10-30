@@ -10,7 +10,7 @@ matplotlib==3.11.2
 PySide6==6.12.0
 pyqtgraph==0.14.0
 PyOpenGL==3.1.10
-pytest==9.1.1
 imageio==2.38.1                 # video/GIF export (Record button)
 imageio-ffmpeg==0.6.0           # bundled ffmpeg binary for H.264 MP4
 pillow==12.3.0                  # GIF palette optimisation
+pyserial==3.5                   # serial ports of the Hardware / Haptics tabs (also bundled into the app)

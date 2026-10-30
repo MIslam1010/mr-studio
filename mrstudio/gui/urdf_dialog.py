@@ -7,7 +7,7 @@ import numpy as np
 from PySide6 import QtCore, QtWidgets
 
 from .. import urdf_import as U
-from ..robots import ROBOTS, register_robot
+from ..robots import ROBOTS
 from . import theme
 from .viewer import RobotGraphic, SceneView
 from .widgets import button, hbox
@@ -154,9 +154,9 @@ class UrdfDialog(QtWidgets.QDialog):
 
 
 def open_urdf_dialog(parent=None):
-    """Modal URDF import dialog. Returns the imported (and registered) SerialRobot, or None."""
+    """Modal URDF import dialog. Returns the imported SerialRobot (not yet registered: the caller passes it
+    to ``robots.register_robot``, which never overwrites a built-in robot), or None."""
     dlg = UrdfDialog(parent)
     if dlg.exec() != QtWidgets.QDialog.Accepted or dlg.robot is None:
         return None
-    register_robot(dlg.robot)
     return dlg.robot

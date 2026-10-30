@@ -1,0 +1,18 @@
+[project]
+name = "mr-studio"
+version = "1.0.0"   # keep equal to VERSION in packaging/bundle_config.py (CI checks the tag against that file)
+description = "Interactive teaching app for robot kinematics, dynamics, control and planning (Modern Robotics)"
+requires-python = ">=3.11,<3.12"
+readme = "README.md"
+license = "MIT"
+license-files = ["LICENSE"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+addopts = "-ra"
+
+[tool.ruff]
+line-length = 120
+
+[tool.ruff.lint]
+select = ["E9", "F63", "F7", "F82"]   # syntax errors and undefined names only

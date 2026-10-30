@@ -11,6 +11,8 @@ are commissioned.
 """
 from __future__ import annotations
 
+import threading
+import time
 from abc import ABC, abstractmethod
 from dataclasses import dataclass, field
 
@@ -106,22 +108,50 @@ class ArmDriver(ABC):
     """Common interface of every arm back-end (simulated or real).
 
     * ``connect()`` / ``disconnect()``
-    * ``read_joints() -> q``          measured joint angles [rad], model (PoE) convention
+    * ``read_joints() -> q``          measured joint angles [rad], model (PoE) convention.  ``last_read_fresh``
+                                      tells whether that sample is new; ``fresh_age()`` is the time since the
+                                      last fresh one (a stale stream must not start or keep a run going).
     * ``send_joints(q, speed)``       position set-point q [rad]; ``speed`` = fraction (0, 1] of the rated
                                       joint speed the servos may use.  Returns False (and does nothing)
-                                      while the driver is latched.
-    * ``stop()``                      halt now and enter the **latched stop** (checklist rules 6–7): every
-                                      later ``send_joints`` is ignored until ``reset_latch()``.
+                                      while the driver is latched; raises ``HardwareError`` on a non-finite q.
+    * ``stop() -> bool``              halt now and enter the **latched stop** (checklist rules 6–7): every
+                                      later ``send_joints`` is ignored until ``reset_latch()``.  True only when
+                                      the halt command went out without error (one retry on failure).
     * ``latch()``                     alias of ``stop()``;  ``latched`` tells the state.
     * ``set_torque(on)``              disable / enable servo torque (only allowed while latched).
+
+    Threads: a run streams from a worker thread while STOP comes from the GUI thread.  The latch is a
+    ``threading.Event`` that ``stop()`` sets *before* it takes the I/O lock, and ``send_joints`` checks it
+    under that lock just before every write, so no set-point can follow a STOP.  The halt itself is sent by
+    whichever thread takes the lock first (``ensure_halted``), ahead of any further read.
     """
     name = "driver"
 
     def __init__(self, spec: ArmSpec = COURSE_ARM):
         self.spec = spec
-        self._latched = False
+        self._stop_evt = threading.Event()
+        self._halt_ok: bool | None = None         # outcome of the halt of the current latch (None = not sent)
         self._torque = True
         self.connected = False
+        self.io_lock = threading.RLock()          # guards the SDK / serial object
+        self.clock = time.monotonic
+        self.read_failures = 0                    # failed reads since connect (shown in the tab)
+        self.consecutive_read_failures = 0
+        self.last_read_fresh = False
+        self.last_fresh_t: float | None = None
+        self.last_cmd_servo_deg: np.ndarray | None = None    # raw servo set-point of the last write [deg]
+        self.last_meas_servo_deg: np.ndarray | None = None   # raw servo reading of the last read [deg]
+
+    @property
+    def _latched(self) -> bool:
+        return self._stop_evt.is_set()
+
+    @_latched.setter
+    def _latched(self, on: bool) -> None:
+        if on:
+            self._stop_evt.set()
+        else:
+            self._stop_evt.clear()
 
     # -- connection ---------------------------------------------------------------------------
     @abstractmethod
@@ -130,34 +160,80 @@ class ArmDriver(ABC):
     def disconnect(self) -> None:
         self.connected = False
 
-    # -- motion -------------------------------------------------------------------------------
+    def describe(self) -> dict:
+        """Connection and calibration facts for the log sidecar."""
+        return dict(driver=self.name)
+
+    # -- reads -----------------------------------------------------------------------------------
     @abstractmethod
     def read_joints(self) -> np.ndarray: ...
 
+    def _mark_read(self, fresh: bool) -> None:
+        self.last_read_fresh = bool(fresh)
+        if fresh:
+            self.consecutive_read_failures = 0
+            self.last_fresh_t = self.clock()
+        else:
+            self.read_failures += 1
+            self.consecutive_read_failures += 1
+
+    def fresh_age(self) -> float:
+        """Seconds since the last fresh joint reading (inf before the first one)."""
+        if self.last_fresh_t is None:
+            return float("inf")
+        return max(0.0, self.clock() - self.last_fresh_t)
+
+    # -- motion -------------------------------------------------------------------------------
     @abstractmethod
     def _send(self, q: np.ndarray, speed: float) -> None: ...
 
     @abstractmethod
-    def _halt(self) -> None: ...
+    def _halt(self) -> bool:
+        """Send the halt command; True when it went out without error."""
 
     def send_joints(self, q, speed: float) -> bool:
-        if self._latched or not self.connected:
-            return False
         q = np.asarray(q, float).reshape(self.spec.n)
+        if not np.all(np.isfinite(q)):
+            raise HardwareError(f"non-finite joint command rejected: {q}")
         speed = float(np.clip(speed, 0.0, 1.0))
         if speed <= 0:
             return False
-        self._send(q, speed)
+        with self.io_lock:
+            if self._latched or not self.connected:      # checked under the lock, before every write
+                return False
+            self._send(q, speed)
         return True
 
-    def stop(self) -> None:
-        """Halt and latch (safe even when not connected)."""
+    def stop(self) -> bool:
+        """Halt and latch (safe even when not connected).  True when the halt is confirmed."""
         self._latched = True
-        if self.connected:
-            self._halt()
+        return self.ensure_halted()
 
-    def latch(self) -> None:
-        self.stop()
+    def ensure_halted(self) -> bool:
+        """Send the halt of the current latch unless it already went out (one retry on failure)."""
+        if not self._latched or not self.connected:
+            return True                 # nothing commanded through this driver is still running
+        with self.io_lock:
+            if self._halt_ok:
+                return True
+            ok = False
+            for _ in range(2):
+                try:
+                    ok = self._halt() is not False
+                except Exception:
+                    ok = False
+                if ok:
+                    break
+            self._halt_ok = ok
+            return ok
+
+    @property
+    def halt_confirmed(self) -> bool | None:
+        """True / False = outcome of the halt of the current latch, None = not latched or not sent yet."""
+        return self._halt_ok
+
+    def latch(self) -> bool:
+        return self.stop()
 
     @property
     def latched(self) -> bool:
@@ -166,6 +242,7 @@ class ArmDriver(ABC):
     def reset_latch(self) -> None:
         if not self._torque:
             self.set_torque(True)
+        self._halt_ok = None
         self._latched = False
 
     # -- torque ------------------------------------------------------------------------------
@@ -176,8 +253,9 @@ class ArmDriver(ABC):
     def set_torque(self, on: bool) -> None:
         if not on and not self._latched:
             raise HardwareError("torque may only be disabled in latched stop (checklist rule 6)")
-        self._torque = bool(on)
-        self._set_torque(bool(on))
+        with self.io_lock:
+            self._set_torque(bool(on))
+        self._torque = bool(on)          # only once the servos accepted the command
 
     def _set_torque(self, on: bool) -> None:
         pass

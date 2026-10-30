@@ -16,13 +16,15 @@
 AppId={{6C1E2F4A-3B7D-4C59-9A0E-5D2B8F1C7A31}
 AppName={#MyAppName}
 AppVersion={#MyAppVersion}
-AppPublisher=MR Studio
+AppPublisher=Muhammad A. M. Islam
+AppPublisherURL=https://github.com/MIslam1010/mr-studio
+AppSupportURL=https://github.com/MIslam1010/mr-studio/issues
+CloseApplications=yes
 AppComments=Kinematics and dynamics of robot chains following Modern Robotics (Lynch & Park)
 DefaultDirName={autopf}\{#MyAppName}
 DefaultGroupName={#MyAppName}
 DisableProgramGroupPage=yes
 PrivilegesRequired=lowest
-PrivilegesRequiredOverridesAllowed=dialog
 ArchitecturesAllowed=x64compatible
 ArchitecturesInstallIn64BitMode=x64compatible
 OutputDir=dist
@@ -43,6 +45,8 @@ Name: "desktopicon"; Description: "{cm:CreateDesktopIcon}"; GroupDescription: "{
 
 [Files]
 Source: "dist\MRStudio\*"; DestDir: "{app}"; Flags: ignoreversion recursesubdirs createallsubdirs
+Source: "..\LICENSE"; DestDir: "{app}"; Flags: ignoreversion
+Source: "..\THIRD_PARTY_NOTICES.md"; DestDir: "{app}"; Flags: ignoreversion
 
 [Icons]
 Name: "{group}\{#MyAppName}"; Filename: "{app}\{#MyAppExe}"

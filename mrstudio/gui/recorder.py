@@ -1,16 +1,23 @@
 """Screen recording of the 3-D view or the whole window -> MP4 (H.264) or GIF, plus PNG screenshots.
 
 Frames are grabbed on the GUI thread by a QTimer (``QOpenGLWidget.grabFramebuffer`` for a 3-D view,
-which includes the GL text labels, or ``QWidget.grab`` for the window) and handed through a bounded
-queue to a worker thread that scales them and streams them into a temporary H.264 MP4 (imageio-ffmpeg).
-Memory stays constant whatever the length. On save the temp MP4 is moved (MP4) or converted to an
-optimised GIF (Pillow, shared palette, size cap) -- again in a worker thread.
+which includes the GL text labels, or ``QWidget.grab`` for the window). The grab callable is called on
+every tick, so it may re-resolve its source (e.g. the current tab's 3-D view after a tab switch). Each frame
+is scaled to the fixed output size right away (letter-boxed if its aspect ratio differs) and handed through
+a small bounded queue (``QUEUE_FRAMES``) to a worker thread that streams it into a temporary H.264 MP4
+(imageio-ffmpeg). Memory is therefore bounded by the queue, whatever the length of the clip; if the encoder
+falls behind, frames are dropped (counted in ``dropped``). ``stop(wait=False)`` returns at once and the
+worker emits ``finished(tmp_path)`` when the file is complete. On save the temp MP4 is moved (MP4) or
+converted to an optimised GIF (Pillow, shared palette, size cap) -- again in a worker thread.
 
     rec = Recorder()
     rec.start(view.grab_frame, fps=30)      # any callable returning a QImage / QPixmap
     ...
     tmp = rec.stop()                        # waits for the encoder to flush, returns temp .mp4
     rec.export(tmp, "/path/clip.gif", block=True)
+
+    rec.finished.connect(on_done)           # GUI: non-blocking stop, on_done(tmp or "") when flushed
+    rec.stop(wait=False)
 """
 from __future__ import annotations
 
@@ -28,6 +35,7 @@ MAX_VIDEO_WIDTH = 1920   # Retina grabs are 2x: cap so files stay reasonable
 GIF_MAX_WIDTH = 720
 GIF_FPS = 15
 GIF_COLORS = 128
+QUEUE_FRAMES = 10        # frames waiting for the encoder (already scaled to the output size)
 
 
 def qimage_to_rgb(img: QtGui.QImage, max_width: int | None = MAX_VIDEO_WIDTH,
@@ -55,6 +63,7 @@ class Recorder(QtCore.QObject):
     tick = QtCore.Signal(float)            # elapsed seconds while recording
     exported = QtCore.Signal(str)          # output path after export()
     failed = QtCore.Signal(str)            # error message
+    finished = QtCore.Signal(str)          # temp MP4 path once the encoder has flushed ("" on failure)
 
     def __init__(self, parent=None):
         super().__init__(parent)
@@ -64,6 +73,8 @@ class Recorder(QtCore.QObject):
         self._grab_fn = None
         self._queue: queue.Queue | None = None
         self._thread: threading.Thread | None = None
+        self._stop_evt = threading.Event()
+        self._waiting = False         # stop(wait=True) in progress: do not emit finished/failed twice
         self._error: str | None = None
         self.fps = 30
         self.tmp_path: str | None = None
@@ -80,20 +91,42 @@ class Recorder(QtCore.QObject):
     def elapsed(self) -> float:
         return time.perf_counter() - self._t0 if self.recording else 0.0
 
+    def busy(self) -> bool:
+        """Recording, or still flushing the encoder after a non-blocking stop()."""
+        return self.recording or self._thread is not None
+
     def start(self, grab_fn, fps: int = 30):
-        if self.recording:
+        """Start grabbing ``grab_fn()`` (QImage / QPixmap; called on every tick) ``fps`` times a second."""
+        if self.busy():
             return
         import imageio.v2 as iio  # noqa: F401  (fail early if the dependency is missing)
         self._grab_fn, self.fps = grab_fn, int(fps)
         fd, self.tmp_path = tempfile.mkstemp(prefix="mrstudio_rec_", suffix=".mp4")
         os.close(fd)
-        self._queue = queue.Queue(maxsize=90)   # ~3 s of buffered frames
+        self._queue = queue.Queue(maxsize=QUEUE_FRAMES)
+        self._stop_evt = threading.Event()
         self._error, self.frames, self.dropped, self._size = None, 0, 0, None
-        self._thread = threading.Thread(target=self._encode_loop, args=(self.tmp_path, self.fps), daemon=True)
+        self._thread = threading.Thread(target=self._encode_loop,
+                                        args=(self.tmp_path, self.fps, self._queue, self._stop_evt), daemon=True)
         self._thread.start()
         self._t0 = time.perf_counter()
         self._timer.start(max(1, int(round(1000 / self.fps))))
         self._grab()
+
+    def _fit(self, img: QtGui.QImage) -> QtGui.QImage:
+        """Scale ``img`` to the output size, keeping its aspect ratio (letter-boxed)."""
+        w, h = self._size
+        if (img.width(), img.height()) == (w, h):
+            return img.convertToFormat(QtGui.QImage.Format_RGB888)
+        sc = img.scaled(w, h, QtCore.Qt.KeepAspectRatio, QtCore.Qt.SmoothTransformation)
+        if (sc.width(), sc.height()) == (w, h):
+            return sc.convertToFormat(QtGui.QImage.Format_RGB888)
+        out = QtGui.QImage(w, h, QtGui.QImage.Format_RGB888)
+        out.fill(QtGui.QColor("#000000"))
+        p = QtGui.QPainter(out)
+        p.drawImage((w - sc.width()) // 2, (h - sc.height()) // 2, sc)
+        p.end()
+        return out
 
     def _grab(self):
         try:
@@ -102,24 +135,25 @@ class Recorder(QtCore.QObject):
                 img = img.toImage()
             if img is None or img.isNull():
                 return
+            img.setDevicePixelRatio(1.0)
             if self._size is None:  # fix the output size on the first frame (H.264 needs even sizes)
                 w, h = img.width(), img.height()
                 if w > MAX_VIDEO_WIDTH:
                     h, w = int(round(h * MAX_VIDEO_WIDTH / w)), MAX_VIDEO_WIDTH
-                self._size = (w - w % 2, h - h % 2)
+                self._size = (max(2, w - w % 2), max(2, h - h % 2))
             # keep real-time playback: duplicate the frame if grabbing fell behind the clock
             due = int((time.perf_counter() - self._t0) * self.fps) + 1
             n = min(max(due - self.frames, 1), 4)
-            try:
-                self._queue.put_nowait((img.copy(), n))
-                self.frames += n
-            except queue.Full:
+            if self._queue.full():
                 self.dropped += 1
+            else:
+                self._queue.put_nowait((self._fit(img), n))   # only this thread puts: cannot be full now
+                self.frames += n
             self.tick.emit(time.perf_counter() - self._t0)
         except Exception as e:  # pragma: no cover
             self._error = str(e)
 
-    def _encode_loop(self, path, fps):
+    def _encode_loop(self, path, fps, q, stop_evt):
         import imageio.v2 as iio
         writer = None
         try:
@@ -127,40 +161,64 @@ class Recorder(QtCore.QObject):
                                     macro_block_size=2, ffmpeg_log_level="error",
                                     ffmpeg_params=["-preset", "veryfast", "-tune", "animation"])
             while True:
-                item = self._queue.get()
-                if item is None:
-                    break
+                try:
+                    item = q.get(timeout=0.05)
+                except queue.Empty:
+                    if stop_evt.is_set():
+                        break
+                    continue
                 img, n = item
-                arr = _even(qimage_to_rgb(img, size=self._size))
+                arr = _even(qimage_to_rgb(img, max_width=None))
                 for _ in range(n):
                     writer.append_data(arr)
         except Exception as e:
             self._error = f"{type(e).__name__}: {e}"
-            while True:  # drain so the GUI never blocks on a full queue
+            while not stop_evt.is_set():  # drain so the GUI never sees a permanently full queue
                 try:
-                    if self._queue.get_nowait() is None:
-                        break
+                    q.get(timeout=0.05)
                 except queue.Empty:
-                    time.sleep(0.01)
+                    pass
         finally:
             if writer is not None:
                 try:
                     writer.close()
                 except Exception as e:  # pragma: no cover
                     self._error = self._error or str(e)
+            if not self._waiting:
+                self._thread_done()
 
-    def stop(self) -> str | None:
-        """Stop grabbing, wait for the encoder to flush; returns the temp MP4 path (None on error)."""
+    def _result(self) -> str | None:
+        if self._error or self.frames == 0:
+            return None
+        return self.tmp_path
+
+    def _thread_done(self):
+        """Encoder finished after a non-blocking stop(): report through signals (queued to the GUI thread)."""
+        self._thread = None
+        tmp = self._result()
+        if tmp is None:
+            self.failed.emit(self._error or "no frames were recorded")
+        self.finished.emit(tmp or "")
+
+    def stop(self, wait: bool = True) -> str | None:
+        """Stop grabbing. ``wait=True``: wait for the encoder to flush and return the temp MP4 path (None on
+        error). ``wait=False``: return None at once; ``finished(tmp_path)`` is emitted when the file is done."""
         if self._thread is None:
             return None
         self._timer.stop()
-        self._queue.put(None)
-        self._thread.join(timeout=60)
-        self._thread = None
-        if self._error or self.frames == 0:
-            self.failed.emit(self._error or "no frames were recorded")
+        if not wait:
+            self._stop_evt.set()
             return None
-        return self.tmp_path
+        self._waiting = True
+        th = self._thread
+        self._stop_evt.set()
+        th.join(timeout=60)
+        self._waiting = False
+        self._thread = None
+        tmp = self._result()
+        if tmp is None:
+            self.failed.emit(self._error or "no frames were recorded")
+        return tmp
 
     def cancel(self):
         p = self.stop()

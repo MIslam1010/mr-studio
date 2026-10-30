@@ -25,7 +25,9 @@ from mrstudio.hardware.safety import (CHECKLIST, SafetySupervisor, allowed_speed
                                       retime_to_speed, soft_limits)
 from mrstudio.hardware.session import quintic_duration, quintic_move, run_offline, with_approach
 
-_SRC = Path.home() / "Documents/Edu/Lectures/Robotics/Robotics Track Course Materials/_build/src"
+# Override with MRSTUDIO_COURSE_SRC=<path to _build/src> (the starter comparisons are skipped when it is absent).
+_SRC = Path(os.environ.get("MRSTUDIO_COURSE_SRC") or (
+    Path.home() / "Documents/Edu/Lectures/Robotics/Robotics Track Course Materials/_build/src"))
 _361 = _SRC / "361/project/starter"
 _461 = _SRC / "461/project/starter"
 
@@ -276,29 +278,77 @@ def test_mycobot_missing_sdk_message():
 
 
 class _FakeSDK:
+    """pymycobot stand-in.  Failure modes (class attributes, set per test with ``_fake(...)``):
+    raise_on_send, fail_n_reads (the next n reads return -1), disconnect_after_k (every SDK call after
+    the k-th raises OSError), stop_raises, release_raises.  ``follow``: the servos reach each set-point
+    at once (so a streamed run tracks perfectly)."""
+    raise_on_send = False
+    fail_n_reads = 0
+    disconnect_after_k = None
+    stop_raises = False
+    release_raises = False
+    follow = False
+    instances: list = []
+
     def __init__(self, port, baud):
+        self.port, self.baud = port, baud
         self.angles = [10.0, -20.0, 30.0, 0.0, 5.0, -5.0]
         self.sent = None
-        self.stopped = self.released = False
+        self.sent_log = []
+        self.stopped = self.released = self.closed = False
+        self.stop_calls = 0
         self.fail = False
+        self.calls = 0
+        self.fail_n_reads = type(self).fail_n_reads
+        _FakeSDK.instances.append(self)
+
+    def _io(self):
+        self.calls += 1
+        if self.disconnect_after_k is not None and self.calls > self.disconnect_after_k:
+            raise OSError("[Errno 6] Device not configured")
 
     def power_on(self):
-        pass
+        self._io()
 
     def get_angles(self):
+        self._io()
+        if self.fail_n_reads > 0:
+            self.fail_n_reads -= 1
+            return -1
         return -1 if self.fail else list(self.angles)
 
     def send_angles(self, a, s):
+        self._io()
+        if self.raise_on_send:
+            raise OSError("write timeout")
         self.sent = (a, s)
+        self.sent_log.append(list(a))
+        if self.follow:
+            self.angles = list(a)
 
     def stop(self):
+        self.stop_calls += 1
+        if self.stop_raises:
+            raise OSError("write timeout")
+        self._io()
         self.stopped = True
 
     def release_all_servos(self):
+        self._io()
+        if self.release_raises:
+            raise OSError("write timeout")
         self.released = True
 
     def focus_all_servos(self):
+        self._io()
         self.released = False
+
+    def close(self):
+        self.closed = True
+
+
+def _fake(**modes):
+    return type("FakeSDK", (_FakeSDK,), modes)
 
 
 def test_mycobot_driver_with_fake_sdk():
@@ -309,10 +359,10 @@ def test_mycobot_driver_with_fake_sdk():
     np.testing.assert_allclose(q, np.radians([10, -20, 30, 0, 5, -5]) - off)   # q_model = q_servo − offset
     d.send_joints(np.zeros(6), 0.25)
     np.testing.assert_allclose(d.mc.sent[0], [5, 0, 0, 0, 0, 0])
-    assert d.mc.sent[1] == 25
+    assert d.mc.sent[1] == 20                                # fixed streaming %, not the speed fraction
     d.mc.fail = True
-    np.testing.assert_allclose(d.read_joints(), q)           # failed read keeps the last sample
-    assert d.read_failures == 1
+    np.testing.assert_allclose(d.read_joints(), q)           # one failed read repeats the last sample …
+    assert d.read_failures == 1 and not d.last_read_fresh    # … flagged stale
     d.stop()
     assert d.mc.stopped and d.latched and d.send_joints(np.zeros(6), 0.25) is False
     d.set_torque(False)
@@ -334,11 +384,21 @@ def test_course_arm_model():
 # ------------------------------------------------------------------------------------- GUI
 @pytest.fixture(scope="module")
 def qapp():
-    from PySide6 import QtWidgets
+    from PySide6 import QtCore, QtWidgets
     app = QtWidgets.QApplication.instance() or QtWidgets.QApplication([])
     from mrstudio.gui import theme
     theme.apply(app)
-    return app
+    yield app
+    # tear down this module's tabs here (halted, worker joined, port closed) instead of leaving them to the
+    # session-wide teardown
+    from mrstudio.gui.tabs.hardware_tab import HardwareTab
+    for w in app.topLevelWidgets():
+        if isinstance(w, HardwareTab):
+            w.shutdown()
+            w.close()
+            w.deleteLater()
+    app.sendPostedEvents(None, QtCore.QEvent.DeferredDelete)
+    app.processEvents()
 
 
 def test_hardware_tab_headless(qapp, tmp_path):
@@ -424,3 +484,332 @@ def test_hardware_tab_delay_and_shutdown(qapp):
     drv = tab.driver
     tab.shutdown()
     assert drv.latched and not drv.connected and tab.driver is None
+
+
+# ------------------------------------------------------------------------------------- safety review (2026-10)
+from mrstudio.hardware.mycobot import (MYCOBOT280_LIMITS_DEG, SERVO_LIMIT_MARGIN_DEG, MyCobotCalibration,  # noqa: E402
+                                       rank_ports)
+from mrstudio.hardware.session import HardwareRun  # noqa: E402
+
+_CAL = MyCobotCalibration(sign=[1, -1, 1, 1, -1, 1], offset_deg=[30, 0, -10, 0, 5, 0])
+
+
+def _servo_ok(deg):
+    lo, hi = (MYCOBOT280_LIMITS_DEG + np.array([SERVO_LIMIT_MARGIN_DEG, -SERVO_LIMIT_MARGIN_DEG])).T
+    return np.all((np.asarray(deg) >= lo - 1e-9) & (np.asarray(deg) <= hi + 1e-9))
+
+
+def test_mycobot_stale_reads_raise_after_three():
+    d = MyCobotDriver("fake", sdk_factory=_FakeSDK, calibration=_CAL)
+    d.connect()
+    assert d.last_read_fresh and d.fresh_age() < 1.0
+    d.mc.fail = True
+    d.read_joints()
+    d.read_joints()
+    assert d.consecutive_read_failures == 2 and not d.last_read_fresh
+    with pytest.raises(HardwareError, match="3 failed reads"):
+        d.read_joints()
+    d.mc.fail = False
+    d.read_joints()
+    assert d.last_read_fresh and d.consecutive_read_failures == 0 and d.read_failures == 3
+
+
+def test_mycobot_connect_failure_closes_port():
+    _FakeSDK.instances.clear()
+    d = MyCobotDriver("fake", sdk_factory=_fake(fail_n_reads=99), calibration=_CAL)
+    with pytest.raises(HardwareError, match="did not report"):
+        d.connect()
+    assert not d.connected and d.mc is None and _FakeSDK.instances[-1].closed
+    d2 = MyCobotDriver("fake", sdk_factory=_fake(fail_n_reads=2), calibration=_CAL)
+    d2.connect()                                         # the first reads after opening may time out
+    assert d2.connected
+
+
+def test_mycobot_sdk_exceptions_become_hardware_error():
+    d = MyCobotDriver("fake", sdk_factory=_fake(raise_on_send=True), calibration=_CAL)
+    d.connect()
+    with pytest.raises(HardwareError) as ei:
+        d.send_joints(np.zeros(6), 0.25)
+    assert isinstance(ei.value.__cause__, OSError)
+    with pytest.raises(HardwareError, match="non-finite"):
+        d.send_joints(np.full(6, np.nan), 0.25)
+
+
+def test_mycobot_calibration_mapping_limits_and_file(tmp_path):
+    d = MyCobotDriver("fake", sdk_factory=_FakeSDK, calibration=_CAL)
+    d.connect()
+    q = d.read_joints()
+    np.testing.assert_allclose(_CAL.to_servo_deg(q), d.mc.angles, atol=1e-9)      # inverse mapping
+    d.send_joints(np.radians([10, 20, 0, 0, 0, 0]), 0.5)
+    np.testing.assert_allclose(d.mc.sent[0], [40, -20, -10, 0, 5, 0])           # s * q + o
+    d.send_joints(np.radians([155, -155, 155, 155, 155, 165]), 0.5)             # model soft limits
+    assert _servo_ok(d.mc.sent[0]) and d.clamp_count == 1
+    assert d.mc.sent[0][0] == pytest.approx(158.0)                              # 155 + 30 -> 168 − 10
+    path = _CAL.save(tmp_path / "cal.json")
+    back = MyCobotCalibration.load(path)
+    np.testing.assert_array_equal(back.sign, _CAL.sign)
+    np.testing.assert_array_equal(back.offset_deg, _CAL.offset_deg)
+    with pytest.raises(ValueError):
+        MyCobotCalibration(sign=[1, 2, 1, 1, 1, 1], offset_deg=np.zeros(6))
+    (tmp_path / "bad.json").write_text("{")
+    with pytest.raises(HardwareError):
+        MyCobotCalibration.load(tmp_path / "bad.json")
+
+
+def test_failed_halt_is_reported():
+    d = MyCobotDriver("fake", sdk_factory=_fake(stop_raises=True), calibration=_CAL)
+    d.connect()
+    assert d.stop() is False
+    assert d.latched and d.halt_confirmed is False and d.mc.stop_calls == 2       # one retry
+    assert d.send_joints(np.zeros(6), 0.5) is False                              # still latched
+    d.mc.stop_raises = False
+    assert d.stop() is True and d.halt_confirmed                                 # STOP again retries
+
+
+def test_torque_state_only_after_success():
+    d = MyCobotDriver("fake", sdk_factory=_fake(release_raises=True), calibration=_CAL)
+    d.connect()
+    d.stop()
+    with pytest.raises(HardwareError):
+        d.set_torque(False)
+    assert d.torque_enabled
+
+
+def test_comm_error_latches_and_finishes_run():
+    clock = ManualClock()
+    d = MyCobotDriver("fake", sdk_factory=_fake(follow=True), calibration=_CAL, clock=clock)
+    d.connect()
+    sup = SafetySupervisor(session="H2", first_run=False)
+    q0 = d.read_joints()
+    t, q = quintic_move(q0, q0 + np.radians([20, 10, -10, 5, 5, 5]), sup.speed_cap)
+    d.mc.disconnect_after_k = d.mc.calls + 40              # the cable comes out mid-run
+    run = run_offline(d, sup, t, q)
+    assert run.finished and run.error and "Device not configured" in run.error
+    assert d.latched and run.t_stop is not None and run.t_stop < t[-1]
+    assert any(e["kind"] == "error" for e in run.log.events)
+
+
+def test_step_clamp_bounds_every_tick():
+    arm, clock = _arm(noise_deg=0, quantise=False)
+    sup = SafetySupervisor(session="H1")
+    q0 = COURSE_ARM.q_home
+    t = np.array([0.0, 0.3, 0.31, 2.0])                    # 20° in 10 ms: 2000°/s
+    q = np.array([q0, q0, q0 + np.radians(20), q0 + np.radians(20)])
+    run = HardwareRun(arm, sup, t, q, clock=clock)
+    run.start(arm.read_joints())
+    for dt in [0.02] * 20 + [0.08, 0.005, 0.03] * 10:      # irregular ticks (none is a stall)
+        clock.advance(dt)
+        run.step()
+    lg = run.log
+    dcmd = np.abs(np.diff(lg.cmd, axis=0))
+    lim = sup.speed_cap * np.minimum(np.diff(lg.t), HardwareRun.STEP_DT_MAX)[:, None]
+    assert np.all(dcmd <= lim + 1e-12)
+    assert dcmd.max() > 0.5 * lim.max()                     # it really was clamping
+
+
+def test_stall_freezes_trajectory_time():
+    arm, clock = _arm(noise_deg=0, quantise=False)
+    sup = SafetySupervisor(session="H2", first_run=False)
+    t, q = quintic_move(COURSE_ARM.q_home, COURSE_ARM.q_home + np.radians(30), sup.speed_cap)
+    run = HardwareRun(arm, sup, t, q, clock=clock)
+    run.start(arm.read_joints())
+    for _ in range(10):
+        clock.advance(0.02)
+        run.step()
+    tau, cmd = run.tau, run.log.cmd[-1]
+    clock.advance(0.6)                                      # GUI / USB stall
+    run.step()
+    assert run.stalls == 1 and run.tau == pytest.approx(tau)
+    np.testing.assert_allclose(run.log.cmd[-1], cmd)        # no jump ahead
+    assert run.log.dt[-1] == pytest.approx(0.6)
+    clock.advance(0.02)
+    run.step()
+    assert run.tau == pytest.approx(tau + 0.02)
+    assert any(e["kind"] == "stall" for e in run.log.events)
+
+
+def test_tracking_watchdog_stops_run():
+    arm, _ = _arm(noise_deg=0, quantise=False, lag_tau=3.0)  # a servo that cannot keep up
+    sup = SafetySupervisor(session="H2", first_run=False)
+    t, q = quintic_move(COURSE_ARM.q_home, COURSE_ARM.q_home + np.radians([60, 0, 0, 0, 0, 0]), sup.speed_cap)
+    run = run_offline(arm, sup, t, q)
+    assert run.reason.startswith("tracking error J1") and arm.latched and run.t_stop < t[-1]
+
+
+def test_simulated_arm_sags_with_torque_off():
+    arm, clock = _arm(noise_deg=0, quantise=False)
+    arm.stop()
+    q = arm.true_position()
+    arm.set_torque(False)
+    clock.advance(1.0)
+    d = np.degrees(arm.true_position() - q)
+    assert d[1] == pytest.approx(-3.0) and d[2] == pytest.approx(-3.0) and d[0] == 0
+
+
+def test_rank_ports_prefers_usb_serial():
+    from types import SimpleNamespace as P
+    ports = [P(device="/dev/tty.usbserial-1", vid=0x10C4, pid=0xEA60),
+             P(device="/dev/cu.Bluetooth-Incoming-Port", vid=None, pid=None),
+             P(device="/dev/cu.debug-console", vid=None, pid=None),
+             P(device="/dev/cu.usbmodem1", vid=0x2341, pid=0x0043),
+             P(device="/dev/cu.wchusbserial1", vid=0x1A86, pid=0x7523)]
+    assert rank_ports(ports, "darwin") == ["/dev/cu.wchusbserial1", "/dev/cu.usbmodem1"]
+    lin = [P(device="/dev/ttyS0", vid=None, pid=None), P(device="/dev/ttyUSB0", vid=0x10C4, pid=0xEA60)]
+    assert rank_ports(lin, "linux") == ["/dev/ttyUSB0", "/dev/ttyS0"]
+
+
+# ------------------------------------------------------------------------------------- GUI, myCobot back-end
+def _mycobot_tab(monkeypatch, tmp_path, factory=None, calibrated=True):
+    from mrstudio.gui.base import AppContext
+    from mrstudio.gui.tabs.hardware_tab import _BACKENDS, HardwareTab
+    cal_path = tmp_path / "mycobot_calibration.json"
+    monkeypatch.setenv("MRSTUDIO_MYCOBOT_CALIBRATION", str(cal_path))
+    if calibrated:
+        MyCobotCalibration().save(cal_path)
+    tab = HardwareTab(AppContext())
+    assert tab.calib_path == str(cal_path)
+    tab.sdk_factory = factory or _fake(follow=True)
+    tab.backend_box.setCurrentText(_BACKENDS[1])
+    tab.port_box.setCurrentText("fake")
+    assert tab.connect_backend(), tab.conn_lbl.text()
+    clock = ManualClock(0.0)
+    tab.driver.clock = clock
+    tab.driver.read_joints()
+    for cb in tab.check_boxes.values():
+        cb.setChecked(True)
+    tab.source_box.setCurrentIndex(0)
+    tab._set_target(tab.q_meas + np.radians([10, 5, -5, 0, 5, 0]))
+    return tab, clock
+
+
+def _drive(tab, clock, dt=0.02, limit=2000):
+    for _ in range(limit):
+        if tab.run.finished:
+            break
+        clock.advance(dt)
+        tab._tick()
+
+
+def test_tab_blocks_run_without_calibration(qapp, monkeypatch, tmp_path):
+    tab, clock = _mycobot_tab(monkeypatch, tmp_path, calibrated=False)
+    assert not tab.run_btn.isEnabled()
+    assert not tab.start_run() and "calibration" in tab.status_lbl.text()
+    assert tab.save_calibration()
+    assert (tmp_path / "mycobot_calibration.json").is_file()
+    assert tab.run_btn.isEnabled() and tab.start_run()
+    tab.shutdown()
+
+
+def test_tab_mycobot_run_logs_sidecars(qapp, monkeypatch, tmp_path):
+    import json
+    tab, clock = _mycobot_tab(monkeypatch, tmp_path)
+    assert tab._atexit_cb is not None                       # emergency stop registered on connect
+    assert tab.start_run()
+    assert tab.worker is None                               # ManualClock: synchronous path
+    assert not tab.save_btn.isEnabled() and not tab.csv_btn.isEnabled()   # no modal dialogs during a run
+    _drive(tab, clock)
+    assert tab.run.finished and tab.run.reason == "trajectory complete"
+    sent = np.array(tab.driver.mc.sent_log)
+    assert len(sent) > 10 and _servo_ok(sent)
+    assert tab.driver.mc.sent[1] == 20                      # fixed firmware streaming %
+    assert tab.save_btn.isEnabled()
+    tab.save_log(str(tmp_path / "h.csv"), "361")
+    meta = json.loads((tmp_path / "h.meta.json").read_text())
+    assert meta["meta"]["port"] == "fake" and meta["meta"]["baud"] == 115200
+    assert meta["meta"]["sign"] == [1] * 6 and meta["meta"]["offset_deg"] == [0.0] * 6
+    assert "sdk_version" in meta["meta"] and meta["meta"]["stream_speed_pct"] == 20
+    kinds = [e["kind"] for e in meta["events"]]
+    assert "connect" in kinds and "start" in kinds and "complete" in kinds
+    diag = (tmp_path / "h.diag.csv").read_text().splitlines()
+    assert diag[0].startswith("t,dt,fresh,stop,servo_cmd_1") and len(diag) == len(tab.last_log) + 1
+    tab.disconnect_backend()
+    assert tab._atexit_cb is None
+
+
+def test_tab_comm_error_latches_and_finishes(qapp, monkeypatch, tmp_path):
+    tab, clock = _mycobot_tab(monkeypatch, tmp_path)
+    assert tab.start_run()
+    for _ in range(5):
+        clock.advance(0.02)
+        tab._tick()
+    tab.driver.mc.raise_on_send = True
+    clock.advance(0.02)
+    tab._tick()
+    assert tab.run.finished and tab.driver.latched and not tab.timer.isActive()
+    assert "Communication error" in tab.status_lbl.text()
+    tab.shutdown()
+
+
+def test_tab_stale_reads_block_run(qapp, monkeypatch, tmp_path):
+    tab, clock = _mycobot_tab(monkeypatch, tmp_path)
+    tab.driver.mc.fail = True
+    clock.advance(0.5)
+    assert not tab.start_run()
+    assert "stale" in tab.status_lbl.text() and "failed reads" in tab.health_lbl.text()
+    tab.driver.mc.fail = False
+    assert tab.start_run()
+    tab.shutdown()
+
+
+def test_tab_failed_halt_shows_red_message(qapp, monkeypatch, tmp_path):
+    tab, clock = _mycobot_tab(monkeypatch, tmp_path, factory=_fake(follow=True, stop_raises=True))
+    assert tab.start_run()
+    clock.advance(0.02)
+    tab._tick()
+    assert tab.stop_now() is False
+    assert "STOP NOT CONFIRMED" in tab.status_lbl.text()
+    _drive(tab, clock)
+    assert "STOP NOT CONFIRMED" in tab.status_lbl.text()   # the end of the run does not hide it
+    tab.shutdown()
+    assert tab.driver is None
+
+
+def test_tab_torque_release_needs_confirmation(qapp):
+    from mrstudio.gui.base import AppContext
+    from mrstudio.gui.tabs.hardware_tab import HardwareTab
+    tab = HardwareTab(AppContext())
+    assert tab.connect_backend()
+    tab.stop_now()
+    tab.confirm = lambda *a: False
+    tab._toggle_torque()
+    assert tab.driver.torque_enabled and "cancelled" in tab.status_lbl.text()
+    tab.confirm = lambda *a: True
+    tab._toggle_torque()
+    assert not tab.driver.torque_enabled
+    tab._toggle_torque()                                     # back on: no confirmation needed
+    assert tab.driver.torque_enabled
+    tab.shutdown()
+
+
+def test_tab_worker_thread_run_and_shutdown(qapp):
+    """Real-time run on the streaming worker thread (SimulatedArm, monotonic clock)."""
+    import time as _time
+    from mrstudio.gui.base import AppContext
+    from mrstudio.gui.tabs.hardware_tab import HardwareTab
+    tab = HardwareTab(AppContext())
+    assert tab.connect_backend()
+    for cb in tab.check_boxes.values():
+        cb.setChecked(True)
+    tab.source_box.setCurrentIndex(0)
+    tab._set_target(tab.q_meas + np.radians([5, 0, 0, 0, 0, 0]))
+    tab.auto_stop.setValue(0.5)
+    assert tab.start_run() and tab.worker is not None
+    assert not tab.save_btn.isEnabled()
+    t_end = _time.monotonic() + 10.0
+    while not tab.run.finished and _time.monotonic() < t_end:
+        qapp.processEvents()
+        _time.sleep(0.01)
+    for _ in range(50):                                      # let the queued 'finished' arrive
+        qapp.processEvents()
+        if tab.worker is None:
+            break
+        _time.sleep(0.01)
+    assert tab.run.finished and tab.driver.latched and tab.worker is None
+    assert len(tab.last_log) > 20 and tab.last_log.stop.any()
+    assert np.median(np.diff(tab.last_log.t)) <= 0.05
+    # close while streaming: halt, latch, join the worker, close the port
+    tab.reset_latch()
+    assert tab.start_run()
+    drv = tab.driver
+    tab.shutdown()
+    assert drv.latched and not drv.connected and tab.worker is None and tab.driver is None

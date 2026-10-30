@@ -126,6 +126,7 @@ def test_urdf_branched_rejected():
 
 def test_urdf_examples_convert():
     for label, path in U.example_urdfs().items():
-        r = U.from_urdf(path)
+        leaves = U.leaf_links(path)   # branched models (e.g. Panda's two fingers) need an explicit tip
+        r = U.from_urdf(path, tip=leaves[0] if len(leaves) > 1 else None)
         e = U.compare_with_pinocchio(r, path, n_samples=3)
         assert max(e.values()) < 1e-12, label

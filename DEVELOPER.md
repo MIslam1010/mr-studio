@@ -11,8 +11,12 @@ Screenshot (renders the window, saves PNGs, exits — use it to visually check y
 ```
 .venv/bin/python run_app.py --screenshot <dir> --tab <index> --only [--robot "Planar 3R arm"] [--delay 2500]
 ```
-Tab indices: 0 FK, 1 Velocity, 2 IK, 3 Dynamics, 4 Trajectory & control, 5 Closed chains, 6 Stewart, 7 Task-space & force,
-8 3xRPR & Delta, 9 Motion planning, 10 Haptics & impedance, 11 Hardware bridge, 12 Practice problems, 13 Validation.
+Tab indices (`--tab`, 0-13): 0 FK, 1 Velocity, 2 IK, 3 Dynamics, 4 Control, 5 Closed chains, 6 Stewart, 7 Task-space,
+8 Parallel, 9 Planning, 10 Haptics, 11 Hardware, 12 Practice, 13 Validation. Keyboard: Ctrl+1...9 jump to tabs 1-9,
+Ctrl+Alt+Left/Right go to the previous/next tab. The tab titles carry circled numbers (1-14), so tab N has title number N+1.
+Tests: `pip install -r requirements.txt -r requirements-dev.txt`, then `QT_QPA_PLATFORM=offscreen python -m pytest -q`.
+Set `MRSTUDIO_PYTEST_HARD_EXIT=0` to let pytest exit normally (the default hard `os._exit` works around a Qt teardown segfault, see `tests/conftest.py`).
+Tests that compare with the course materials look for them at `MRSTUDIO_COURSE_SHARED` (course_robots.py) and `MRSTUDIO_COURSE_SRC`.
 Course robots (SBEG 361/461) live in `mrstudio/course_models.py`; hardware drivers in `mrstudio/hardware/`; installers in `packaging/`.
 Look at the PNG with the Read tool. A broken tab shows its traceback inside the tab (see `gui/app.py`).
 
@@ -55,7 +59,7 @@ mrstudio/
   references.py   REFERENCES bibliography (+ local PDF paths), cite(key, where), further_reading(items) for
                   the theory panels' "Further reading" (printed page numbers, verified); Help -> References…
   gui/
-    app.py        MainWindow; TABS list (module, class) — already lists all 8 tabs.
+    app.py        MainWindow; TABS list (module, class) — lists all 14 tabs.
     base.py       AppContext (ctx.robot, ctx.backend, ctx.engine(robot=None, backend=None) cached engines,
                   signals robot_changed / backend_changed) and BaseTab.
     viewer.py     SceneView(gl.GLViewWidget) keyed scene graph; RobotGraphic; GhostRobot
@@ -63,7 +67,8 @@ mrstudio/
                   plot (pyqtgraph PlotWidget preset), pen(i)
     theory.py     TheoryPanel (HTML with $$display$$ and $inline$ LaTeX via matplotlib mathtext)
     theme.py      colours: ACCENT, GOOD, BAD, WARN, TEXT, MUTED, SERIES (per-joint colours), LINK, JOINT, BASE
-    tabs/         one module per tab
+    tabs/         one module per tab (fk, velocity, ik, dynamics, control, closed, stewart, advanced_control,
+                  parallel, planning, haptics, hardware, practice, validation)
 ```
 
 ## Writing a tab

@@ -24,8 +24,9 @@ from mrstudio.robots import ROBOTS, get_robot  # noqa: E402
 
 NAMES = ["Course arm (myCobot-280 class 6R)", "EOD arm (6R on UGV)", "EOD arm (3R planar)",
          "Arm–exoskeleton 2R", "Rehab robot 2R (planar)", "Hapkit (1-DOF haptic paddle)"]
-SHARED = (Path.home() / "Documents/Edu/Lectures/Robotics/Robotics Track Course Materials/_build/shared"
-          / "course_robots.py")
+# Override with MRSTUDIO_COURSE_SHARED=<path to course_robots.py> (the comparison test is skipped when it is absent).
+SHARED = Path(os.environ.get("MRSTUDIO_COURSE_SHARED") or (
+    Path.home() / "Documents/Edu/Lectures/Robotics/Robotics Track Course Materials/_build/shared" / "course_robots.py"))
 
 
 def _states(r, k=8, seed=0):
@@ -159,13 +160,11 @@ def test_simulation_conserves_energy(name):
 
 
 # ----------------------------------------------------------------------------- GUI: every serial tab
-@pytest.fixture(scope="module")
-def qapp():
-    from PySide6 import QtWidgets
-    app = QtWidgets.QApplication.instance() or QtWidgets.QApplication([])
+@pytest.fixture(scope="module", autouse=True)
+def _themed(qapp):
+    """Uses the shared session ``qapp`` of conftest.py; this module needs the default theme applied."""
     from mrstudio.gui import theme
-    theme.apply(app)
-    return app
+    theme.apply(qapp)
 
 
 def _serial_tab_classes():

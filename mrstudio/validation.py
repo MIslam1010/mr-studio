@@ -376,15 +376,31 @@ def statics_vs_rnea(robot):
         tau_eef = mr.EndEffectorForces(th, Fb, robot.Mlist, robot.Glist, robot.Slist)
         tau_mr = e_mr.inverse(th, np.zeros(robot.n), np.zeros(robot.n), Ftip=Fb)
         tau_pin = e_pin.inverse(th, np.zeros(robot.n), np.zeros(robot.n), Ftip=Fb)
-        p = T[:3, 3]
-        tau_kin = kin.joint_torques_from_wrench(robot, th, Fs[3:], Fs[:3] - np.cross(p, Fs[3:]))
-        err = max(err, *(np.abs(tau_J - x).max() for x in (tau_eef, tau_mr, tau_pin, tau_kin)))
+        tau_vw = _virtual_work_torques(robot, th, T, Fs)
+        err = max(err, *(np.abs(tau_J - x).max() for x in (tau_eef, tau_mr, tau_pin, tau_vw)))
     return err, 1e-9, (
         f"Principle of virtual work (MR Sec. 5.2, Eq. 5.26): τ = J_s(θ)ᵀ·F_s with F_s = [Ad_Tbs]ᵀ·F_b. Compared with "
         f"(i) mr.EndEffectorForces, (ii) MR Newton-Euler inverse dynamics at rest (θ̇ = θ̈ = 0, gravity off, "
         f"F_tip = F_b), (iii) Pinocchio RNEA with the tip wrench applied as an external force on the last "
-        f"joint, (iv) kinematics.joint_torques_from_wrench (force at the tool point in {{s}}). {N} random "
+        f"joint, (iv) virtual work without any Jacobian code: τ_i = F_sᵀ·log(T(θ + h·e_i)·T(θ)⁻¹)^∨ / h with "
+        f"h = {_VW_STEP} rad (FK + matrix logarithm only; for a PoE chain T(θ + h·e_i)T(θ)⁻¹ = e^[S_i(θ)]h exactly, "
+        f"so this finite displacement has no truncation error). {N} random "
         f"configurations and wrenches with components up to 10 N / 10 N·m; error in N·m.")
+
+
+_VW_STEP = 0.1
+
+
+def _virtual_work_torques(robot, th, T, Fs):
+    """τ_i = virtual work of the space wrench F_s = (m, f) along the finite screw displacement of joint i."""
+    Tinv = mr.TransInv(T)
+    tau = np.zeros(robot.n)
+    for i in range(robot.n):
+        d = np.zeros(robot.n)
+        d[i] = _VW_STEP
+        V = mr.se3ToVec(mr.MatrixLog6(kin.fk_space(robot, th + d) @ Tinv)) / _VW_STEP   # (ω, v) in {s}
+        tau[i] = Fs @ V
+    return tau
 
 
 # ============================================================================ Ch. 8  dynamics
@@ -591,6 +607,39 @@ def coriolis_factorisation(robot):
         f"(MR Eqs. 8.17, 8.19). {N} random states; error in N·m.")
 
 
+#: robots whose inertial data were typed in by hand (not imported from a URDF / DH toolbox model)
+HAND_ENTERED = ("UR5 (6R industrial)", "Course arm (myCobot-280 class 6R)", "EOD arm (6R on UGV)")
+
+
+def gravity_vs_hand_com(robot):
+    """g(θ) of RNEA (MR + Pinocchio) vs a hand sum over links of m_j·g and the CoM positions from FK."""
+    rng = _rng("grav-com" + robot.name)
+    poses = [robot.home.copy(), robot.random_config(rng), robot.random_config(rng)]
+    m, gvec = robot.masses, np.asarray(robot.gravity, float)
+    e_mr, e_pin = _eng(robot, "mr"), _eng(robot, "pinocchio")
+    err, gmax = 0.0, 0.0
+    for th in poses:
+        pc = robot.com_positions(th)                      # CoM of every link in {s}, PoE forward kinematics
+        Js = kin.jacobian_space(robot, th)
+        hand = np.zeros(robot.n)
+        for i in range(robot.n):
+            w, v = Js[:3, i], Js[3:, i]                   # joint i's screw axis at θ
+            for j in range(i, robot.n):                   # links i..n move with joint i
+                dp = v + np.cross(w, pc[j])               # ∂p_cj/∂θ_i (velocity of the CoM point)
+                hand[i] -= m[j] * gvec @ dp               # τ_i = Σ_j r_ij × (−m_j g) · ŵ_i  (holding torque)
+        for x in (e_mr.gravity_torque(th), e_pin.gravity_torque(th)):
+            err = max(err, float(np.abs(hand - x).max()))
+        gmax = max(gmax, float(np.abs(hand).max()))
+    return err, 1e-9, (
+        f"Independent check of the hand-entered inertial data: the gravity torques g(θ) of mr.GravityForces and "
+        f"Pinocchio (which read the masses from the 6×6 spatial inertias G_i and the CoM frames from M_i,i−1) "
+        f"versus a hand sum τ_i = −Σ_(j≥i) m_j·gᵀ(ŵ_i × p_cj + v_i) = Σ_(j≥i) ŵ_i·((p_cj − q_i) × (−m_j g)), with "
+        f"the link CoM positions p_cj from the PoE forward kinematics and the masses m = "
+        f"[{', '.join(f'{x:.3g}' for x in m)}] kg. Home pose + 2 random poses; |g| up to {gmax:.2f} N·m; "
+        f"error in N·m. A mass typed into the wrong link, a CoM in the wrong frame or a gravity sign error "
+        f"would show up here.")
+
+
 def _free_motion(robot):
     rng = _rng("energy" + robot.name)
     return robot.random_config(rng), rng.uniform(-0.5, 0.5, robot.n)
@@ -604,7 +653,7 @@ def energy_conservation(robot):
     drift = np.abs(E - E[0]).max() / max(s.ke.max(), 1e-12)
     return drift, 1e-6, (
         f"Free motion (τ = 0, no friction, gravity on) from a random state, 1 s, integrated with "
-        f"dynamics.simulate(method='rk45') (SciPy DOP853, rtol = atol = 1e-10) using Pinocchio's ABA. "
+        f"dynamics.simulate(method='rk45') (SciPy RK45 Dormand–Prince, rtol = atol = 1e-10) using Pinocchio's ABA. "
         f"Total energy E = ½θ̇ᵀM(θ)θ̇ + Σ m_i·g·h_i(θ) — potential energy from the PoE centre-of-mass positions, "
         f"i.e. independent of the dynamics code. Relative drift = max|E(t) − E(0)| / max KE = {drift:.1e} "
         f"(KE up to {s.ke.max():.2f} J). A wrong Coriolis or gravity term would show up immediately as energy "
@@ -620,13 +669,16 @@ def euler_drift(robot):
         E = s.ke + s.pe
         out[m] = np.abs(E - E[0]).max() / max(s.ke.max(), 1e-12)
     return out["euler"], 0.5, (
-        f"INFORMATIONAL (loose tolerance 50 %): same free motion integrated with explicit Euler, dt = 1 ms "
+        f"INFORMATIONAL — shown for contrast, not counted in the pass total (loose tolerance 50 %): same free motion integrated with explicit Euler, dt = 1 ms "
         f"(mr.EulerStep's scheme). Relative energy drift: explicit Euler {out['euler']:.1e}, symplectic "
         f"(semi-implicit) Euler {out['semi-implicit']:.1e}, classic RK4 {out['rk4']:.1e}, adaptive RK45 "
-        f"~1e-10 (previous row). Explicit Euler is only first-order accurate and does not preserve energy: "
+        f"≲1e-9 (previous row). Explicit Euler is only first-order accurate and does not preserve energy: "
         f"for an oscillator every step moves along the tangent of the energy level curve, so the state "
         f"spirals outward and energy is gained (error ∝ dt). This is a numerical artefact of the "
         f"integrator, not an error in the dynamics model.")
+
+
+euler_drift.informational = True
 
 
 def power_balance(robot):
@@ -700,6 +752,8 @@ def _task_list():
             T.append((DYN, "Newton–Euler = symbolic Euler–Lagrange", "MR 8.1 vs 8.3", nm, lagrange_vs_newton_euler))
     for nm in dyn:
         T.append((DYN, "C(θ,θ̇)·θ̇ = c(θ,θ̇)", "MR 8.1.2", nm, coriolis_factorisation))
+    for nm in [x for x in HAND_ENTERED if x in dyn]:
+        T.append((DYN, "Gravity g(θ) vs hand Σ m·g × r_c (inertia data)", "MR 8.1, 8.3", nm, gravity_vs_hand_com))
     for nm in dyn:
         T.append((PHYS, "M(θ) symmetric positive definite", "MR 8.1.2", nm, mass_matrix_spd))
     for nm in dyn:
@@ -723,7 +777,10 @@ def _run_one(cat, title, chapter, target, fn) -> Check:
     try:
         err, tol, detail = fn(arg)
         detail += f"  [{(time.perf_counter() - t0) * 1000:.0f} ms]"
-        return Check(name, chapter, float(err), float(tol), detail, cat)
+        c = Check(name, chapter, float(err), float(tol), detail, cat)
+        if getattr(fn, "informational", False):
+            c.informational = True
+        return c
     except Exception:
         return Check(name, chapter, float("inf"), 0.0, "The check raised an exception:\n" + traceback.format_exc(), cat)
 
@@ -781,12 +838,13 @@ def planned_checks() -> list[tuple[str, str, str]]:
             for cat, title, chapter, target, _ in _task_list()]
 
 
-def run_all(progress=None, on_result=None) -> list[Check]:
+def run_all(progress=None, on_result=None, cancelled=None) -> list[Check]:
     """Run the complete suite.
 
     ``progress(fraction, message)`` is called before every step; ``on_result(check)`` (optional) is
     called as soon as each check is finished, in the order of the returned list (used to fill the
-    Validation tab's table live)."""
+    Validation tab's table live).  ``cancelled()`` (optional) is polled between checks: once it returns
+    True the checks finished so far are returned (no final ``progress(1.0)``)."""
     tasks = _task_list()
     total = len(tasks) + len(OPTIONAL_MODULES)
     out: list[Check] = []
@@ -797,11 +855,18 @@ def run_all(progress=None, on_result=None) -> list[Check]:
             if on_result is not None:
                 on_result(c)
 
+    def stop() -> bool:
+        return cancelled is not None and bool(cancelled())
+
     for k, (cat, title, chapter, target, fn) in enumerate(tasks):
+        if stop():
+            return out
         if progress is not None:
             progress(k / total, f"{title} — {_target_label(target)}")
         emit([_run_one(cat, title, chapter, target, fn)])
     for j, (modname, cat) in enumerate(OPTIONAL_MODULES):
+        if stop():
+            return out
         if progress is not None:
             progress((len(tasks) + j) / total, f"{cat} ({modname}.validation_checks)")
         emit(_optional_checks(modname, cat))
@@ -815,14 +880,20 @@ def is_skipped(c: Check) -> bool:
     return bool(getattr(c, "skipped", False))
 
 
+def is_informational(c: Check) -> bool:
+    """Shown for contrast (e.g. explicit-Euler energy drift) but not counted in the pass/fail totals."""
+    return bool(getattr(c, "informational", False))
+
+
 def summary(checks: list[Check]) -> dict:
-    run = [c for c in checks if not is_skipped(c)]
+    run = [c for c in checks if not is_skipped(c) and not is_informational(c)]
     passed = [c for c in run if c.passed]
     # "agreement" checks: two implementations compared at machine precision (tolerance <= 1e-9)
     precise = [c.error for c in passed if c.tol <= 1e-9 and np.isfinite(c.error)]
+    info = sum(1 for c in checks if is_informational(c) and not is_skipped(c))
     return dict(total=len(run), passed=len(passed), failed=len(run) - len(passed),
-                skipped=len(checks) - len(run), max_precise_error=max(precise) if precise else 0.0,
-                all_passed=len(passed) == len(run))
+                skipped=sum(1 for c in checks if is_skipped(c)), informational=info,
+                max_precise_error=max(precise) if precise else 0.0, all_passed=len(passed) == len(run))
 
 
 def library_versions() -> dict:
@@ -851,11 +922,14 @@ def report_html(checks: list[Check], elapsed: float | None = None) -> str:
     esc = html.escape
     ok = s["all_passed"]
     banner = (f"{s['passed']} / {s['total']} checks passed" + (f" · {s['skipped']} skipped" if s["skipped"] else "")
+              + (f" · {s['informational']} informational (not counted)" if s["informational"] else "")
               + f" — max error {fmt_err(s['max_precise_error'])} among machine-precision comparisons (tolerance ≤ 1e-9)")
     rows = []
     for i, c in enumerate(checks):
         if is_skipped(c):
             status, cls = "skipped", "skip"
+        elif is_informational(c):
+            status, cls = "ⓘ info", "skip"
         else:
             status, cls = ("✓ pass", "pass") if c.passed else ("✗ FAIL", "fail")
         rows.append(f"<tr class='{cls}'><td>{i + 1}</td><td>{esc(c.category)}</td><td><b>{esc(c.name)}</b>"
@@ -907,6 +981,6 @@ if __name__ == "__main__":  # pragma: no cover
     t0 = time.perf_counter()
     res = run_all(lambda f, m: print(f"[{f * 100:5.1f}%] {m}", flush=True))
     for c in res:
-        st = "SKIP" if is_skipped(c) else ("PASS" if c.passed else "FAIL")
+        st = "SKIP" if is_skipped(c) else "INFO" if is_informational(c) else ("PASS" if c.passed else "FAIL")
         print(f"{st}  {fmt_err(c.error):>8} / {fmt_err(c.tol):<6} {c.category:<20} {c.name}")
     print(summary(res), f"{time.perf_counter() - t0:.1f} s")

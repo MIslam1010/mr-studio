@@ -12,9 +12,9 @@ covers task-space, force, hybrid and impedance control, closed chains (four-bar,
 robots (Stewart–Gough with dynamics, 3×RPR, Delta), and imports any serial robot from a URDF file. Every tab shows the textbook
 section it implements and the equations it uses.
 
-Every number is **cross-validated**. The ⑩ Validation tab re-computes everything with independent
+Every number is **cross-validated**. The ⑭ Validation tab re-computes everything with independent
 libraries (Lynch & Park's own code, Pinocchio, Peter Corke's Robotics Toolbox, a symbolic
-Lagrangian in SymPy) and checks it against laws of physics: 244 checks in about 30 seconds,
+Lagrangian in SymPy) and checks it against laws of physics: 500+ checks in about 30 seconds,
 all passing.
 
 | Inverse kinematics: all 8 UR5 solutions | Time-optimal timing (TOPP-RA phase plane) |
@@ -33,13 +33,20 @@ More screenshots of each tab are in [`docs/screenshots/`](docs/screenshots/).
 
 | Computer | File | Steps |
 |---|---|---|
-| Mac (Apple Silicon, macOS 14 or later) | `MR-Studio-<version>-macOS-arm64.dmg` | Open it and drag **MR Studio** onto **Applications**. The first time, right-click the app and choose **Open**, then **Open** again (the app is not signed). |
+| Mac (Apple Silicon, macOS 14 or later) | `MR-Studio-<version>-macOS-arm64.dmg` | Open the `.dmg` and drag **MR Studio** onto **Applications**. The app is not notarised, so the **first launch** needs one extra step: double-click the app and dismiss the warning, then open **System Settings › Privacy & Security**, scroll down and click **Open Anyway** (macOS has removed the right-click › Open shortcut for unnotarised apps). If macOS says the app is **"damaged"**, run `xattr -dr com.apple.quarantine "/Applications/MR Studio.app"` in Terminal, then open it again. |
 | Windows 10/11 (64-bit) | `MR-Studio-<version>-Windows-x64-setup.exe` | Double-click it, then **Next**, **Install**. No administrator rights are needed. If SmartScreen appears, click **More info**, then **Run anyway**. |
 | Windows, without installing | `MR-Studio-<version>-Windows-x64.zip` | Unzip it and double-click `MRStudio\MRStudio.exe`. |
 
+Each release lists a SHA-256 checksum for every installer in `SHA256SUMS.txt`. To verify a download, compare it with
+`shasum -a 256 <file>` (macOS) or `Get-FileHash <file>` (Windows PowerShell). The installers are unsigned, so this is how you
+know the file is the one the CI built. Licence: MIT (see [LICENSE](LICENSE)). Third-party components and their licences are
+listed in [`THIRD_PARTY_NOTICES.md`](THIRD_PARTY_NOTICES.md).
+
 **Instructors: building the installers.** GitHub can build both installers for you. Push the project to a GitHub
-repository. `.github/workflows/build.yml` then tests and builds it on Windows and macOS, and the installers appear
-under **Actions** in the run's *Artifacts*. A `v*` tag also publishes them as a Release. To build locally instead:
+repository. `.github/workflows/build.yml` then runs the tests on Ubuntu and, on pushes to `main`, tags and manual runs, builds the installers on Windows and
+macOS and validates the frozen app (`--validate`, `--screenshot`). The installers appear under **Actions** in the run's
+*Artifacts*. A `v*` tag (it must equal `VERSION` in `packaging/bundle_config.py`) also publishes them as a Release with
+`SHA256SUMS.txt`. To build locally instead:
 
 ```bash
 ./packaging/build_macos.sh                                         # macOS:   packaging/dist/*.dmg
@@ -68,6 +75,7 @@ Manual installation:
 python3.11 -m venv .venv
 .venv/bin/pip install -r requirements.txt
 .venv/bin/python run_app.py
+# for the tests: .venv/bin/pip install -r requirements-dev.txt
 ```
 
 Useful command-line options:
@@ -75,15 +83,16 @@ Useful command-line options:
 | option | meaning |
 |---|---|
 | `--robot "PUMA 560 (from Corke DH)"` | robot selected at start-up |
-| `--tab 9` | tab opened at start-up (0 = ①, …, 9 = ⑩ Validation; default: last used) |
+| `--tab 13` | tab opened at start-up (0–13: 0 = ① FK, …, 13 = ⑭ Validation; default: last used) |
 | `--projector` / `--no-projector` | start in projector (large-font) mode or not |
 | `--screenshot DIR [--only] [--delay ms]` | render every tab (or only `--tab`) to PNG files and exit |
+| `--software-gl` | force software OpenGL (see Troubleshooting); same as `MRSTUDIO_SOFTWARE_GL=1` |
 
 Run the validation suite and the tests without the GUI:
 
 ```bash
 .venv/bin/python -m mrstudio.validation      # prints every check, PASS/FAIL, error and tolerance
-.venv/bin/python -m pytest tests -q          # full test-suite (validation + GUI smoke tests)
+.venv/bin/python -m pytest tests -q          # full test-suite (needs requirements-dev.txt) (validation + GUI smoke tests)
 ```
 
 ---
@@ -94,23 +103,38 @@ The **top bar** has the robot selector, the dynamics engine selector and the The
 The engine selector switches between **Pinocchio** (C++, fast) and **Modern Robotics** (the textbook's
 reference Python code); both give identical results. The top bar also opens the **Robot Builder**,
 where you define your own robot (revolute **and prismatic** joints) by entering $\omega_i$ (or the slide direction $v_i$), $q_i$ and $M$. Its inertias are
-generated automatically, and a robot you build is then validated by the ⑩ Validation suite like the built-in ones.
+generated automatically, and a robot you build is then validated by the ⑭ Validation suite like the built-in ones.
 **File → Import URDF…** (⌘O) loads any serial robot from a URDF file (MR Sec. 8.8) and converts it to screw axes, CoM frames and spatial inertias; 7 example URDFs work offline.
 
 **Presenting:** **Projector** mode (F5 or ⌘⇧P) enlarges all fonts, equations and lines. **● Record** (⌘R) records the 3-D view or the whole window to MP4 or GIF for slides; ⌘⇧S saves a PNG screenshot (⌘⌥S: 3-D view only, with labels). The app remembers the last robot, tab and settings.
+**Switching tabs:** ⌘1…⌘9 (Ctrl+1…9) jump to tabs ①–⑨, and Ctrl+Alt+← / Ctrl+Alt+→ (⌥⌘← / ⌥⌘→ on a Mac) go to the previous / next tab, which reaches ⑩–⑭.
 
 | Tab | What you can do | *Modern Robotics* |
 |---|---|---|
-| **① Robot & FK** | Joint sliders, animation. Space and body screw-axis tables. $T(\theta)$ by the product of exponentials (space and body form agree). The Chasles screw of $T M^{-1}$ drawn as a line. Link centre-of-mass frames, end-effector trace. | Ch. 3, 4 |
-| **② Velocity, Statics & Singularities** | Joint rates → spatial twist ($\dot p$, $\omega_s$ drawn). End-effector wrench → joint torques $\tau = J^T\mathcal{F}$. Velocity and force manipulability ellipsoids with $\mu_1, \mu_2, \mu_3$. "Find nearest singularity". Monte-Carlo workspace coloured by manipulability. | Ch. 5 |
-| **③ Inverse Kinematics** | Newton–Raphson (body or space frame) with every iterate drawn as a ghost (cf. Example 6.1). Damped least squares. "Find all solutions" (e.g. the UR5's IK branches). Analytic planar IK. Null-space self-motion of the redundant Panda. Real-time IK following a circle. | Ch. 6 |
-| **④ Dynamics (inverse & forward)** | RNEA joint torques along a quintic/cubic/trapezoidal trajectory, with optional gravity compensation and a tip force. Forward-dynamics simulation with playback. Integrator comparison (energy drift of explicit Euler vs higher-order methods). | Ch. 8 |
-| **⑤ Trajectories & Control** | Joint, screw and Cartesian paths with cubic, quintic and trapezoidal time scaling. **Time-optimal** timing with TOPP-RA under torque and velocity limits. Feedback control (PD, PID, PD + gravity compensation, **computed torque**) with optional actuator saturation, and a controller comparison. | Ch. 9, 11 |
+| **① FK** | Joint sliders, animation. Space and body screw-axis tables. $T(\theta)$ by the product of exponentials (space and body form agree). The Chasles screw of $T M^{-1}$ drawn as a line. Link centre-of-mass frames, end-effector trace. | Ch. 3, 4 |
+| **② Velocity** | Joint rates → spatial twist ($\dot p$, $\omega_s$ drawn). End-effector wrench → joint torques $\tau = J^T\mathcal{F}$. Velocity and force manipulability ellipsoids with $\mu_1, \mu_2, \mu_3$. "Find nearest singularity". Monte-Carlo workspace coloured by manipulability. | Ch. 5 |
+| **③ IK** | Newton–Raphson (body or space frame) with every iterate drawn as a ghost (cf. Example 6.1). Damped least squares. "Find all solutions" (e.g. the UR5's IK branches). Analytic planar IK. Null-space self-motion of the redundant Panda. Real-time IK following a circle. | Ch. 6 |
+| **④ Dynamics** | RNEA joint torques along a quintic/cubic/trapezoidal trajectory, with optional gravity compensation and a tip force. Forward-dynamics simulation with playback. Integrator comparison (energy drift of explicit Euler vs higher-order methods). | Ch. 8 |
+| **⑤ Control** | Joint, screw and Cartesian paths with cubic, quintic and trapezoidal time scaling. **Time-optimal** timing with TOPP-RA under torque and velocity limits. Feedback control (PD, PID, PD + gravity compensation, **computed torque**) with optional actuator saturation, and a controller comparison. | Ch. 9, 11 |
 | **⑥ Closed chains** | Four-bar linkage (1 DOF) and five-bar parallel robot (2 DOF), modelled as a tree of serial branches plus one cut joint. Constraint Jacobian $A(\theta)$, assembly modes (flip σ), coupler curves, Type I / Type II singularity loci. Inverse dynamics with Lagrange multipliers (the constraint forces), and a live free-swing simulation with optional Baumgarte stabilisation. | Ch. 7, Sec. 8.7 |
 | **⑦ Stewart–Gough** | 6-leg parallel robot with two input modes: pose → leg lengths (closed-form inverse kinematics) and leg lengths → pose (Newton–Raphson forward kinematics). Shows all the forward-kinematics solutions found (assembly modes) as ghost platforms. Payload statics $\mathcal{F}_s = J^T f$ (leg forces) and a singularity indicator. "▶ Dance" animation. **Dynamics** (massless legs, platform + payload as one rigid body, Eqs. 8.40, 8.42): dynamic vs static leg forces along the dance, power balance, and a "push" simulation with or without a leg servo. | Secs. 7.1.2, 7.2.1, 7.3, 8.2.2 |
-| **⑧ Task-space & Force** | Velocity-input task-space control (Eq. 11.16/11.18); task-space computed torque with $\Lambda, \eta$ (Eqs. 11.47, 8.89–8.91); force control against a stiff surface (11.54); hybrid motion–force "wiping" with the projection $P(\theta)$ (11.60–11.61); impedance control with/without a wrist force sensor (11.64–11.66). Redundant arms and singularities handled with damped least squares. | Ch. 11, Sec. 8.6 |
-| **⑨ 3×RPR & Delta** | 3×RPR planar parallel robot: closed-form IK, all (up to 6) forward-kinematics solutions as ghosts, workspace and actuator-singularity locus. Delta robot: closed-form IK and FK (trilateration), Jacobian, motor holding torques, workspace, pick-and-place animation. | Secs. 7.1.1, 7.2, 7.3; Ex. 2.7 |
-| **⑩ Validation** | One-click cross-validation of everything above (244 checks), with a colour-coded table, a details pane per check, a theory panel and an HTML report export. | Ch. 4–9, 11 |
+| **⑧ Task-space** | Velocity-input task-space control (Eq. 11.16/11.18); task-space computed torque with $\Lambda, \eta$ (Eqs. 11.47, 8.89–8.91); force control against a stiff surface (11.54); hybrid motion–force "wiping" with the projection $P(\theta)$ (11.60–11.61); impedance control with/without a wrist force sensor (11.64–11.66). Redundant arms and singularities handled with damped least squares. | Ch. 11, Sec. 8.6 |
+| **⑨ Parallel** | 3×RPR planar parallel robot: closed-form IK, all (up to 6) forward-kinematics solutions as ghosts, workspace and actuator-singularity locus. Delta robot: closed-form IK and FK (trilateration), Jacobian, motor holding torques, workspace, pick-and-place animation. | Secs. 7.1.1, 7.2, 7.3; Ex. 2.7 |
+| **⑩ Planning** | Motion planning for the planar 2R / 3R arms: configuration-space obstacles, grid search (Dijkstra, A*), sampling planners (PRM, RRT, RRT*), shortcut smoothing, and time scaling of the planned path. | Ch. 10, 9 |
+| **⑪ Haptics** | A Hapkit-type 1-DOF haptic paddle rendering sampled-data virtual walls and springs (impedance and admittance rendering) with a user-hand model, passivity / stability indicators and the energy-leak plot. | Sec. 11.7 |
+| **⑫ Hardware** | Hardware bridge for the course arm (or its simulation): streams a joint trajectory at 50 Hz, logs commanded vs measured joints in the SBEG 361 / 461 CSV formats, enforces the safety checklist and computes the hardware acceptance tests HW-2 … HW-6. See *Hardware bridge* below. | — |
+| **⑬ Practice** | Randomised exercises with worked solutions and quiz export. | Ch. 3–11 |
+| **⑭ Validation** | One-click cross-validation of everything above (500+ checks), with a colour-coded table, a details pane per check, a theory panel and an HTML report export. | Ch. 4–9, 11 |
+
+### Hardware bridge (tab ⑫)
+
+The tab drives the course arm (myCobot-280 class) over a serial port, or a built-in simulation of it.
+
+* Put the arm in **Transponder mode** (the arm's controller then forwards the serial commands to the servos).
+* Choose the port: on a Mac it is `/dev/cu.usbserial-*`; on Windows a `COM` port. The baud rate is **115200** (default) or **1000000**, whichever the arm's firmware uses.
+* **Calibration is required before Run.** Until the servo zero offsets are calibrated, the PoE zero pose does not match the servos' zero (the tab shows a warning), so calibrate first.
+* **First-run protocol:** low speed first; move one joint only, by at most **±10°**; keep **a person at the power switch**; do a **cable-pull test** (unplug the USB cable while moving: the arm must stop safely); release the torque **last**, with the arm supported by hand or on its rest.
+* The installed app bundles pyserial but cannot install the myCobot SDK later; build the app with `pymycobot` installed if you need that back-end.
 
 ### Robots
 
@@ -123,6 +147,17 @@ generated automatically, and a robot you build is then validated by the ⑩ Vali
 | KUKA iiwa 7 (7R, redundant) | Imported from its **URDF** (bundled, MIT licence) with full inertial data; torque limits from the KUKA datasheet |
 | Stanford arm (RRPRRR) | Corke's `rtb.models.DH.Stanford` (prismatic joint 3); inertias generated automatically |
 | SCARA Cobra 600 (RRPR) | Corke's `rtb.models.DH.Cobra600` (prismatic quill); inertias generated automatically |
+
+---
+
+## Troubleshooting
+
+* **Black or empty 3-D view, or the app crashes on start (virtual machines, remote desktop, old GPU drivers).** Start with
+  `--software-gl`, or set `MRSTUDIO_SOFTWARE_GL=1` (Mesa software OpenGL; slower but works everywhere).
+* **Where are the logs?** macOS: `~/Library/Logs/MR Studio/mrstudio.log`. Windows: `%LOCALAPPDATA%\MR Studio\mrstudio.log`.
+  A crash of the installed app leaves a Python traceback there. Please attach it to bug reports.
+* **macOS says the app is damaged or from an unidentified developer:** see *Installing MR Studio* above.
+* **Settings** (last robot, tab, projector mode) can be redirected with the `MRSTUDIO_SETTINGS` environment variable (path of an `.ini` file).
 
 ---
 
@@ -145,8 +180,8 @@ screw axes in {s} unless stated, radians internally and degrees on screen.
 
 ## How correctness is validated
 
-`mrstudio/validation.py` (⑩ Validation tab, `python -m mrstudio.validation`, and `pytest`) runs
-244 quantitative checks. All of them use a **fixed random seed**, so every run gives the same
+`mrstudio/validation.py` (⑭ Validation tab, `python -m mrstudio.validation`, and `pytest`) runs
+500+ quantitative checks. All of them use a **fixed random seed**, so every run gives the same
 numbers. Each row reports the largest discrepancy found and the tolerance it must stay under.
 
 1. **Independent implementations must agree to machine precision** (typically 1e-16 – 1e-13):
@@ -193,9 +228,10 @@ The tab's **Export report (HTML)** button writes a stand-alone report with every
 
 ```
 run_app.py                 entry point (also: --screenshot / --tab / --robot)
-setup.sh, MR_Studio.command, requirements.txt
+setup.sh, MR_Studio.command, requirements.txt, requirements-dev.txt, pyproject.toml
+CITATION.cff, THIRD_PARTY_NOTICES.md
 packaging/                 PyInstaller spec, build scripts, Inno Setup script -> .dmg / setup.exe (see packaging/README.md)
-.github/workflows/build.yml  CI: tests + installers on Windows and macOS
+.github/workflows/build.yml  CI: tests (Ubuntu) + installers and frozen-app validation (Windows, macOS)
 mrstudio/
   robots.py                SerialRobot (M, Slist, Mlist, Glist …), the robot library, DH→PoE conversion, Robot Builder helpers
   kinematics.py            FK, Jacobians, manipulability, singularities, statics, IK (Ch. 4–6)
@@ -213,7 +249,9 @@ mrstudio/
     widgets.py, theme.py   sliders, matrix views, plots, dark theme
     theory.py              theory panel (LaTeX rendered with matplotlib mathtext)
     robot_builder.py       Robot Builder dialog
-    tabs/                  one module per tab (fk, velocity, ik, dynamics, control, closed, stewart, validation)
+    tabs/                  one module per tab: fk, velocity, ik, dynamics, control, closed (closed chains),
+                           stewart, advanced_control (task-space), parallel, planning, haptics, hardware,
+                           practice, validation
 tests/
   test_validation.py       the whole suite must pass, plus negative controls
   test_gui_smoke.py        every tab imports, theory equations render, Validation tab works headless

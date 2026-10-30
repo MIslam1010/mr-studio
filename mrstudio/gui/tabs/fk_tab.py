@@ -59,8 +59,10 @@ class FKTab(BaseTab):
         self.sliders = JointSliders()
         self.sliders.changed.connect(self.update_scene)
         self.anim_btn = button("▶ Animate", self.toggle_anim, checkable=True)
-        btns = hbox(button("Home", lambda: self.set_theta(self.ctx.robot.home)),
-                    button("Zero", lambda: self.set_theta(np.zeros(self.ctx.robot.n))),
+        btns = hbox(button("Ready pose", lambda: self.set_theta(self.ctx.robot.home),
+                           tooltip="a convenient non-singular start pose; the MR home configuration is θ = 0, T = M"),
+                    button("Zero (MR home, T = M)", lambda: self.set_theta(np.zeros(self.ctx.robot.n)),
+                           tooltip="θ = 0: the home configuration of MR Ch. 4, where T(0) = M"),
                     button("Random", lambda: self.set_theta(self.ctx.robot.random_config())),
                     self.anim_btn)
         self.cb_axes = checkbox("Screw axes 𝒮ᵢ (yellow)", self.update_scene, True)

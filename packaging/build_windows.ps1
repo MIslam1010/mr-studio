@@ -43,7 +43,7 @@ if (-not (Get-Command $Python -ErrorAction SilentlyContinue)) {
         throw "conda not found. Install Miniforge (https://conda-forge.org/download/), open a new 'Miniforge Prompt' or PowerShell, and run this script again. (Pinocchio has no Windows wheel on PyPI.)"
     }
     Write-Host "==> Creating the conda environment $EnvDir (Python 3.11 + Pinocchio from conda-forge)"
-    $CondaPkgs = @("pinocchio=4.1.0", "pyside6")   # = bundle_config.CONDA_ON_WINDOWS (checked by tests/test_packaging.py)
+    $CondaPkgs = @("pinocchio=4.1.0", "pyside6=6.12.*")   # = bundle_config.CONDA_ON_WINDOWS (checked by tests/test_packaging.py)
     Invoke-Checked $Conda (@("create", "-y", "-p", $EnvDir, "-c", "conda-forge", "--override-channels", "python=3.11") + $CondaPkgs)
     $Python = Join-Path $EnvDir "python.exe"
     $NoInstall = $false   # a fresh environment needs the pip requirements

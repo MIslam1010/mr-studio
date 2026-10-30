@@ -106,7 +106,7 @@ console, so read `st.txt`. Normal options also work: `--robot`, `--tab`, `--proj
 | `rthook_mrstudio.py` | Runtime hook: Agg matplotlib backend, PySide6 for pyqtgraph, DLL paths for Pinocchio on Windows |
 | `mrstudio.iss` | Inno Setup script for the Windows `setup.exe` (installs per user, with Start-menu and desktop shortcuts and an uninstaller) |
 | `build_macos.sh`, `build_windows.ps1` | One-command builds |
-| `requirements-build.txt` | PyInstaller (only needed to build) and pyserial (bundled for the Hardware / Haptics serial ports) |
+| `requirements-build.txt` | PyInstaller and its hooks, pinned to the tested versions (only needed to build) and pyserial (bundled for the Hardware / Haptics serial ports) |
 | `requirements-lock.txt` | `pip freeze` of the tested macOS venv (constraints for reproducible builds) |
 | `icon.png`, `make_icon.py` | App icon (1024×1024, drawn with Qt). PyInstaller converts it to `.icns` and `.ico` |
 
@@ -120,8 +120,11 @@ What gets bundled:
 ## Known limitations
 
 * **Unsigned apps.** The first time a student opens the app:
-  * On macOS: right-click **MR Studio**, choose **Open**, then **Open** again. Or run `xattr -dr com.apple.quarantine "/Applications/MR Studio.app"`.
-  * On Windows SmartScreen: **More info**, then **Run anyway**.
+  * On macOS: current macOS no longer offers right-click › Open for unnotarised apps. Open the `.dmg` and drag the app to
+    Applications. On first launch double-click the app and dismiss the warning, then go to **System Settings › Privacy &
+    Security**, scroll down and click **Open Anyway**. If macOS says the app is "damaged", run
+    `xattr -dr com.apple.quarantine "/Applications/MR Studio.app"`.
+  * On Windows SmartScreen: **More info**, then **Run anyway**. Releases publish `SHA256SUMS.txt` so that a download can be verified.
 
   To sign the Mac app, set `CODESIGN_IDENTITY="Developer ID Application: …"` before you run `build_macos.sh`.
   Notarisation (`xcrun notarytool submit … --wait`, then `xcrun stapler staple`) is not automated.

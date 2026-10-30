@@ -7,7 +7,7 @@ Two interchangeable back-ends with an identical API:
 * ``"mr"``        -- the official Modern Robotics Python code (recursive Newton-Euler,
                      Sec. 8.3; mass matrix by n RNEA calls, Sec. 8.5).  Reference / didactic.
 * ``"pinocchio"`` -- Pinocchio (LAAS-CNRS, C++): RNEA, CRBA and Featherstone's
-                     Articulated-Body Algorithm.  ~1000x faster, used for long simulations.
+                     Articulated-Body Algorithm.  ~1000× faster, used for long simulations.
 
 The Pinocchio model is *built from the same PoE data* (Slist, Mlist, Glist); the
 validation suite shows both engines agree to machine precision.
@@ -32,9 +32,20 @@ def to_pinocchio(robot: SerialRobot):
     """Build a pinocchio.Model from the Modern Robotics description.
 
     Joint frame J_i is placed on screw axis i, aligned with {s} at the home configuration,
-    so that e^[S_i]th = J_i Rot(w_i, th) J_i^-1 and the PoE formula is reproduced exactly."""
+    so that e^[S_i]th = J_i Rot(w_i, th) J_i^-1 and the PoE formula is reproduced exactly.
+
+    Only pure revolute (pitch 0) and prismatic joints have a Pinocchio counterpart here: a screw axis with
+    pitch h = w.v / |w|^2 != 0 raises ValueError instead of being silently turned into a revolute joint."""
     if pin is None:
         raise RuntimeError("pinocchio is not installed")
+    for i in range(robot.n):
+        w, v = robot.Slist[:3, i], robot.Slist[3:, i]
+        nw = float(np.linalg.norm(w))
+        if nw > 1e-9:
+            pitch = float(w @ v) / nw**2
+            if abs(pitch) > 1e-9 * max(1.0, float(np.linalg.norm(v)) / nw):
+                raise ValueError(f"{robot.name}: joint {i + 1} is a screw joint with pitch {pitch:.3g} m/rad "
+                                 "(w·v ≠ 0); only revolute (pitch 0) and prismatic joints are supported")
     model = pin.Model()
     model.name = robot.name
     parent, J_prev = 0, np.eye(4)
@@ -193,7 +204,8 @@ def simulate(engine: DynamicsEngine, theta0, dtheta0, tau_fn, t_final: float, dt
              method: str = "rk4", Ftip=None, with_energy: bool = True, damping=None) -> SimResult:
     """Integrate the forward dynamics (MR Sec. 8.5).
 
-    tau_fn(t, theta, dtheta) -> tau.   method in {"euler" (MR's EulerStep), "semi-implicit", "rk4", "rk45"}.
+    tau_fn(t, theta, dtheta) -> tau.   method in {"euler" (MR's EulerStep), "semi-implicit", "rk4", "rk45"}
+    ("rk45" = SciPy's adaptive Dormand-Prince RK45, rtol = atol = 1e-10, sampled every dt).
     damping: optional viscous joint friction coefficients b (tau_f = -b dtheta).
     """
     n = engine.robot.n
@@ -211,7 +223,7 @@ def simulate(engine: DynamicsEngine, theta0, dtheta0, tau_fn, t_final: float, dt
             return np.r_[x[n:], a]
         t_eval = np.arange(0.0, t_final + 1e-12, dt)
         sol = solve_ivp(f, (0.0, t_final), np.r_[theta0, dtheta0], t_eval=t_eval, rtol=1e-10, atol=1e-10,
-                        method="DOP853")
+                        method="RK45")
         TH, DTH = sol.y[:n].T, sol.y[n:].T
         TAU = np.array([tau_fn(t, TH[k], DTH[k]) for k, t in enumerate(sol.t)])
         ts = sol.t

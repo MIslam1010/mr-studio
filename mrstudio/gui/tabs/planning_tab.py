@@ -3,7 +3,6 @@ sampling planners (PRM, RRT, RRT*), shortcut smoothing and time scaling of the p
 from __future__ import annotations
 
 import time
-import traceback
 
 import numpy as np
 import pyqtgraph as pg
@@ -14,6 +13,7 @@ from ...references import further_reading
 from ...robots import get_robot
 from .. import theme
 from ..base import BaseTab
+from ..jobs import JobRunner
 from ..widgets import (JointSliders, button, checkbox, combo, group, hbox, pen, plot, spin, value_label)
 
 THEORY = r"""
@@ -90,32 +90,6 @@ def _qcol(c, alpha=255):
     return q
 
 
-class _Worker(QtCore.QThread):
-    """Runs fn(progress, cancelled) in a background thread; results come back through queued signals."""
-    progressed = QtCore.Signal(float)
-    done = QtCore.Signal(object)
-    failed = QtCore.Signal(str)
-
-    def __init__(self, fn, parent=None):
-        super().__init__(parent)
-        self.fn = fn
-        self._cancel = False
-
-    def cancel(self):
-        self._cancel = True
-
-    def run(self):
-        try:
-            res = self.fn(self.progressed.emit, lambda: self._cancel)
-        except InterruptedError:
-            self.failed.emit("cancelled")
-            return
-        except Exception:   # noqa: BLE001
-            self.failed.emit(traceback.format_exc())
-            return
-        self.done.emit(res)
-
-
 def _wrap_copies(xy: np.ndarray, wrap):
     """Copies of a curve shifted by +-360 deg on the wrapping axes (the view clips them) -> torus display."""
     shifts = [(-360.0, 0.0, 360.0) if wrap[0] else (0.0,), (-360.0, 0.0, 360.0) if wrap[1] else (0.0,)]
@@ -133,9 +107,9 @@ class PlanningTab(BaseTab):
         self.rois: list = []
         self.result: P.PlanResult | None = None
         self.traj = None
-        self.worker: _Worker | None = None
-        self._grid_cache = None
-        self._job = 0
+        self.jobs = JobRunner(self)             # one planning job at a time; stale generations are dropped
+        self._grid_cache = None                 # ((world fingerprint, grid_k), CGrid)
+        self._job = 0                           # bumped whenever the world / robot changes or a plan starts
         self.history: list = []
 
         # ---------------------------------------------------------------- views
@@ -296,9 +270,11 @@ class PlanningTab(BaseTab):
         self._cs_timer.setSingleShot(True)
         self._cs_timer.timeout.connect(lambda: self._update_cspace(fast=True))
         self._planner_changed(self.planner_box.currentText())
+        self.jobs.busy_changed.connect(self._busy_changed)
+        self.jobs.progressed.connect(lambda f: self.progress.setValue(int(1000 * min(max(f, 0.0), 1.0))))
         app = QtWidgets.QApplication.instance()
-        if app is not None:   # never destroy a running QThread when the app quits mid-plan
-            app.aboutToQuit.connect(self._shutdown)
+        if app is not None and not hasattr(BaseTab, "shutdown"):   # older BaseTab without the quit hook
+            app.aboutToQuit.connect(self.shutdown)
         self._populate_robots()
         self.on_robot_changed(self.ctx.robot)
 
@@ -362,6 +338,7 @@ class PlanningTab(BaseTab):
         if not name:
             return
         self._stop_anim()
+        self._invalidate_jobs()
         robot = get_robot(name)
         self.robot = robot
         self.arm = P.PlanarArm.from_robot(robot)
@@ -447,11 +424,8 @@ class PlanningTab(BaseTab):
         """Obstacles / topology changed: rebuild the world, the C-space picture, drop the old plan."""
         if self.arm is None:
             return
-        if self.worker is not None and self.worker.isRunning():   # a plan for the old scene is now stale
-            self.worker.cancel()
-            self._job += 1
-            self.busy.setVisible(False)
-            self.plan_btn.setEnabled(True)
+        # a plan for the old scene is stale -- also one whose (queued) result has not been delivered yet
+        self._invalidate_jobs()
         self.world = P.World(self.arm, self._obstacles(), torus=self.torus_cb.isChecked())
         self._grid_cache = None
         self._clear_result("Scene changed — press Plan." if self.result is not None else "")
@@ -580,18 +554,25 @@ class PlanningTab(BaseTab):
                     radius=np.radians(self.rad_spin.value()), seed=self.seed_spin.value(),
                     smooth_iters=self.smooth_spin.value() if self.smooth_cb.isChecked() else 0)
 
+    def _invalidate_jobs(self):
+        """Robot or scene changed: cancel a running plan and make every pending result stale (non-blocking)."""
+        self._job += 1
+        if self.jobs.is_busy():
+            self.jobs.cancel()
+
+    def _world_now(self) -> P.World:
+        """The world as currently shown (obstacle ROIs may have moved since self.world was built)."""
+        return P.World(self.arm, self._obstacles(), torus=self.torus_cb.isChecked())
+
     def plan(self):
         if self.world is None:
             return
         self._stop_anim()
-        if self.worker is not None and self.worker.isRunning():
-            self.worker.cancel()
-            self.worker.wait(3000)
         planner = self.planner_box.currentText()
-        world = P.World(self.arm, self._obstacles(), torus=self.torus_cb.isChecked())
+        world = self._world_now()
         s, g = self.start_sl.values(), self.goal_sl.values()
         kw = self.params()
-        key = (kw["grid_k"], self.torus_cb.isChecked())
+        key = (world.fingerprint(), kw["grid_k"])          # a cached grid is only valid for the same world
         cache = self._grid_cache
         if cache is not None and cache[0] == key:
             kw["grid"] = cache[1]
@@ -600,49 +581,37 @@ class PlanningTab(BaseTab):
             return P.plan(world, s, g, planner, progress=progress, cancelled=cancelled, **kw)
         self._job += 1
         gen = self._job
-        self.worker = w = _Worker(job, self)
-        w.progressed.connect(lambda f: self.progress.setValue(int(1000 * f)))
-        w.done.connect(lambda r: self._plan_done(gen, r, key))
-        w.failed.connect(lambda e: self._plan_failed(gen, e))
-        w.finished.connect(lambda: self._job_finished(gen))
         self.progress.setValue(0)
         self.progress.setFormat(f"{planner}  %p%")
-        self.busy.setVisible(True)
-        self.plan_btn.setEnabled(False)
         self.res_lbl.setText(f"planning with {planner} …")
-        w.start()
+        self.res_lbl.setStyleSheet("")
+        self.jobs.run(job, on_done=lambda r, gen=gen, key=key: self._plan_done(gen, r, key),
+                      on_error=lambda e, gen=gen: self._plan_failed(gen, e), label=planner)
+
+    def _busy_changed(self, on):
+        self.busy.setVisible(on)
+        self.plan_btn.setEnabled(not on)
 
     def wait_job(self, timeout_s: float = 60.0):
         """Block (processing events) until planning finished -- used by tests / scripts."""
-        app = QtWidgets.QApplication.instance()
-        t0 = time.time()
-        while self.worker is not None and (self.worker.isRunning() or self.busy.isVisible()):
-            app.processEvents()
-            time.sleep(0.005)
-            if time.time() - t0 > timeout_s:
-                raise TimeoutError("planning did not finish")
-        app.processEvents()
+        self.jobs.wait(timeout_s)
 
     def _cancel(self):
-        if self.worker is not None:
-            self.worker.cancel()
-
-    def _job_finished(self, gen):
-        if gen == self._job:
-            self.busy.setVisible(False)
-            self.plan_btn.setEnabled(True)
+        if self.jobs.is_busy():
+            self.jobs.cancel()
+            self.res_lbl.setText("cancelled")
+            self.res_lbl.setStyleSheet("")
 
     def _plan_failed(self, gen, err):
         if gen != self._job:
             return
-        self.res_lbl.setText("cancelled" if err == "cancelled" else "planner error:\n" + err.splitlines()[-1])
-        if err != "cancelled":
-            print(err)
+        self.res_lbl.setText("planner error:\n" + err.strip().splitlines()[-1])
+        print(err)
 
     def _plan_done(self, gen, res: P.PlanResult, key=None):
         if gen != self._job or not self._result_matches_arm(res):
             return
-        if "grid" in res.extra and key is not None:
+        if "grid" in res.extra and key is not None and res.extra["grid"].fingerprint == key[0]:
             self._grid_cache = (key, res.extra["grid"])
         self.result = res
         self._add_history(res)
@@ -687,10 +656,14 @@ class PlanningTab(BaseTab):
             self.res_lbl.setStyleSheet("")
 
     def _result_matches_arm(self, r) -> bool:
-        """A plan computed for another robot (e.g. finished just after the robot changed) must not be drawn."""
+        """A plan computed for another robot or another scene (obstacles, topology) must not be drawn: its
+        world fingerprint must equal the fingerprint of the world shown now."""
         if r is None or getattr(r, "path", None) is None or self.world is None:
             return r is not None
-        return np.asarray(r.path).shape[-1] == self.world.space.n
+        if np.asarray(r.path).shape[-1] != self.world.space.n:
+            return False
+        fp = getattr(r, "fingerprint", None)
+        return fp is not None and fp == self._world_now().fingerprint()
 
     def _redraw_result(self, *_):
         r = self.result
@@ -793,7 +766,11 @@ class PlanningTab(BaseTab):
     def on_hide(self):
         self._stop_anim()
 
-    def _shutdown(self):
-        if self.worker is not None and self.worker.isRunning():
-            self.worker.cancel()
-            self.worker.wait(5000)
+    def shutdown(self):
+        """Application quit: cancel the plan, wait at most half a second for the worker."""
+        self._stop_anim()
+        self._job += 1
+        self.jobs.shutdown(500)
+        parent = getattr(super(), "shutdown", None)
+        if parent is not None:
+            parent()

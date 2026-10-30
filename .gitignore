@@ -11,3 +11,13 @@ packaging/dist/
 ci-settings.ini
 *.egg-info/
 .conda-env/
+*.log
+.coverage
+htmlcov/
+.ruff_cache/
+.mypy_cache/
+.idea/
+.vscode/
+.env
+/build/
+/dist/

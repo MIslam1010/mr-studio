@@ -13,9 +13,10 @@ from ... import trajectory as tj
 from ...dynamics import DynamicsEngine
 from .. import theme
 from ..base import BaseTab
+from ..jobs import AsyncMixin
 from ..viewer import GhostRobot, RobotGraphic, SceneView
-from ..widgets import JointSliders, button, checkbox, combo, group, hbox, pen, plot, spin, value_label
-from .dynamics_tab import AsyncMixin, Player, compact, default_goal, form, limit_lines, no_si, time_cursor
+from ..widgets import (JointSliders, Player, button, checkbox, combo, compact, default_goal, form, group, hbox,
+                       limit_lines, no_si, pen, plot, spin, time_cursor, value_label)
 
 THEORY = r"""
 <h2>Trajectories and motion control</h2>
@@ -81,6 +82,7 @@ THEORY += further_reading([
 
 class ControlTab(AsyncMixin, BaseTab):
     title = "⑤ Control"
+    uses_engine = True
     needs_dynamics = True
 
     def __init__(self, ctx):
@@ -209,13 +211,14 @@ class ControlTab(AsyncMixin, BaseTab):
         self.bottom.addTab(page(self.p_bar, self.table, info=self.cmp_info, stretch=[2, 3]), "Compare controllers")
 
         self.assemble(controls, self.view, self.bottom, THEORY, controls_width=375, bottom_ratio=(5, 4))
-        ctx.backend_changed.connect(lambda b: self.status(
-            f"Controller model engine: {'Pinocchio' if b == 'pinocchio' else 'Modern Robotics (slower)'}; "
-            "the plant is always Pinocchio"))
         self._gains_changed()
         self.on_robot_changed(ctx.robot)
 
     # ------------------------------------------------------------------ helpers
+    def on_backend_changed(self, backend):
+        self.status(f"Controller model engine: {'Pinocchio' if backend == 'pinocchio' else 'Modern Robotics (slower)'}; "
+                    "the plant is always Pinocchio")
+
     def status(self, text, color=None):
         self.status_lbl.setText(text)
         self.status_lbl.setStyleSheet(f"color:{color}" if color else "")
@@ -339,7 +342,7 @@ class ControlTab(AsyncMixin, BaseTab):
             if k in self.paths:
                 p = self.paths[k]
                 L = np.sum(np.linalg.norm(np.diff(p.ee, axis=0), axis=1))
-                warn = (f"<br>&nbsp;&nbsp;<span style='color:{theme.BAD}'>⚠ {p.ik_failures}/{len(p.s)} path points "
+                warn = (f"<br>&nbsp;&nbsp;<span style='color:{theme.bad_color()}'>⚠ {p.ik_failures}/{len(p.s)} path points "
                         "unreachable (IK failed — path leaves the workspace)</span>" if p.ik_failures else "")
                 msgs.append(f"<span style='color:{tj.PATH_COLORS[k]}'>■</span> {tj.PATH_LABELS[k]}: "
                             f"EE path length {L:.3f} m{warn}")
@@ -386,13 +389,19 @@ class ControlTab(AsyncMixin, BaseTab):
         def job(prog, canc):
             path = jp if jp is not None else tj.joint_path(robot, a, b, kind, 81)
             prog(0.2)
+            if canc():
+                return None
             eng = DynamicsEngine(robot, backend)
             t0 = time.perf_counter()
-            res = tj.topp(eng, path, tau_max, vel_max)
+            res = tj.topp(eng, path, tau_max, vel_max, cancelled=canc)
+            if canc():
+                return None
             return dict(res=res, jp=path, kind=kind, elapsed=time.perf_counter() - t0, backend=backend)
         self.run_async("TOPP-RA", job, self._topp_done)
 
     def _topp_done(self, out):
+        if out is None:
+            return
         robot = self.ctx.robot
         res, jp = out["res"], out["jp"]
         self.paths[out["kind"]] = jp
@@ -400,7 +409,7 @@ class ControlTab(AsyncMixin, BaseTab):
         for p in (self.p_phase, self.p_tn):
             self._clear(p)
         if not res.ok:
-            self.topp_lbl.setText(f"<span style='color:{theme.BAD}'>{res.message}</span>")
+            self.topp_lbl.setText(f"<span style='color:{theme.bad_color()}'>{res.message}</span>")
             return
         self.topp_res = (res, jp)
         sd_max = float(np.nanmax(res.sd_grid))
@@ -428,7 +437,7 @@ class ControlTab(AsyncMixin, BaseTab):
         eng = "Pinocchio" if out["backend"] == "pinocchio" else "MR"
         self.topp_lbl.setText(
             f"T* = <b>{res.duration:.3f} s</b> (fastest quintic: {res.quintic_T:.3f} s, "
-            f"<span style='color:{theme.GOOD}'>{gain:.0f}% faster</span>)<br>"
+            f"<span style='color:{theme.good_color()}'>{gain:.0f}% faster</span>)<br>"
             f"max |τ|/τmax = {np.abs(res.tau_norm).max():.3f}, max |θ̇|/vmax = {res.vel_norm.max():.3f}<br>"
             f"solved in {out['elapsed'] * 1e3:.0f} ms (RNEA: {eng}, {len(res.grid)} grid points)")
         self.topp_info.setText(
@@ -520,7 +529,7 @@ class ControlTab(AsyncMixin, BaseTab):
                f"max |τ|/τmax = {np.nanmax(np.abs(r.tau) / robot.tau_max):.2f}"
                + (f", saturated {100 * r.saturated:.0f}% of the time" if s["sat"] else "")
                + f"<br>{len(r.t)} control steps simulated in {r.elapsed:.2f} s"
-               if stable else f"<span style='color:{theme.BAD}'>unstable — the simulation diverged</span>"))
+               if stable else f"<span style='color:{theme.bad_color()}'>unstable — the simulation diverged</span>"))
         if len(results) > 1:
             self._show_comparison(results, robot)
         else:
@@ -588,3 +597,7 @@ class ControlTab(AsyncMixin, BaseTab):
 
     def on_hide(self):
         self.player.stop()
+
+    def shutdown(self):
+        self.player.stop()
+        super().shutdown()

@@ -358,6 +358,29 @@ class World:
         path = np.asarray(path, float)
         return float(np.sum(self.space.dist(path[:-1], path[1:]))) if len(path) > 1 else 0.0
 
+    def fingerprint(self) -> tuple:
+        """Hashable description of everything a plan or a C-space grid depends on: the arm (name, geometry,
+        link radius, joint limits), the obstacles, the topology (torus / box) and the edge resolution.
+        Two worlds with equal fingerprints give identical collision answers."""
+        return world_fingerprint(self)
+
+
+def _rounded(a) -> tuple:
+    return tuple(np.round(np.asarray(a, float).ravel(), 12).tolist())
+
+
+def world_fingerprint(world: "World") -> tuple:
+    arm = world.arm
+    obs = []
+    for ob in world.obstacles:
+        if isinstance(ob, Circle):
+            obs.append(("circle", _rounded(ob.c), round(float(ob.r), 12)))
+        else:
+            obs.append(("polygon", _rounded(ob.pts)))
+    return (arm.name, _rounded(arm.base), _rounded(arm.vecs), _rounded(arm.signs), round(float(arm.radius), 12),
+            _rounded(arm.limits), tuple(obs), tuple(bool(w) for w in world.space.wrap),
+            round(world.edge_res, 12))
+
 
 def unwrap_path(space: Space, pts) -> np.ndarray:
     """Turn a list of configurations into a continuous path (consecutive steps = shortest displacement)."""
@@ -376,6 +399,7 @@ class CGrid:
     lo: np.ndarray
     h: np.ndarray                 # cell sizes
     edge_ok: np.ndarray | None = None   # (cells, 3^n - 1) bool: straight edge to neighbour GRID_OFFSETS[j] is free
+    fingerprint: tuple | None = None    # World.fingerprint() of the world the grid was computed for
 
     @property
     def shape(self):
@@ -420,7 +444,7 @@ def cspace_grid(world: World, k, progress=None, cancelled=None, edges: bool = Tr
             occ[i] = world.collides(Q).reshape(ks[1:])
             if progress is not None:
                 progress(f_occ * (i + 1) / ks[0])
-    grid = CGrid(axes, occ, sp.lo.copy(), h)
+    grid = CGrid(axes, occ, sp.lo.copy(), h, fingerprint=world.fingerprint())
     if not edges:
         return grid
     offs = grid_offsets(sp.n)
@@ -489,6 +513,7 @@ class PlanResult:
     message: str = ""
     raw_cost: float = np.inf                 # before smoothing
     extra: dict = field(default_factory=dict)
+    fingerprint: tuple | None = None         # World.fingerprint() of the world the plan was made for
 
 
 # ============================================================================ graph search (MR 10.2.4)
@@ -979,11 +1004,15 @@ def plan(world: World, start, goal, planner: str = "A* (grid)", *, grid_k: int =
     """One entry point for the GUI: run the chosen planner, then (optionally) shortcut smoothing."""
     world.n_checks = 0
     t_total = time.time()
+    fp = world.fingerprint()
     start, goal = np.asarray(start, float), np.asarray(goal, float)
     if world.collides(start)[0] or world.collides(goal)[0]:
-        return PlanResult(planner, False, np.atleast_2d(start), message="start or goal configuration is in collision")
+        return PlanResult(planner, False, np.atleast_2d(start), message="start or goal configuration is in collision",
+                          fingerprint=fp)
     if planner in ("A* (grid)", "Dijkstra (grid)"):
-        if grid is None or grid.occ.shape != tuple(np.broadcast_to(grid_k, (world.space.n,))):
+        # a grid is reused only if it was computed for this very world (same arm, obstacles, topology) and k
+        if (grid is None or grid.fingerprint != fp
+                or grid.occ.shape != tuple(np.broadcast_to(grid_k, (world.space.n,)))):
             grid = cspace_grid(world, grid_k, progress, cancelled)
         res = grid_search(world, grid, start, goal, "astar" if planner.startswith("A*") else "dijkstra",
                           connect, cancelled)
@@ -997,11 +1026,15 @@ def plan(world: World, start, goal, planner: str = "A* (grid)", *, grid_k: int =
         raise ValueError(planner)
     res.raw_cost = res.cost
     res.extra["raw_path"] = res.path.copy()
+    res.fingerprint = fp
     if res.success and smooth_iters > 0:
         t0 = time.time()
         res.path = shortcut(world, res.path, smooth_iters, seed)
         res.cost = world.path_length(res.path)
         res.seconds += time.time() - t0
+    if res.success and not world.path_free(res.path):       # final certification of the returned path
+        res.success = False
+        res.message = "the returned path failed the final collision re-check (" + (res.message or res.planner) + ")"
     res.n_checks = world.n_checks
     res.seconds = time.time() - t_total
     return res

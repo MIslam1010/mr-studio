@@ -9,7 +9,7 @@ with short, correct answers.
 
 1. Start the app: double-click `MR_Studio.command` (or run `.venv/bin/python run_app.py`). Maximise the window.
 2. Keep the **Theory panel** on (button at the top right, or F1). It shows the textbook equations of each tab.
-3. Open the **⑩ Validation** tab once and press **▶ Run all checks**, so everything is loaded and
+3. Open the **⑭ Validation** tab once and press **▶ Run all checks**, so everything is loaded and
    warm. Then go back to tab ①.
 4. Leave the robot on **UR5 (6R industrial)** and the engine on **Pinocchio**.
 5. On a projector, press **F5** (Projector mode): bigger fonts, equations and lines. Press F5 again to go back.
@@ -109,7 +109,7 @@ $T(\theta) = e^{[\mathcal{S}_1]\theta_1}\cdots e^{[\mathcal{S}_n]\theta_n}M$ in 
   > "The opposite direction is hard. For the same six leg lengths there are several possible
   > platform poses, the ghosts. Newton–Raphson finds them from different starting guesses."
 
-### 8:30 – 10:00 · ⭐ The validation suite (tab ⑩)
+### 8:30 – 10:00 · ⭐ The validation suite (tab ⑭)
 
 * Click **▶ Run all checks**. The table fills in live; it takes about 30 seconds.
   > "How do we know any of this is right? Every quantity is computed by at least two programs
@@ -117,7 +117,7 @@ $T(\theta) = e^{[\mathcal{S}_1]\theta_1}\cdots e^{[\mathcal{S}_n]\theta_n}M$ in 
   > Featherstone's algorithms), Peter Corke's DH-based toolbox, and a Lagrangian derived
   > symbolically with SymPy. We also check laws of physics: energy conservation, the power
   > balance, and the skew-symmetry of Ṁ − 2C."
-* Point at the green banner: **"244 / 244 checks passed"** (the exact numbers may differ).
+* Point at the green banner: **"all checks passed" (500+ of them, e.g. "504 / 504")** (the exact numbers may differ).
   > "Across all the machine-precision comparisons the worst error is about 1e-12, and most agree
   > to 1e-15. Double precision itself is 2e-16."
 * Click the row **Newton–Euler = symbolic Euler–Lagrange — Planar 2R**, and read the details pane:

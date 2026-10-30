@@ -13,6 +13,7 @@ conversion reproduces Corke's DH forward kinematics and dynamics exactly.
 """
 from __future__ import annotations
 
+import threading
 from dataclasses import dataclass, field
 from functools import cached_property
 
@@ -447,13 +448,56 @@ from .course_models import COURSE_ROBOTS  # noqa: E402  (needs SerialRobot, scre
 
 ROBOTS.update(COURSE_ROBOTS)
 
+#: names shipped with MR Studio -- register_robot() never overwrites these
+BUILTIN_ROBOTS = frozenset(ROBOTS)
+#: built-in robots whose factories import Peter Corke's Robotics Toolbox (slow first import, ~1-3 s)
+RTB_ROBOTS = ("PUMA 560 (from Corke DH)", "Franka Panda (7R redundant)", "Stanford arm (RRPRRR)",
+              "SCARA Cobra 600 (RRPR)")
+
 _cache: dict[str, SerialRobot] = {}
+_lock = threading.RLock()                   # guards _cache / _name_locks (preload() runs in a thread)
+_name_locks: dict[str, threading.Lock] = {}
 
 
 def get_robot(name: str) -> SerialRobot:
-    if name not in _cache:
-        _cache[name] = ROBOTS[name]()
-    return _cache[name]
+    """The (cached) robot called ``name``; thread-safe, each factory runs at most once."""
+    with _lock:
+        r = _cache.get(name)
+        if r is not None:
+            return r
+        lk = _name_locks.setdefault(name, threading.Lock())
+    with lk:  # a second caller waits for the first one instead of building the robot twice
+        with _lock:
+            r = _cache.get(name)
+            if r is not None:
+                return r
+            factory = ROBOTS[name]
+        r = factory()
+        with _lock:
+            return _cache.setdefault(name, r)
+
+
+def is_current(robot: SerialRobot) -> bool:
+    """True if ``robot`` is the object currently registered under its name (not replaced since)."""
+    with _lock:
+        return _cache.get(robot.name) is robot
+
+
+def preload(names=RTB_ROBOTS) -> list[str]:
+    """Build (and cache) the given robots, e.g. in a background thread after the window has appeared, so
+    that selecting them later is instant. Returns the names that failed (e.g. Robotics Toolbox missing)."""
+    failed = []
+    try:
+        import roboticstoolbox  # noqa: F401  (the slow part: imports spatialmath, matplotlib, ...)
+    except Exception:
+        pass
+    for nm in names:
+        try:
+            if nm in ROBOTS:
+                get_robot(nm)
+        except Exception:
+            failed.append(nm)
+    return failed
 
 
 # ----------------------------------------------------------------------------- user-defined robots
@@ -526,7 +570,18 @@ def custom_robot(name: str, omegas, points, M, density: float = 4.0, motor_mass:
     return r
 
 
-def register_robot(robot: SerialRobot):
-    """Add a robot to the global library (shows up in the robot selector)."""
-    ROBOTS[robot.name] = lambda r=robot: r
-    _cache[robot.name] = robot
+def register_robot(robot: SerialRobot) -> str:
+    """Add a robot to the global library (shows up in the robot selector) and return the name used.
+
+    A user robot replaces an earlier *user* robot of the same name (e.g. pressing "Create robot" again in the
+    Robot Builder), but never a built-in model: a robot named like one of ``BUILTIN_ROBOTS`` is renamed
+    "name (2)", "name (3)", ... (``robot.name`` is updated)."""
+    with _lock:
+        if robot.name in BUILTIN_ROBOTS and _cache.get(robot.name) is not robot:
+            base, k = robot.name, 2
+            while f"{base} ({k})" in ROBOTS:
+                k += 1
+            robot.name = f"{base} ({k})"
+        ROBOTS[robot.name] = lambda r=robot: r
+        _cache[robot.name] = robot
+        return robot.name

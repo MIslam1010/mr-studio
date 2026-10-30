@@ -33,6 +33,7 @@ if not IS_MAC:
 
 # ---------------------------------------------------------------- data files
 datas = cfg.all_package_data()
+datas += [(os.path.join(ROOT, f), ".") for f in cfg.EXTRA_FILES]   # THIRD_PARTY_NOTICES.md
 for dist in cfg.METADATA_DISTS:
     try:
         datas += copy_metadata(dist)

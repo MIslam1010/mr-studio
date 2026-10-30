@@ -6,7 +6,7 @@ import numpy as np
 from PySide6 import QtCore, QtWidgets
 
 from .. import kinematics as kin
-from ..robots import custom_robot, register_robot, screw_axis_line, trans
+from ..robots import custom_robot, screw_axis_line, trans
 from . import theme
 from .theory import TheoryPanel
 from .viewer import RobotGraphic, SceneView
@@ -53,6 +53,8 @@ control, validation — works on your robot.</p>
 
 
 class RobotBuilder(QtWidgets.QDialog):
+    """Emits ``robot_created(robot)`` on "Create robot"; the receiver registers it (``robots.register_robot``),
+    e.g. ``MainWindow._robot_created``, which also replaces an earlier user robot of the same name."""
     robot_created = QtCore.Signal(object)
 
     def __init__(self, current_robot=None, parent=None):
@@ -217,6 +219,5 @@ class RobotBuilder(QtWidgets.QDialog):
         except Exception as e:
             QtWidgets.QMessageBox.warning(self, "Robot Builder", str(e))
             return
-        register_robot(robot)
         self.robot_created.emit(robot)
         self.accept()

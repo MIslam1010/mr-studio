@@ -11,6 +11,7 @@ from ...references import further_reading
 from ... import closed_chains as cc
 from .. import theme
 from ..base import BaseTab
+from ..jobs import JobRunner
 from ..viewer import SceneView
 from ..widgets import (MatrixView, SliderRow, button, checkbox, combo, group, hbox, pen, plot, spin,
                        value_label)
@@ -51,6 +52,8 @@ Equality: change-point. Otherwise: triple-rocker. Design rule: $40°\leq\mu\leq1
 mr.VelQuadraticForces, mr.GravityForces). The Lagrange multiplier $\lambda$ is the force of the cut pin
 on branch 1 (arrow):</p>
 $$M(\theta)\ddot{\theta}+h(\theta,\dot{\theta})=\tau+A^{T}(\theta)\lambda\quad(cf.\ 8.93)$$
+<p><b>Sign convention:</b> MR writes $\tau=M\ddot{\theta}+h+A^{T}\lambda$ (8.93, 8.98), so the $\lambda$
+used here is $-\lambda$ of MR: here $\lambda$ is directly the force the cut pin exerts on branch 1.</p>
 <p>Forward dynamics differentiates the constraint twice, with Baumgarte stabilisation
 $\ddot{\phi}+2\alpha\dot{\phi}+\beta^{2}\phi=0$, and solves one $(n+2)\times(n+2)$ KKT system per RK4 stage:</p>
 $$M\ddot{\theta}-A^{T}\lambda=\tau-h$$
@@ -110,8 +113,12 @@ class ClosedChainTab(BaseTab):
         self.anim_dir = 1.0
         self.id_res = None
         self.lam_show = None
+        self.id_jobs = JobRunner(self)          # inverse dynamics along a trajectory (background)
         self.timer = QtCore.QTimer(self)
         self.timer.timeout.connect(self._tick)
+        app = QtWidgets.QApplication.instance()
+        if app is not None and not hasattr(BaseTab, "shutdown"):   # older BaseTab without the quit hook
+            app.aboutToQuit.connect(self.shutdown)
         self._last = time.time()
 
         # ------------------------------------------------------------ mechanism group
@@ -241,7 +248,7 @@ class ClosedChainTab(BaseTab):
         fi.addRow(self.omega_lbl, self.omega)
         fi.addRow(self.radius_lbl, self.radius)
         fi.addRow(self.period_lbl, self.period)
-        self.id_btn = button("Compute inverse dynamics", self._compute_id)
+        self.id_btn = button("Compute inverse dynamics", lambda: self._compute_id())
         self.id_play = button("▶ Play", lambda on: self._anim_toggle("id", on), checkable=True)
         self.dyn_lbl = value_label()
         dyn_page = QtWidgets.QWidget()
@@ -353,6 +360,7 @@ class ClosedChainTab(BaseTab):
     def _rebuild(self):
         """New mechanism instance from the spin boxes: recompute curves, frame the view, redraw."""
         old = self.theta
+        self._cancel_id()
         self.mech = self._make_mech()
         m = self.mech
         self.view.remove_prefix("cc.")
@@ -815,10 +823,9 @@ class ClosedChainTab(BaseTab):
                 self._stop_anims()
                 return
         elif kind == "id":
-            if self.id_res is None:
-                self._compute_id()
-            if self.id_res is None:
+            if self.id_res is None:                 # compute first (background), play when it is ready
                 self._stop_anims()
+                self._compute_id(play=True)
                 return
             self.bottom.setCurrentIndex(2)
             self.id_k = 0
@@ -926,33 +933,61 @@ class ClosedChainTab(BaseTab):
                              f"K + P − W + D drift = {drift:+.2e} J\n‖φ‖ = {phi:.1e} m    |λ| = {np.hypot(*lam):.2f} N")
 
     # -- inverse dynamics -----------------------------------------------------------------------
-    def _compute_id(self):
+    def _compute_id(self, play: bool = False):
+        """Inverse dynamics along the current crank / circle trajectory, in a background thread on a private
+        copy of the mechanism (its dynamics engines are not shared with the GUI thread)."""
         m = self.mech
         if m is None or self.theta is None:
             return
         m.backend = self.ctx.backend
-        QtWidgets.QApplication.setOverrideCursor(QtCore.Qt.WaitCursor)
-        try:
-            t0 = time.time()
-            if self.four:
-                args = (self.omega.value(), self.sigma, float(self.theta[0]))
-                t, TH, DTH, DDTH = m.crank_trajectory(*args, N=181)
-                traj = lambda tt: m.crank_trajectory(*args, t=tt)[1:]
-                full = m.crank_fully_rotates()
+        wm = self._make_mech()                       # same parameters, own engine cache
+        wm.backend = m.backend
+        four = self.four
+        if four:
+            args = (self.omega.value(), self.sigma, float(self.theta[0]))
+            full = m.crank_fully_rotates()
+        else:
+            c = m.tip(self.theta)[:2] - np.array([self.radius.value(), 0.0])
+            args = (c, self.radius.value(), self.period.value(), self.elbows)
+        t0 = time.time()
+
+        def job(progress, cancelled):
+            if four:
+                t, TH, DTH, DDTH = wm.crank_trajectory(*args, N=181)
+                traj = lambda tt: wm.crank_trajectory(*args, t=tt)[1:]
                 x = np.degrees(np.unwrap(TH[:, 0])) if full else t
                 xl = "crank angle θ₁ [°]" if full else "t [s]"
             else:
-                c = m.tip(self.theta)[:2] - np.array([self.radius.value(), 0.0])
-                args = (c, self.radius.value(), self.period.value(), self.elbows)
-                t, TH, DTH, DDTH = m.circle_trajectory(*args, N=181)
-                traj = lambda tt: m.circle_trajectory(*args, t=tt)[1:]
+                t, TH, DTH, DDTH = wm.circle_trajectory(*args, N=181)
+                traj = lambda tt: wm.circle_trajectory(*args, t=tt)[1:]
                 x, xl = t, "t [s]"
-            res = m.inverse_dynamics_trajectory(t, TH, DTH, DDTH, x, xl, traj_fn=traj)
-        except (ValueError, np.linalg.LinAlgError) as e:
-            self.dyn_lbl.setText(f"⚠ {e}")
+            return wm.inverse_dynamics_trajectory(t, TH, DTH, DDTH, x, xl, traj_fn=traj, cancelled=cancelled,
+                                                  progress=progress)
+
+        self.id_btn.setEnabled(False)
+        self.dyn_lbl.setText("inverse dynamics (background thread) …")
+        self.id_jobs.run(job, on_done=lambda res, req=m: self._id_done(req, res, time.time() - t0, play),
+                         on_error=self._id_failed,
+                         on_progress=lambda f: self.dyn_lbl.setText(
+                             f"inverse dynamics (background thread) … {100 * f:.0f} %"),
+                         label="inverse dynamics")
+
+    def _id_failed(self, err):
+        self.id_btn.setEnabled(True)
+        self.dyn_lbl.setText(f"⚠ {err.strip().splitlines()[-1]}")
+
+    def _cancel_id(self):
+        if self.id_jobs.is_busy():
+            self.id_jobs.cancel()
+        if hasattr(self, "id_btn"):
+            self.id_btn.setEnabled(True)
+
+    def _id_done(self, req, res, seconds, play):
+        self.id_btn.setEnabled(True)
+        m = self.mech
+        if req is not m or self.theta is None:      # mechanism rebuilt meanwhile: stale result
             return
-        finally:
-            QtWidgets.QApplication.restoreOverrideCursor()
+        t, x, xl = res.t, res.x, res.xlabel
         self.id_res = res
         for p in (self.ptau, self.pidlam, self.ppow):
             p.clear()
@@ -970,11 +1005,13 @@ class ClosedChainTab(BaseTab):
                            for p in (self.ptau, self.pidlam, self.ppow)]
         self.lam_scale_id = 0.10 / max(float(np.hypot(lam[:, 0], lam[:, 1]).max()), 1e-9)
         err = np.abs(res.power - res.dEdt).max() / max(np.abs(res.power).max(), 1e-9)
-        self.dyn_lbl.setText(f"Inverse dynamics ({len(t)} samples, {m.backend} blocks, {time.time() - t0:.2f} s)\n"
+        self.dyn_lbl.setText(f"Inverse dynamics ({len(t)} samples, {m.backend} blocks, {seconds:.2f} s)\n"
                              f"peak |τ| = {np.abs(res.tau).max():.2f} N·m,  peak |λ| = "
                              f"{np.hypot(lam[:, 0], lam[:, 1]).max():.1f} N\n"
                              f"power balance: max|τθ̇ − dE/dt| / max|τθ̇| = {err:.1e}")
         self.bottom.setCurrentIndex(2)
+        if play:
+            self._anim_toggle("id", True)
 
     def _tick_id(self):
         r = self.id_res
@@ -1008,6 +1045,15 @@ class ClosedChainTab(BaseTab):
 
     def on_hide(self):
         self._stop_anims()
+        self._cancel_id()
+
+    def shutdown(self):
+        """Application quit: stop the animation, cancel the inverse-dynamics job (brief wait only)."""
+        self._stop_anims()
+        self.id_jobs.shutdown(500)
+        parent = getattr(super(), "shutdown", None)
+        if parent is not None:
+            parent()
 
 
 def _wrapped(text: str) -> QtWidgets.QLabel:

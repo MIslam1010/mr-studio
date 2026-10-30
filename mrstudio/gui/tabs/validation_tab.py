@@ -4,7 +4,6 @@ from __future__ import annotations
 import math
 import os
 import time
-import traceback
 
 from PySide6 import QtCore, QtGui, QtWidgets
 
@@ -12,6 +11,7 @@ from ...references import further_reading
 from ... import validation as V
 from .. import theme
 from ..base import BaseTab
+from ..jobs import JobRunner
 from ..widgets import button, checkbox, combo, group, value_label
 
 THEORY = r"""
@@ -73,27 +73,23 @@ def _cat_color(cat: str) -> str:
     return CAT_COLORS.get(cat, theme.WARN)
 
 
-class _Worker(QtCore.QThread):
-    """Runs validation.run_all off the GUI thread and streams results back."""
-    progress = QtCore.Signal(float, str)
-    result = QtCore.Signal(int, object)
-    done = QtCore.Signal(object, float)
-    crashed = QtCore.Signal(str)
+def _suite_job(progress, cancelled):
+    """Worker-thread body: run the whole suite, streaming (fraction, "step", message) and
+    (fraction, "result", index, check) through the JobRunner's progress channel."""
+    t0 = time.perf_counter()
+    counter = [0]
+    last = [0.0]
 
-    def run(self):
-        t0 = time.perf_counter()
-        counter = [0]
+    def on_progress(f, m):
+        last[0] = float(f)
+        progress(float(f), "step", str(m))
 
-        def on_result(c):
-            self.result.emit(counter[0], c)
-            counter[0] += 1
+    def on_result(c):
+        progress(last[0], "result", counter[0], c)
+        counter[0] += 1
 
-        try:
-            checks = V.run_all(progress=lambda f, m: self.progress.emit(float(f), str(m)), on_result=on_result)
-        except Exception:
-            self.crashed.emit(traceback.format_exc())
-            return
-        self.done.emit(checks, time.perf_counter() - t0)
+    checks = V.run_all(progress=on_progress, on_result=on_result, cancelled=cancelled)
+    return checks, time.perf_counter() - t0
 
 
 class ValidationTab(BaseTab):
@@ -104,7 +100,7 @@ class ValidationTab(BaseTab):
         super().__init__(ctx)
         self.checks: list = []
         self.elapsed: float | None = None
-        self.worker: _Worker | None = None
+        self.jobs = JobRunner(self)
         self._planned = False
         self._n_results = 0
 
@@ -146,12 +142,12 @@ class ValidationTab(BaseTab):
         self.sources_lbl.setWordWrap(True)
         self.sources_lbl.setTextFormat(QtCore.Qt.RichText)
         self.sources_lbl.setText(
-            f"<span style='color:{theme.TEXT}'>"
+            f"<span style='color:{theme.text_color()}'>"
             "<b>modern_robotics</b> — Lynch &amp; Park's reference code<br>"
             "<b>Pinocchio</b> — C++, Featherstone algorithms<br>"
             "<b>Robotics Toolbox</b> — P. Corke, DH models + rne<br>"
             "<b>SymPy</b> — symbolic Euler–Lagrange<br>"
-            "<b>SciPy</b> — adaptive RK45 (DOP853) integration</span>")
+            "<b>SciPy</b> — adaptive RK45 (Dormand–Prince) integration</span>")
 
         controls = QtWidgets.QWidget()
         cl = QtWidgets.QVBoxLayout(controls)
@@ -206,14 +202,11 @@ class ValidationTab(BaseTab):
         self.assemble(controls, center, self.details, THEORY, bottom_ratio=(5, 2))
         self._set_banner("idle")
         self._show_details(-1)
-        app = QtWidgets.QApplication.instance()
-        if app is not None:
-            app.aboutToQuit.connect(self._stop_worker)
 
     # ====================================================================== table helpers
     def _item(self, text, color=None, mono=False, bold=False, align=None, tip=None):
         it = QtWidgets.QTableWidgetItem(text)
-        it.setForeground(QtGui.QColor(color or theme.TEXT))
+        it.setForeground(QtGui.QColor(color or theme.text_color()))
         if mono:
             it.setFont(self._mono)
         if bold:
@@ -229,28 +222,31 @@ class ValidationTab(BaseTab):
     def _set_row_pending(self, row, cat, name, chapter):
         right = QtCore.Qt.AlignRight | QtCore.Qt.AlignVCenter
         self.table.setItem(row, 0, self._item(cat, _cat_color(cat)))
-        self.table.setItem(row, 1, self._item(name, theme.MUTED))
-        self.table.setItem(row, 2, self._item(chapter, theme.MUTED))
-        self.table.setItem(row, 3, self._item("…", theme.MUTED, mono=True, align=right))
-        self.table.setItem(row, 4, self._item("", theme.MUTED, mono=True, align=right))
-        self.table.setItem(row, 5, self._item("·", theme.MUTED, align=QtCore.Qt.AlignCenter))
+        self.table.setItem(row, 1, self._item(name, theme.muted_color()))
+        self.table.setItem(row, 2, self._item(chapter, theme.muted_color()))
+        self.table.setItem(row, 3, self._item("…", theme.muted_color(), mono=True, align=right))
+        self.table.setItem(row, 4, self._item("", theme.muted_color(), mono=True, align=right))
+        self.table.setItem(row, 5, self._item("·", theme.muted_color(), align=QtCore.Qt.AlignCenter))
 
     def _set_row(self, row, c):
         right = QtCore.Qt.AlignRight | QtCore.Qt.AlignVCenter
         skipped = V.is_skipped(c)
-        ok = c.passed
+        info = V.is_informational(c)
+        ok = c.passed or info              # informational rows are never shown as failures
         if skipped:
-            mark, mcol = "–", theme.MUTED
+            mark, mcol = "–", theme.muted_color()
+        elif info:
+            mark, mcol = "ⓘ", theme.muted_color()
         else:
-            mark, mcol = ("✓", theme.GOOD) if ok else ("✗", theme.BAD)
-        name_col = theme.MUTED if skipped else theme.TEXT
+            mark, mcol = ("✓", theme.good_color()) if ok else ("✗", theme.bad_color())
+        name_col = theme.muted_color() if skipped else theme.text_color()
         items = [
             self._item(c.category, _cat_color(c.category)),
             self._item(c.name, name_col, tip=c.name),
-            self._item(c.chapter, theme.MUTED),
-            self._item(V.fmt_err(c.error), theme.MUTED if skipped else (theme.TEXT if ok else theme.BAD),
+            self._item(c.chapter, theme.muted_color()),
+            self._item(V.fmt_err(c.error), theme.muted_color() if skipped else (theme.text_color() if ok else theme.bad_color()),
                        mono=True, align=right),
-            self._item(V.fmt_err(c.tol), theme.MUTED, mono=True, align=right),
+            self._item(V.fmt_err(c.tol), theme.muted_color(), mono=True, align=right),
             self._item(mark, mcol, bold=True, align=QtCore.Qt.AlignCenter),
         ]
         for col, it in enumerate(items):
@@ -282,7 +278,7 @@ class ValidationTab(BaseTab):
 
     # ====================================================================== run
     def run_checks(self):
-        if self.worker is not None and self.worker.isRunning():
+        if self.jobs.is_busy():
             return
         self.checks = []
         self._populate_planned(force=True)
@@ -293,24 +289,27 @@ class ValidationTab(BaseTab):
                 it = self.table.item(r, col)
                 if it is not None:
                     it.setText("…" if col == 3 else ("·" if col == 5 else ""))
-                    it.setForeground(QtGui.QColor(theme.MUTED))
+                    it.setForeground(QtGui.QColor(theme.muted_color()))
                     it.setBackground(QtGui.QBrush())
         self.run_btn.setEnabled(False)
         self.run_btn.setText("Running…")
         self.export_btn.setEnabled(False)
         self.bar.setValue(0)
         self._set_banner("running")
-        self.worker = _Worker(self)
-        self.worker.progress.connect(self._on_progress)
-        self.worker.result.connect(self._on_result)
-        self.worker.done.connect(self._on_done)
-        self.worker.crashed.connect(self._on_crash)
-        self.worker.start()
+        self.jobs.run(_suite_job, on_done=lambda res: self._on_done(*res), on_error=self._on_crash,
+                      on_progress=self._on_job_progress, label="Validation suite")
+
+    def _on_job_progress(self, frac, kind=None, *info):
+        """Progress channel of the JobRunner (already filtered: only the current run gets here)."""
+        if kind == "result":
+            self._on_result(*info)
+        elif kind == "step":
+            self._on_progress(frac, *info)
 
     def _on_progress(self, frac, msg):
         self.bar.setValue(int(1000 * frac))
         self.step_lbl.setText(msg)
-        if self.worker is not None and self.worker.isRunning():
+        if self.jobs.is_busy():
             self._set_banner("running", msg)
 
     def _on_result(self, idx, c):
@@ -346,7 +345,8 @@ class ValidationTab(BaseTab):
         self.run_btn.setText("▶  Run all checks again")
         self.export_btn.setEnabled(True)
         self._set_banner("done")
-        first_fail = next((r for r, c in enumerate(self.checks) if not c.passed and not V.is_skipped(c)), 0)
+        first_fail = next((r for r, c in enumerate(self.checks)
+                           if not c.passed and not V.is_skipped(c) and not V.is_informational(c)), 0)
         self.table.selectRow(first_fail)
         self._show_details(first_fail)
 
@@ -357,9 +357,16 @@ class ValidationTab(BaseTab):
         self.details.setPlainText(tb)
         self._set_banner("crash")
 
-    def _stop_worker(self):
-        if self.worker is not None and self.worker.isRunning():
-            self.worker.wait(60000)
+    def wait_job(self, timeout_s: float = 300.0):
+        """Block (processing events) until the suite finished -- scripted tests only."""
+        self.jobs.wait(timeout_s)
+
+    def shutdown(self):
+        """Application quit: stop the suite between two checks (run_all polls cancelled()); wait at most ~2 s."""
+        self.jobs.shutdown(2000)
+        parent = getattr(super(), "shutdown", None)
+        if parent is not None:
+            parent()
 
     # ====================================================================== presentation
     def _set_banner(self, state, msg=""):
@@ -381,6 +388,8 @@ class ValidationTab(BaseTab):
         else:
             s = V.summary(self.checks)
             skipped = f" · {s['skipped']} optional module(s) not available" if s["skipped"] else ""
+            if s.get("informational"):
+                skipped += f" · {s['informational']} ⓘ informational row(s) not counted"
             if s["all_passed"]:
                 head = (f"<span style='color:{theme.GOOD}'>✓</span> {s['passed']} / {s['total']} checks passed"
                         f" — max error {V.fmt_err(s['max_precise_error'])}")
@@ -401,6 +410,8 @@ class ValidationTab(BaseTab):
         cats: dict = {}
         for c in self.checks:
             d = cats.setdefault(c.category, [0, 0, 0])
+            if V.is_informational(c):
+                continue
             if V.is_skipped(c):
                 d[2] += 1
             else:
@@ -409,9 +420,9 @@ class ValidationTab(BaseTab):
         rows = []
         for cat, (p, n, sk) in cats.items():
             ok = p == n
-            status = (f"<span style='color:{theme.GOOD}'>✓</span>" if ok and n else
-                      f"<span style='color:{theme.BAD}'>✗</span>" if n else
-                      f"<span style='color:{theme.MUTED}'>skipped</span>")
+            status = (f"<span style='color:{theme.good_color()}'>✓</span>" if ok and n else
+                      f"<span style='color:{theme.bad_color()}'>✗</span>" if n else
+                      f"<span style='color:{theme.muted_color()}'>skipped</span>")
             count = f"{p} / {n}" if n else "—"
             rows.append(f"<tr><td><span style='color:{_cat_color(cat)}'>●</span>&nbsp;{cat}</td>"
                         f"<td align='right' style='font-family:Menlo'>&nbsp;&nbsp;{count}</td>"
@@ -427,7 +438,7 @@ class ValidationTab(BaseTab):
             if c is not None:
                 if cat != "All categories" and c.category != cat:
                     hide = True
-                if fails and (c.passed or V.is_skipped(c)):
+                if fails and (c.passed or V.is_skipped(c) or V.is_informational(c)):
                     hide = True
             else:
                 it = self.table.item(r, 0)
@@ -436,8 +447,8 @@ class ValidationTab(BaseTab):
             self.table.setRowHidden(r, hide)
 
     def _show_details(self, row):
-        css = (f"<style>body{{color:{theme.TEXT}; font-size:13px}} h3{{color:{theme.ACCENT}; margin:0 0 4px 0}}"
-               f".m{{color:{theme.MUTED}}} .k{{color:{theme.MUTED}}} td{{padding-right:14px}}</style>")
+        css = (f"<style>body{{color:{theme.text_color()}; font-size:13px}} h3{{color:{theme.accent_color()}; margin:0 0 4px 0}}"
+               f".m{{color:{theme.muted_color()}}} .k{{color:{theme.muted_color()}}} td{{padding-right:14px}}</style>")
         if row is None or row < 0 or row >= len(self.checks):
             self.details.setHtml(
                 css + "<h3>Details</h3><p class='m'>Run the suite, then click any row to see exactly what was "
@@ -447,16 +458,19 @@ class ValidationTab(BaseTab):
             return
         c = self.checks[row]
         if V.is_skipped(c):
-            verdict = f"<span style='color:{theme.MUTED}'>skipped</span>"
+            verdict = f"<span style='color:{theme.muted_color()}'>skipped</span>"
+        elif V.is_informational(c):
+            verdict = (f"<span style='color:{theme.muted_color()}'><b>ⓘ informational</b> — shown for contrast, "
+                       f"not counted in the pass total</span>")
         elif c.passed:
             margin = ""
             if c.error > 0 and math.isfinite(c.error) and c.tol > 0:
                 margin = f" — {math.log10(c.tol / c.error):.1f} orders of magnitude below the tolerance"
             elif c.error == 0:
                 margin = " — exact agreement"
-            verdict = f"<span style='color:{theme.GOOD}'><b>✓ passed</b>{margin}</span>"
+            verdict = f"<span style='color:{theme.good_color()}'><b>✓ passed</b>{margin}</span>"
         else:
-            verdict = f"<span style='color:{theme.BAD}'><b>✗ FAILED</b></span>"
+            verdict = f"<span style='color:{theme.bad_color()}'><b>✗ FAILED</b></span>"
         detail = (c.detail or "").replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;").replace("\n", "<br>")
         fam = V.FAMILY_TEXT.get(c.category, "")
         self.details.setHtml(
@@ -486,7 +500,7 @@ class ValidationTab(BaseTab):
         with open(fn, "w", encoding="utf-8") as fh:
             fh.write(V.report_html(self.checks, self.elapsed))
         url = QtCore.QUrl.fromLocalFile(fn).toString()
-        self.saved_lbl.setText(f"Saved <a href='{url}' style='color:{theme.ACCENT}'>{os.path.basename(fn)}</a> "
+        self.saved_lbl.setText(f"Saved <a href='{url}' style='color:{theme.link_color()}'>{os.path.basename(fn)}</a> "
                                f"— open it in any browser or print it to PDF.")
         return fn
 

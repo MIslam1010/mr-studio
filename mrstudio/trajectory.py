@@ -191,9 +191,21 @@ def hold(traj: Trajectory, t_hold: float, dt: float | None = None) -> Trajectory
                       rep(traj.ddtheta, z), traj.path, traj.scaling, traj.Tf)
 
 
+#: KUKA LBR iiwa 7 R800 joint speeds (deg/s) -- datasheet, verify against the current KUKA spec sheet
+IIWA7_QDOT_MAX_DEG_S = (98.0, 98.0, 100.0, 130.0, 140.0, 180.0, 180.0)
+
+
 def default_velocity_limits(robot: SerialRobot) -> np.ndarray:
-    """Joint speed limits [rad/s] (manufacturer data where known)."""
+    """Joint speed limits [rad/s]: the robot's own ``qdot_max`` if it defines one (course robots do), else
+    manufacturer data where known, else 2.5π rad/s."""
+    qd = getattr(robot, "qdot_max", None)
+    if qd is not None:
+        qd = np.broadcast_to(np.asarray(qd, float), (robot.n,)).copy()
+        if np.all(np.isfinite(qd)) and np.all(qd > 0):
+            return qd
     name = robot.name
+    if "iiwa" in name and robot.n == 7:
+        return np.radians(IIWA7_QDOT_MAX_DEG_S)      # datasheet, verify
     if "Panda" in name:
         return np.array([2.175, 2.175, 2.175, 2.175, 2.61, 2.61, 2.61])
     if "UR5" in name:
@@ -278,12 +290,20 @@ def min_duration(engine, jp: JointPath, tau_max, vel_max, scaling="quintic", T0=
 
 
 def topp(engine, jp: JointPath, tau_max, vel_max, n_grid: int = 250, samples: int = 300,
-         compare_quintic: bool = True) -> ToppResult:
+         compare_quintic: bool = True, cancelled=None) -> ToppResult:
     """Time-optimal time scaling along the joint path jp subject to |tau_i| <= tau_max_i and
     |dtheta_i| <= v_max_i  (MR Sec. 9.4, solved with TOPP-RA's reachability analysis).
 
     The torque constraint uses tau = a(s) s_ddot + b(s) s_dot^2 + c(s) (MR Eq. 9.33), with a, b, c evaluated
-    by toppra through calls to the inverse dynamics engine.inverse (RNEA)."""
+    by toppra through calls to the inverse dynamics engine.inverse (RNEA).
+
+    ``cancelled()`` (optional) is polled between the stages (reachability, feasible sets, resampling, quintic
+    comparison); if it returns True the result is ``ToppResult(False, "cancelled")``."""
+    def stop() -> bool:
+        return cancelled is not None and bool(cancelled())
+
+    if stop():
+        return ToppResult(False, "cancelled")
     try:
         import toppra as ta
         import toppra.algorithm as algo
@@ -299,11 +319,17 @@ def topp(engine, jp: JointPath, tau_max, vel_max, n_grid: int = 250, samples: in
                                        discretization_scheme=const.DiscretizationType.Interpolation)
     grid = np.linspace(0.0, 1.0, n_grid + 1)
     inst = algo.TOPPRA([pc_v, pc_t], path, gridpoints=grid, solver_wrapper="seidel")
+    if stop():
+        return ToppResult(False, "cancelled")
     inst.compute_parameterization(0.0, 0.0)
     pd = inst.problem_data
     if pd.sd_vec is None or "Ok" not in str(pd.return_code):
         return ToppResult(False, f"TOPP-RA failed: {pd.return_code} (gravity alone may exceed the torque limits)")
+    if stop():
+        return ToppResult(False, "cancelled")
     X = inst.compute_feasible_sets()
+    if stop():
+        return ToppResult(False, "cancelled")
     grid = np.asarray(pd.gridpoints)
     sd_grid = np.asarray(pd.sd_vec)
     mvc = np.sqrt(np.clip(X[:, 1], 0, None))
@@ -315,7 +341,7 @@ def topp(engine, jp: JointPath, tau_max, vel_max, n_grid: int = 250, samples: in
     s, sd, sdd, _ = _const_accel_eval(grid, sd_grid, t)
     q, dq, ddq, tau, tn, vn = limit_ratio(engine, jp, s, sd, sdd, tau_max, vel_max)
     res = ToppResult(True, "ok", T, grid, sd_grid, mvc, ku, t, s, sd, sdd, q, dq, ddq, tau, tn, vn)
-    if compare_quintic:
+    if compare_quintic and not stop():
         Tq = min_duration(engine, jp, tau_max, vel_max, "quintic", T0=T)
         res.quintic_T = Tq
         if np.isfinite(Tq):
@@ -328,8 +354,14 @@ def topp(engine, jp: JointPath, tau_max, vel_max, n_grid: int = 250, samples: in
 
 def topp_trajectory(res: ToppResult, jp: JointPath, dt: float) -> Trajectory:
     """Resample the time-optimal solution at a fixed period dt (e.g. the control period)."""
-    t = np.arange(0.0, res.duration + 0.5 * dt, dt)
-    t[-1] = min(t[-1], res.duration)
+    D = float(res.duration)
+    t = np.arange(0.0, D + 0.5 * dt, dt)
+    t[-1] = min(t[-1], D)
+    if t[-1] < D - 1e-12:                 # arange stopped up to dt/2 short of the end: the goal must be reached
+        if D - t[-1] < 1e-6 * dt:
+            t[-1] = D
+        else:
+            t = np.r_[t, D]
     s, sd, sdd, _ = _const_accel_eval(res.grid, res.sd_grid, t)
     q1, q2 = jp(s, 1), jp(s, 2)
     return Trajectory(t, s, sd, sdd, jp(s), q1 * sd[:, None], q2 * sd[:, None]**2 + q1 * sdd[:, None], jp,
@@ -337,6 +369,27 @@ def topp_trajectory(res: ToppResult, jp: JointPath, dt: float) -> Trajectory:
 
 
 # ============================================================================ validation
+def sddot_fd_error(kind: str, Tf: float = 2.0, h: float = 1e-4) -> tuple[float, str]:
+    """max |s̈_analytic − (ṡ(t+h) − ṡ(t−h)) / 2h| over t in (0, T), relative to max|s̈|.
+
+    The trapezoid's s̈ jumps at t_a and T − t_a (and the clipped ends): instants within 2h of a jump are skipped."""
+    t = np.linspace(2 * h, Tf - 2 * h, 4001)
+    _, _, sdd = time_scaling(kind, Tf, t)
+    _, sd_p, _ = time_scaling(kind, Tf, t + h)
+    _, sd_m, _ = time_scaling(kind, Tf, t - h)
+    fd = (sd_p - sd_m) / (2 * h)
+    keep = np.ones_like(t, bool)
+    note = f"central differences of ṡ, h = {h * 1e3:.1f} ms, {len(t)} instants"
+    if kind == "trapezoidal":
+        v, a = trapezoid_params(Tf)
+        ta = v / a
+        for tj in (ta, Tf - ta):
+            keep &= np.abs(t - tj) > 2 * h
+        note += f"; instants within 2h of the acceleration jumps at {ta:.3f} s and {Tf - ta:.3f} s skipped"
+    err = float(np.abs(fd - sdd)[keep].max() / max(np.abs(sdd).max(), 1e-12))
+    return err, note + "; error relative to max|s̈|"
+
+
 def validation_checks() -> list[Check]:
     from .dynamics import DynamicsEngine
     from .robots import get_robot
@@ -352,6 +405,9 @@ def validation_checks() -> list[Check]:
         dfd = np.max(np.abs(np.gradient(s, t, edge_order=2) - sd)[5:-5])
         out.append(Check(f"{kind.capitalize()} time scaling: analytic ṡ vs finite differences of s(t)", "MR 9.2.2",
                          float(dfd), 2e-3 if kind == "trapezoidal" else 1e-5, "central differences, h = 1 ms", CAT))
+        err, detail = sddot_fd_error(kind, Tf)
+        out.append(Check(f"{kind.capitalize()} time scaling: analytic s̈ vs finite differences of ṡ(t)", "MR 9.2.2",
+                         err, 1e-5, detail, CAT))
     rob = get_robot("UR5 (6R industrial)")
     ths, thg = rob.home.copy(), rob.home + np.array([0.6, -0.4, 0.5, 0.3, -0.5, 0.8])
     tr = make_trajectory(rob, ths, thg, 2.0, 51, "joint", "quintic")
@@ -384,7 +440,7 @@ def validation_checks() -> list[Check]:
         res = topp(eng, jpj, r.tau_max, default_velocity_limits(r), n_grid=200, samples=400)
         worst = max(np.abs(res.tau_norm).max(), res.vel_norm.max()) if res.ok else np.inf
         out.append(Check(f"TOPP-RA respects the limits: max(|τ|/τmax, |θ̇|/vmax) ≤ 1 ({name})", "MR 9.4",
-                         float(max(worst - 1.0, 0.0)), 0.03,
+                         float(max(worst - 1.0, 0.0)), 1e-3,
                          f"T* = {res.duration:.3f} s, evaluated at 400 instants between grid points", CAT))
         sat = np.max(np.maximum(np.abs(res.tau_norm), res.vel_norm), axis=1) if res.ok else np.zeros(1)
         out.append(Check(f"TOPP-RA is bang-bang: some limit active at every instant ({name})", "MR 9.4",

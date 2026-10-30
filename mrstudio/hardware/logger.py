@@ -15,11 +15,19 @@
   (the 461 ``stop_time(t, qdot, t_trigger, ...)`` takes the trigger time as an argument -- MR Studio
   shows it in the report and in the file name hint).
 
-``HardwareLog`` collects samples in radians during a run and writes either format.
+``HardwareLog`` collects samples in radians during a run and writes either format.  The course formats
+stay byte-identical to the starters; MR Studio's diagnostics go to two sidecar files next to the log
+(``save_sidecars``):
+
+* ``<log>.meta.json`` -- port, baud, calibration (sign, offset), SDK version, firmware speed %, the event
+  list (connect, start, stall, stop, errors, ...) and a summary (stale reads, stalls);
+* ``<log>.diag.csv``  -- per row: t, tick dt, fresh (1 = new reading, 0 = repeated after a failed read),
+  stop, raw servo degrees sent (``servo_cmd_j``) and read (``servo_meas_j``, empty when stale).
 """
 from __future__ import annotations
 
 import csv
+import json
 from pathlib import Path
 
 import numpy as np
@@ -168,15 +176,50 @@ class HardwareLog:
         self._cmd: list[np.ndarray] = []
         self._meas: list[np.ndarray] = []
         self._stop: list[int] = []
+        self._fresh: list[int] = []
+        self._dt: list[float] = []
+        self._servo_cmd: list[np.ndarray] = []
+        self._servo_meas: list[np.ndarray] = []
+        self.events: list[dict] = []      # connect / start / stall / stop / error ... (sidecar JSON)
+        self.meta: dict = {}              # driver.describe() etc. (sidecar JSON)
 
     def __len__(self) -> int:
         return len(self._t)
 
-    def append(self, t: float, cmd, meas, stop: bool = False) -> None:
-        self._t.append(float(t))
+    def append(self, t: float, cmd, meas, stop: bool = False, *, fresh: bool = True, dt: float = float("nan"),
+               servo_cmd=None, servo_meas=None) -> None:
+        nan = np.full(self.n, np.nan)
+        # diagnostics first, t last: a reader on another thread sizes its snapshot by len(t)
+        self._fresh.append(int(bool(fresh)))
+        self._dt.append(float(dt))
+        self._servo_cmd.append(nan if servo_cmd is None else np.asarray(servo_cmd, float).reshape(self.n).copy())
+        self._servo_meas.append(nan if servo_meas is None else np.asarray(servo_meas, float).reshape(self.n).copy())
+        self._stop.append(int(bool(stop)))
         self._cmd.append(np.asarray(cmd, float).reshape(self.n).copy())
         self._meas.append(np.asarray(meas, float).reshape(self.n).copy())
-        self._stop.append(int(bool(stop)))
+        self._t.append(float(t))
+
+    def snapshot(self) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
+        """(t, cmd, meas) of the rows complete so far -- safe while another thread appends."""
+        k = len(self._t)
+        return (np.asarray(self._t[:k], float), np.asarray(self._cmd[:k], float).reshape(-1, self.n),
+                np.asarray(self._meas[:k], float).reshape(-1, self.n))
+
+    @property
+    def fresh(self) -> np.ndarray:
+        return np.asarray(self._fresh, int)
+
+    @property
+    def dt(self) -> np.ndarray:
+        return np.asarray(self._dt, float)
+
+    @property
+    def servo_cmd(self) -> np.ndarray:
+        return np.asarray(self._servo_cmd, float).reshape(-1, self.n)
+
+    @property
+    def servo_meas(self) -> np.ndarray:
+        return np.asarray(self._servo_meas, float).reshape(-1, self.n)
 
     @property
     def t(self) -> np.ndarray:
@@ -211,3 +254,35 @@ class HardwareLog:
             write_log_461(path, self.t, self.cmd, self.meas)
         else:
             raise ValueError(f"unknown log format {fmt!r}")
+
+    def save_sidecars(self, path) -> tuple[Path, Path]:
+        """Write ``<path stem>.meta.json`` and ``<path stem>.diag.csv`` next to the log ``path``."""
+        path = Path(path)
+        meta_p = path.with_name(path.stem + ".meta.json")
+        diag_p = path.with_name(path.stem + ".diag.csv")
+        fresh = self.fresh
+        summary = dict(rows=len(self), stale_rows=int((fresh == 0).sum()),
+                       stalls=sum(e.get("kind") == "stall" for e in self.events),
+                       max_dt=float(np.nanmax(self.dt)) if len(self) and np.isfinite(self.dt).any() else None,
+                       stop_time=self.stop_time)
+        meta_p.write_text(json.dumps(dict(meta=self.meta, summary=summary, events=self.events, log=path.name),
+                                     indent=2, default=_json_default))
+        n = self.n
+        header = (["t", "dt", "fresh", "stop"] + [f"servo_cmd_{j + 1}" for j in range(n)]
+                  + [f"servo_meas_{j + 1}" for j in range(n)])
+        fmt = lambda x: "" if not np.isfinite(x) else f"{x:.4f}"
+        with open(diag_p, "w", newline="") as fh:
+            w = csv.writer(fh)
+            w.writerow(header)
+            for k in range(len(self)):
+                w.writerow([f"{self._t[k]:.4f}", fmt(self._dt[k]), self._fresh[k], self._stop[k]]
+                           + [fmt(x) for x in self._servo_cmd[k]] + [fmt(x) for x in self._servo_meas[k]])
+        return meta_p, diag_p
+
+
+def _json_default(o):
+    if isinstance(o, np.ndarray):
+        return o.tolist()
+    if isinstance(o, (np.floating, np.integer)):
+        return o.item()
+    return str(o)

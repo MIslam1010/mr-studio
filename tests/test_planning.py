@@ -268,3 +268,69 @@ def test_planning_tab_headless(qapp):
         tab.scene_box.setCurrentIndex(i)
         assert len(tab.start_sl.values()) == 3
     tab.on_hide()
+
+
+# --- stale worlds: a plan / grid computed for one scene must never be used for another --------------------
+
+def test_grid_not_reused_across_worlds():
+    w1, s, g = world()
+    grid = P.cspace_grid(w1, 48)
+    assert grid.fingerprint == w1.fingerprint()
+    r1 = P.plan(w1, s, g, "A* (grid)", grid_k=48, grid=grid)
+    assert r1.success and r1.extra["grid"] is grid and r1.fingerprint == w1.fingerprint()
+    # same arm, one more obstacle: the grid has the same shape but belongs to another world
+    arm = w1.arm
+    w2 = P.World(arm, list(w1.obstacles) + [P.Circle([0.0, -0.55 * arm.reach], 0.08 * arm.reach)])
+    assert w2.fingerprint() != w1.fingerprint()
+    r2 = P.plan(w2, s, g, "A* (grid)", grid_k=48, grid=grid)
+    assert r2.extra["grid"] is not grid and r2.extra["grid"].fingerprint == w2.fingerprint()
+    assert r2.fingerprint == w2.fingerprint()
+    if r2.success:
+        assert w2.path_free(r2.path)
+    # topology change (torus -> box) also invalidates the grid
+    w3 = P.World(arm, w1.obstacles, torus=False)
+    assert w3.fingerprint() != w1.fingerprint()
+    assert P.plan(w3, s, g, "A* (grid)", grid_k=48, grid=grid).extra["grid"] is not grid
+
+
+def test_plan_rechecks_final_path(monkeypatch):
+    w, s, g = world()
+    real = P.World.path_free
+    monkeypatch.setattr(P.World, "path_free", lambda self, path: False)
+    r = P.plan(w, s, g, "RRT", max_iter=4000, seed=1)
+    assert not r.success and "re-check" in r.message
+    monkeypatch.setattr(P.World, "path_free", real)
+    assert P.plan(w, s, g, "RRT", max_iter=4000, seed=1).success
+
+
+def test_planning_tab_rejects_stale_plans(qapp):
+    from mrstudio.gui.base import AppContext
+    from mrstudio.gui.tabs.planning_tab import PlanningTab
+    import time
+    ctx = AppContext("Planar 2R arm")
+    tab = PlanningTab(ctx)
+    tab.planner_box.setCurrentText("A* (grid)")
+    # (1) the worker finishes *before* the scene changes, but its queued result arrives after: dropped
+    tab.plan()
+    w = tab.jobs._worker
+    t0 = time.time()
+    while w is not None and not w.isFinished() and time.time() - t0 < 30:
+        time.sleep(0.01)                                   # no event processing: the result stays queued
+    tab._add_obstacle("circle")                            # world changed
+    qapp.processEvents()
+    tab.wait_job()
+    assert tab.result is None
+    # (2) a result made for the old obstacles is rejected by its fingerprint, and the grid is not cached
+    old = P.World(tab.arm, tab._obstacles()[:-1], torus=tab.torus_cb.isChecked())
+    s, g = tab.start_sl.values(), tab.goal_sl.values()
+    stale = P.plan(old, s, g, "A* (grid)", grid_k=tab.k_spin.value())
+    tab._grid_cache = None
+    tab._plan_done(tab._job, stale, (old.fingerprint(), tab.k_spin.value()))
+    assert tab.result is None and tab._grid_cache is None
+    # (3) planning in the new world works and caches a grid keyed by the new world
+    tab.plan()
+    tab.wait_job()
+    assert tab.result is not None and tab.result.fingerprint == tab._world_now().fingerprint()
+    if tab._grid_cache is not None:
+        assert tab._grid_cache[0][0] == tab._world_now().fingerprint()
+    tab.shutdown()

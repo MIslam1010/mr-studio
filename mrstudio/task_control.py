@@ -467,6 +467,28 @@ class Gains:
     force_damping: bool = False  # hybrid: add -K_damp V in the force subspace (as in Eq. 11.54)
 
 
+#: discrete-time limits of the rendered impedance at the control period dt (explicit, sampled-data loop):
+#: B·dt/M < 2 (the damping alone must not overshoot in one step) and ω_n·dt = sqrt(K/M)·dt <= 0.3
+IMPEDANCE_DAMPING_LIMIT = 2.0
+IMPEDANCE_OMEGA_DT_LIMIT = 0.3
+
+
+def impedance_stability(m: float, b: float, k: float, dt: float = 0.001) -> tuple[bool, str]:
+    """Is the virtual mass-spring-damper (M, B, K) renderable at control period dt?
+
+    Returns (ok, message).  Unsafe when B·dt/M >= 2 or sqrt(K/M)·dt > 0.3 (the rotational part uses the same ratios,
+    scaled by Gains.rot_scale, so one test covers both)."""
+    m = float(m)
+    if m <= 0:
+        return False, "virtual mass M must be > 0"
+    damp = float(b) * dt / m
+    wdt = np.sqrt(max(float(k), 0.0) / m) * dt
+    ok = damp < IMPEDANCE_DAMPING_LIMIT and wdt <= IMPEDANCE_OMEGA_DT_LIMIT
+    msg = (f"B·Δt/M = {damp:.2f} (must be < {IMPEDANCE_DAMPING_LIMIT:g}), √(K/M)·Δt = {wdt:.2f} "
+           f"(must be ≤ {IMPEDANCE_OMEGA_DT_LIMIT:g}) at Δt = {dt * 1e3:g} ms")
+    return bool(ok), msg
+
+
 def torque_control(mode: str, robot: SerialRobot, theta0, T: float, g: Gains, traj: TaskTrajectory | None = None,
                    rep="body", wall: Wall | None = None, push=None, plant: DynamicsEngine | None = None,
                    model: DynamicsEngine | None = None, dt=0.001, substeps=2, label="", progress=None,

@@ -1139,13 +1139,13 @@ def _verify_trajectory(p: Problem) -> float:
     sdd = np.polyval(np.polyder(coef[::-1], 2), tt)
     D = np.abs(d["theta_end"] - d["theta_start"])
     e = max(e, np.abs(np.abs(sd).max() * D - a["vmax"]).max() / max(1, D.max()))
-    e = max(e, np.abs(np.abs(sdd).max() * D - a["amax"]).max() / max(1, D.max()) * 1e-2)
+    e = max(e, np.abs(np.abs(sdd).max() * D - a["amax"]).max() / max(1, D.max()))
     st = np.polyval(coef[::-1], d["t1"])
     e = max(e, np.abs(d["theta_start"] + st * (d["theta_end"] - d["theta_start"]) - a["theta_t1"]).max())
     if "vlim" in d:   # the minimum time is feasible and tight
         v, acc = np.abs(sd).max() * D.max(), np.abs(sdd).max() * D.max()
         e = max(e, max(v - d["vlim"], acc - d["alim"], 0) / d["vlim"],
-                min(abs(v - d["vlim"]) / d["vlim"], abs(acc - d["alim"]) / d["alim"]) * 1e-2)
+                min(abs(v - d["vlim"]) / d["vlim"], abs(acc - d["alim"]) / d["alim"]))
     return float(e + abs(s[-1] - 1) + abs(s[0]))
 
 
@@ -1176,6 +1176,40 @@ def second_order_response(zeta, wn, dt=None, t_end=None, e0=1.0):
     return t, e, overshoot, ts
 
 
+def _step_error(zeta, wn, t):
+    """Closed-form solution of e'' + 2 zeta wn e' + wn^2 e = 0, e(0) = 1, e'(0) = 0 (MR Sec. 11.2.2.1)."""
+    t = np.asarray(t, float)
+    if abs(zeta - 1) < 1e-9:
+        return (1 + wn * t) * np.exp(-wn * t)
+    if zeta < 1:
+        wd = wn * np.sqrt(1 - zeta**2)
+        return np.exp(-zeta * wn * t) * (np.cos(wd * t) + zeta * wn / wd * np.sin(wd * t))
+    r = np.sqrt(zeta**2 - 1)
+    s1, s2 = -wn * (zeta - r), -wn * (zeta + r)
+    return (s2 * np.exp(s1 * t) - s1 * np.exp(s2 * t)) / (s2 - s1)
+
+
+def exact_settling_time(zeta, wn, band: float = 0.02) -> float:
+    """Exact 2 % settling time: the last time |e(t)| = band for the free response e(0) = 1, e'(0) = 0
+    (MR's t_s ~ 4/(zeta wn) is a rule of thumb from the envelope e^{-zeta wn t})."""
+    from scipy.optimize import brentq
+    if zeta < 1 - 1e-9:      # beyond the envelope e^{-zeta wn t}/sqrt(1 - zeta^2) < band nothing can exceed it
+        t_end = np.log(1 / (band * np.sqrt(1 - zeta**2))) / (zeta * wn) * 1.001
+    else:
+        t_end = 1.0 / wn
+        while abs(float(_step_error(zeta, wn, t_end))) > band:
+            t_end *= 2
+    tt = np.linspace(0.0, t_end, 200001)
+    out = np.nonzero(np.abs(_step_error(zeta, wn, tt)) > band)[0]
+    if len(out) == 0:
+        return 0.0
+    k = out[-1]
+    if k + 1 >= len(tt):
+        return float(tt[-1])
+    f = lambda x: abs(float(_step_error(zeta, wn, x))) - band
+    return float(brentq(f, tt[k], tt[k + 1], xtol=1e-14, rtol=1e-14))
+
+
 def _classify(zeta):
     if abs(zeta - 1) < 1e-9:
         return "critically damped"
@@ -1183,27 +1217,34 @@ def _classify(zeta):
 
 
 def _response_facts(zeta, wn) -> tuple[dict, Doc]:
+    """Regime, overshoot and settling time.  ``ts`` is the textbook rule of thumb (MR pp. 414-415:
+    t_s ~ 4/(zeta wn); overdamped: 4 time constants of the slow root), ``ts_exact`` the exact 2 % time."""
     d = Doc()
     out = dict(zeta=zeta, wn=wn, kind=_classify(zeta))
+    ts_ex = exact_settling_time(zeta, wn)
     if zeta < 1 - 1e-9:
         wd = wn * np.sqrt(1 - zeta**2)
         os_ = np.exp(-np.pi * zeta / np.sqrt(1 - zeta**2))
         ts = 4 / (zeta * wn)
         d.p(f"**Underdamped** ($\\zeta < 1$): $\\omega_d = \\omega_n\\sqrt{{1-\\zeta^{{2}}}} = {num(wd, 4)}$ rad/s, "
-            f"overshoot $= e^{{-\\pi\\zeta/\\sqrt{{1-\\zeta^{{2}}}}}} = {num(100 * os_, 2)}$ %, 2% settling time "
-            f"$t_s \\approx 4/(\\zeta\\omega_n) = {num(ts, 4)}$ s (MR pp. 414–415).")
+            f"overshoot $= e^{{-\\pi\\zeta/\\sqrt{{1-\\zeta^{{2}}}}}} = {num(100 * os_, 2)}$ %.  MR rule of thumb "
+            f"$t_s \\approx 4/(\\zeta\\omega_n) = {num(ts, 4)}$ s (MR pp. 414–415); exact 2% settling time "
+            f"(last time $|\\theta_e| = 0.02$) $= {num(ts_ex, 4)}$ s.")
         out.update(wd=wd, overshoot=os_, ts=ts)
     elif zeta > 1 + 1e-9:
         r = -wn * zeta + np.array([1, -1]) * wn * np.sqrt(zeta**2 - 1)
         ts = 4 / abs(r[0])
         d.p(f"**Overdamped** ($\\zeta > 1$): real roots $s_{{1,2}} = {vec(r, 4)}$; no overshoot; the slow root sets "
-            f"the time constant $\\mathfrak{{t}} = 1/|s_1| = {num(1 / abs(r[0]), 4)}$ s, so $t_s \\approx 4\\mathfrak{{t}} = {num(ts, 4)}$ s.")
+            f"the time constant $\\mathfrak{{t}} = 1/|s_1| = {num(1 / abs(r[0]), 4)}$ s, so the rule of thumb gives "
+            f"$t_s \\approx 4\\mathfrak{{t}} = {num(ts, 4)}$ s; exact 2% settling time $= {num(ts_ex, 4)}$ s.")
         out.update(overshoot=0.0, ts=ts, roots=r)
     else:
         ts = 4 / wn
-        d.p(f"**Critically damped** ($\\zeta = 1$): double root $s = -\\omega_n$; no overshoot; "
-            f"$t_s \\approx 4/\\omega_n = {num(ts, 4)}$ s.")
+        d.p(f"**Critically damped** ($\\zeta = 1$): double root $s = -\\omega_n$; no overshoot.  MR rule of thumb "
+            f"$t_s \\approx 4/(\\zeta\\omega_n) = {num(ts, 4)}$ s; exact 2% settling time $= {num(ts_ex, 4)}$ s "
+            "(the factor $(1+\\omega_n t)$ makes the rule optimistic here).")
         out.update(overshoot=0.0, ts=ts)
+    out["ts_exact"] = ts_ex
     return out, d
 
 
@@ -1249,8 +1290,11 @@ def gen_control(seed: int, difficulty: int) -> Problem:
             data = dict(kp=kp, kd=kd)
         else:
             ts_req = float(_pick(rng, [0.4, 0.5, 0.8, 1.0, 2.0]))
-            zeta = float(_pick(rng, [1.0, 0.7, 0.5, 0.8]))
-            wn = 4 / (zeta * ts_req)
+            # zeta = 1 avoided: there the 4/(zeta wn) rule is ~30 % off the exact settling time
+            zeta = float(_pick(rng, [0.9, 0.7, 0.5, 0.8]))
+            wn_rule = 4 / (zeta * ts_req)
+            tau1 = exact_settling_time(zeta, 1.0)           # settling time scales as 1/wn
+            wn = tau1 / ts_req                              # design to the exact 2 % settling time
             kp, kd = wn**2, 2 * zeta * wn
             st.p(f"A 2R arm (link lengths $L_1 = L_2 = {num(Lp)}$ m) is controlled with the computed-torque law (11.35) "
                  f"using a perfect model and $K_i = 0$.  Choose diagonal gains $K_p = k_pI$, $K_d = k_dI$ so that every "
@@ -1263,7 +1307,11 @@ def gen_control(seed: int, difficulty: int) -> Problem:
         s1.eq(r"\ddot{\theta}_e + K_d\dot{\theta}_e + K_p\theta_e = 0\ \Rightarrow\ \omega_n = \sqrt{k_p},\quad "
               r"\zeta = \frac{k_d}{2\sqrt{k_p}}")
         if difficulty == 3:
-            s1.p(f"Settling time $t_s \\approx 4/(\\zeta\\omega_n)$ gives $\\omega_n = 4/(\\zeta t_s) = {num(wn, 4)}$ rad/s, so "
+            s1.p(f"MR rule of thumb $t_s \\approx 4/(\\zeta\\omega_n)$ gives a first estimate "
+                 f"$\\omega_n \\approx 4/(\\zeta t_s) = {num(wn_rule, 4)}$ rad/s, but with it the exact 2% settling time "
+                 f"would be {num(exact_settling_time(zeta, wn_rule), 4)} s.  The exact settling time scales as "
+                 f"$1/\\omega_n$: for $\\zeta = {num(zeta)}$ it is $t_s = {num(tau1, 4)}/\\omega_n$, so the spec is met "
+                 f"exactly with $\\omega_n = {num(tau1, 4)}/t_s = {num(wn, 4)}$ rad/s: "
                  f"$k_p = \\omega_n^{{2}} = {num(kp, 4)}$ and $k_d = 2\\zeta\\omega_n = {num(kd, 4)}$.")
         else:
             s1.p(f"$\\omega_n = \\sqrt{{{num(kp)}}} = {num(wn, 4)}$ rad/s, $\\zeta = {num(kd)}/(2\\cdot{num(wn, 4)}) = "
@@ -1275,17 +1323,20 @@ def gen_control(seed: int, difficulty: int) -> Problem:
         zc, wc = kd / (2 * np.sqrt(kp)), np.sqrt(kp)
     facts, fd = _response_facts(zc, wc)
     t, e, os_sim, ts_sim = second_order_response(zc, wc)
-    fd.p(f"Simulation of the error equation with `mr.EulerStep` ($\\theta_e(0) = 1$, $\\dot{{\\theta}}_e(0) = 0$): "
-         f"overshoot {num(100 * os_sim, 2)} %, 2% settling time {num(ts_sim, 3)} s "
-         "(the $4/(\\zeta\\omega_n)$ rule is an envelope approximation).")
+    fd.p(f"Simulation of the error equation with `mr.EulerStep` ($\\theta_e(0) = 1$, $\\dot{{\\theta}}_e(0) = 0$, "
+         f"1 ms steps): overshoot {num(100 * os_sim, 2)} %, 2% settling time {num(ts_sim, 3)} s — the exact value "
+         f"{num(facts['ts_exact'], 3)} s up to the step size; the $4/(\\zeta\\omega_n)$ rule of thumb "
+         f"({num(facts['ts'], 3)} s) is an envelope approximation.")
     steps.append(Step("Transient response", fd))
     ans = dict(**facts)
     ad = Doc().p(f"$\\omega_n = {num(wc, 4)}$ rad/s, $\\zeta = {num(zc, 4)}$ ({facts['kind']}); overshoot "
-                 f"{num(100 * facts['overshoot'], 2)} %, $t_s \\approx {num(facts['ts'], 4)}$ s.")
+                 f"{num(100 * facts['overshoot'], 2)} %; settling time: MR rule of thumb $t_s \\approx "
+                 f"{num(facts['ts'], 4)}$ s, exact 2% value {num(facts['ts_exact'], 4)} s.")
     if difficulty == 2:
         kd_c = 2 * np.sqrt(kp)
         s3 = Doc().p(f"Critical damping needs $\\zeta = 1$: $k_d = 2\\sqrt{{k_p}} = {num(kd_c, 4)}$, "
-                     f"giving $t_s \\approx 4/\\omega_n = {num(4 / wc, 4)}$ s.")
+                     f"giving $t_s \\approx 4/\\omega_n = {num(4 / wc, 4)}$ s by the rule of thumb "
+                     f"(exact 2% settling time {num(exact_settling_time(1.0, wc), 4)} s).")
         steps.append(Step("(c) Critical damping", s3))
         ans["kd_critical"] = kd_c
         ad.p(f"(c) $k_d = {num(kd_c, 4)}$.")
@@ -1313,9 +1364,28 @@ def _verify_control(p: Problem) -> float:
                         atol=1e-12, dense_output=True)
         tt = np.linspace(0, sol.t[-1], 20001)
         os_num = -sol.sol(tt)[0].min()
-        e = max(e, abs(os_num - a["overshoot"]) * 1e-2)
-    if "ts" in d:
-        e = max(e, abs(4 / (a["zeta"] * a["wn"]) - d["ts"]))
+        e = max(e, abs(os_num - a["overshoot"]))
+    # damping-regime label from the eigenvalues (complex: under-, double: critically, distinct real: over-damped)
+    disc = (np.trace(A))**2 - 4 * np.linalg.det(A)
+    kind = "critically damped" if abs(disc) < 1e-9 * max(1.0, np.trace(A)**2) else (
+        "underdamped" if disc < 0 else "overdamped")
+    e = max(e, float(kind != a["kind"]))
+    # rule-of-thumb settling time (MR pp. 414-415) and the exact 2 % settling time by direct integration
+    if a["kind"] == "overdamped":
+        e = max(e, abs(4 / np.abs(np.real(lam)).min() - a["ts"]))
+    else:
+        e = max(e, abs(4 / (zeta * wn) - a["ts"]))
+    from scipy.integrate import solve_ivp
+    t_hi = 3 * a["ts_exact"] + 1.0 / wn
+    sol = solve_ivp(lambda t, x: A @ x, (0, t_hi), [1.0, 0.0], rtol=1e-12, atol=1e-14, dense_output=True)
+    tt = np.linspace(0, t_hi, 400001)
+    out = np.nonzero(np.abs(sol.sol(tt)[0]) > 0.02)[0]
+    ts_num = tt[out[-1]] if len(out) else 0.0
+    e = max(e, max(0.0, abs(ts_num - a["ts_exact"]) - (tt[1] - tt[0])))
+    if "ts" in d:      # design problem: the gains meet the specified (exact) settling time and zeta
+        e = max(e, abs(a["ts_exact"] - d["ts"]), abs(zeta - d["zeta_req"]))
+    if "kd_critical" in a:
+        e = max(e, abs(a["kd_critical"] / (2 * np.sqrt(d["kp"])) - 1.0))
     return float(e)
 
 

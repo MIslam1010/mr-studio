@@ -1,0 +1,17 @@
+cff-version: 1.2.0
+message: "If you use MR Studio in teaching or research, please cite it as below."
+title: "MR Studio"
+type: software
+version: "1.0.0"
+authors:
+  - family-names: "Islam"
+    given-names: "Muhammad A. M."
+repository-code: "https://github.com/MIslam1010/mr-studio"
+abstract: "Interactive teaching app for the kinematics, dynamics, control and planning of robot chains, following Modern Robotics (Lynch & Park), with cross-validation against Pinocchio, the Robotics Toolbox and Modern Robotics."
+keywords:
+  - robotics
+  - kinematics
+  - dynamics
+  - teaching
+  - Modern Robotics
+license: MIT

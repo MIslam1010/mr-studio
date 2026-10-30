@@ -12,7 +12,10 @@ Servo model (per joint, position-controlled smart servo):
 * the reading is **quantised** to the encoder resolution (12 bit = 0.088 deg) after adding Gaussian
   **noise** while the joint moves (servo vibration; a joint at rest reads a steady count);
 * ``stop()`` latches: the joints coast to rest with the deceleration time constant ``stop_tau``
-  (q(t) = q0 + v0 * stop_tau * (1 - exp(-t / stop_tau)), the model used by hwcompare.synthetic_log).
+  (q(t) = q0 + v0 * stop_tau * (1 - exp(-t / stop_tau)), the model used by hwcompare.synthetic_log);
+* **torque off** (latched, rule 6): J2 and J3 sag slowly (``sag_deg_s``) as a real arm does under
+  gravity, so practice with the simulation teaches to support the arm before releasing torque.  The
+  direction is illustrative (which way the tool falls depends on the pose); there is no gravity model.
 
 Time comes from ``clock()`` (default ``time.monotonic``); tests pass a manual clock so runs are
 deterministic and instantaneous.
@@ -45,7 +48,7 @@ class SimulatedArm(ArmDriver):
 
     def __init__(self, spec: ArmSpec = COURSE_ARM, *, lag_tau: float = 0.04, stop_tau: float = 0.06,
                  noise_deg: float = 0.05, quantise: bool = True, seed: int | None = 0,
-                 q0=None, clock=None, substep: float = 1e-3):
+                 q0=None, clock=None, substep: float = 1e-3, sag_deg_s: float = 3.0):
         super().__init__(spec)
         self.lag_tau = float(lag_tau)
         self.stop_tau = float(stop_tau)
@@ -58,6 +61,9 @@ class SimulatedArm(ArmDriver):
         self.v = np.zeros(spec.n)
         self.target = self.q.copy()
         self.vmax = 0.25 * spec.rated_speed
+        self.sag = np.zeros(spec.n)
+        if spec.n >= 3:
+            self.sag[1:3] = -np.radians(sag_deg_s)     # J2, J3 fall while torque is off
         self._t_last = None
 
     # -- ArmDriver ---------------------------------------------------------------------------
@@ -73,6 +79,8 @@ class SimulatedArm(ArmDriver):
             q[moving] += self.rng.normal(0.0, self.noise, int(moving.sum()))
         if self.quantise:
             q = np.round(q / self.spec.enc_res) * self.spec.enc_res
+        self.last_meas_servo_deg = np.degrees(q)
+        self._mark_read(True)
         return q
 
     def _send(self, q, speed) -> None:
@@ -80,14 +88,18 @@ class SimulatedArm(ArmDriver):
         lo, hi = self.spec.hw_limits.T
         self.target = np.clip(q, lo, hi)
         self.vmax = speed * self.spec.rated_speed
+        self.last_cmd_servo_deg = np.degrees(self.target)
 
-    def stop(self) -> None:
+    def stop(self) -> bool:
         if self.connected:
             self._advance()    # integrate up to the stop instant with the servo law, then coast
-        super().stop()
+        return super().stop()
 
-    def _halt(self) -> None:
-        pass
+    def _halt(self) -> bool:
+        return True
+
+    def _set_torque(self, on: bool) -> None:
+        self._advance()        # integrate the coast (or the sag) up to the switching instant
 
     def reset_latch(self) -> None:
         self._advance()
@@ -113,8 +125,9 @@ class SimulatedArm(ArmDriver):
         h = T / k
         lo, hi = self.spec.hw_limits.T
         if self._latched or not self._torque:
-            if not self._torque:          # torque off: the arm is held by the gearbox (no gravity model)
-                self.v[:] = 0.0
+            if not self._torque:          # torque off: J2/J3 sag at a constant slow rate
+                self.q = np.clip(self.q + self.sag * T, lo, hi)
+                self.v = self.sag.copy()
                 return
             decay = np.exp(-T / self.stop_tau)
             self.q = np.clip(self.q + self.v * self.stop_tau * (1 - decay), lo, hi)

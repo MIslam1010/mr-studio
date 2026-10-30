@@ -75,3 +75,15 @@ def test_dls_pinv_bounded_at_singularity():
     J = np.array([[1.0, 1.0], [0.0, 1e-9]])
     Jp, smin, lam = tc.dls_pinv(J)
     assert lam > 0 and np.abs(Jp).max() < 1e3
+
+
+def test_impedance_stability_limits():
+    ok, _ = tc.impedance_stability(2.0, 20.0, 200.0)          # the defaults are fine
+    assert ok
+    ok, msg = tc.impedance_stability(0.1, 500.0, 200.0)       # B·dt/M = 5
+    assert not ok and "B·Δt/M" in msg
+    ok, _ = tc.impedance_stability(0.1, 0.0, 5000.0)          # sqrt(K/M)·dt = 0.22: fine
+    assert ok
+    ok, _ = tc.impedance_stability(0.01, 0.0, 5000.0)         # sqrt(K/M)·dt = 0.71
+    assert not ok
+    assert not tc.impedance_stability(0.0, 1.0, 1.0)[0]

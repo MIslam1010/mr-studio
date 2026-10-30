@@ -20,11 +20,12 @@ gravity along -y.  The cut pin becomes the loop-closure constraint
 * Five-bar  : branch 1 = [L1, L2] from O, branch 2 = [L4, L3] from D.  n = 4 -> 2 DOF
               (actuated: both ground joints); the end-effector is the common tip P.
 
-Dynamics (MR Sec. 8.7, Eq. 8.93):  M(theta) theta_ddot + h(theta, theta_dot) = tau + A^T lambda
+Dynamics (cf. MR Sec. 8.7, Eqs. 8.93/8.98):  M(theta) theta_ddot + h(theta, theta_dot) = tau + A^T lambda
 with block-diagonal M and stacked h of the branches (``mr.MassMatrix``, ``mr.VelQuadraticForces``,
 ``mr.GravityForces`` through :class:`mrstudio.dynamics.DynamicsEngine`, backend "mr" or
 "pinocchio").  lambda is the force the cut pin exerts on the tip of branch 1 (and -lambda on
-branch 2).  Forward dynamics solves the KKT system with Baumgarte stabilisation; inverse
+branch 2).  Sign convention: MR writes tau = M theta_ddot + h + A^T lambda_MR, so
+lambda here = -lambda_MR (same physics; our lambda is directly the pin force acting on branch 1).  Forward dynamics solves the KKT system with Baumgarte stabilisation; inverse
 dynamics solves [S, A^T][tau_a; lambda] = M theta_ddot + h.
 """
 from __future__ import annotations
@@ -348,7 +349,9 @@ class ClosedChain:
         return ke, pe
 
     def forward_dynamics(self, th, dth, tau, alpha: float = 0.0, beta: float = 0.0, backend=None):
-        """KKT system  [[M, -A^T], [A, 0]] [theta_ddot; lambda] = [tau - h; -Adot th_dot - 2 a A th_dot - b^2 phi]."""
+        """KKT system  [[M, -A^T], [A, 0]] [theta_ddot; lambda] = [tau - h; -Adot th_dot - 2 a A th_dot - b^2 phi].
+
+        lambda = force of the cut pin on branch 1 = -lambda of MR Eqs. (8.93)/(8.98)."""
         th, dth = np.asarray(th, float), np.asarray(dth, float)
         n = self.n
         M = self.mass_matrix(th, backend)
@@ -407,7 +410,9 @@ class ClosedChain:
         return ClosedSim(*(np.array(x) for x in (T, TH, DTH, LAM, PHI, KE, PE, W, D)))
 
     def inverse_dynamics(self, th, dth, ddth, backend=None):
-        """M theta_ddot + h = S tau_a + A^T lambda  =>  [S, A^T][tau_a; lambda] = M theta_ddot + h."""
+        """M theta_ddot + h = S tau_a + A^T lambda  =>  [S, A^T][tau_a; lambda] = M theta_ddot + h.
+
+        lambda = force of the cut pin on branch 1 = -lambda of MR Eqs. (8.93)/(8.98)."""
         th, dth, ddth = (np.asarray(x, float) for x in (th, dth, ddth))
         M = self.mass_matrix(th, backend)
         h = self.bias(th, dth, backend)
@@ -427,12 +432,18 @@ class ClosedChain:
         return (E[0] - E[1]) / (2 * delta)
 
     def inverse_dynamics_trajectory(self, t, TH, DTH, DDTH, x=None, xlabel="t [s]", backend=None,
-                                    traj_fn=None) -> IDResult:
+                                    traj_fn=None, cancelled=None, progress=None) -> IDResult:
+        """Inverse dynamics along a sampled trajectory.  ``cancelled()`` is polled every sample (raises
+        InterruptedError); ``progress(fraction)`` reports the fraction of samples done."""
         N = len(t)
         tau = np.zeros((N, self.na))
         lam = np.zeros((N, 2))
         ke, pe = np.zeros(N), np.zeros(N)
         for k in range(N):
+            if cancelled is not None and cancelled():
+                raise InterruptedError
+            if progress is not None and k % 10 == 0:
+                progress(k / N)
             tau[k], lam[k], M = self.inverse_dynamics(TH[k], DTH[k], DDTH[k], backend)
             ke[k], pe[k] = self.energy(TH[k], DTH[k], M)
         power = np.sum(tau * DTH[:, self.actuated], axis=1)

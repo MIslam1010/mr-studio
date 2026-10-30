@@ -168,12 +168,30 @@ class DeltaRobot:
         """Motor torques balancing an external force F on the platform: tau = -J^T F (massless legs)."""
         return -self.jacobian(th, p).T @ np.asarray(F, float)
 
+    def static_torques_checked(self, th, p, F):
+        """:meth:`static_torques` plus the condition number of the (row-normalised) J_x that is inverted in
+        J = J_x^-1 J_th, and a warning when kappa > 1e6 (Type-II singularity: torques unbounded).
+        Returns a :class:`mrstudio.parallel.Checked`."""
+        from .parallel import Checked, _cond, condition_warning
+        n, _ = self.jacobian_parts(th, p)
+        kappa = _cond(n / np.linalg.norm(n, axis=1)[:, None])
+        try:
+            tau = self.static_torques(th, p, F)
+        except np.linalg.LinAlgError:
+            tau, kappa = np.full(3, np.nan), np.inf
+        return Checked(tau, kappa, condition_warning(kappa, "motor torques"))
+
     # -- workspace ------------------------------------------------------------------------------------------
-    def workspace_cloud(self, n=17):
-        """FK of a grid of actuator angles within the limits; returns (points, cond J)."""
+    def workspace_cloud(self, n=17, cancelled=None, progress=None):
+        """FK of a grid of actuator angles within the limits; returns (points, cond J).
+        ``cancelled()`` is polled per grid slab (raises InterruptedError); ``progress(fraction)``."""
         g = np.linspace(self.th_min, self.th_max, n)
         P, K = [], []
-        for t1 in g:
+        for i1, t1 in enumerate(g):
+            if cancelled is not None and cancelled():
+                raise InterruptedError
+            if progress is not None:
+                progress(i1 / n)
             for t2 in g:
                 for t3 in g:
                     th = np.array([t1, t2, t3])

@@ -1,5 +1,7 @@
-"""Reusable Qt widgets: joint sliders, matrix display, labelled spin boxes, plots."""
+"""Reusable Qt widgets: joint sliders, matrix display, labelled spin boxes, plots, time-series playback."""
 from __future__ import annotations
+
+import time
 
 import numpy as np
 import pyqtgraph as pg
@@ -266,3 +268,159 @@ def pen(i: int, width=2.0, style=None):
     if style == "dash":
         kw["style"] = QtCore.Qt.DashLine
     return pg.mkPen(**kw)
+
+
+# ============================================================================ playback + small layout helpers
+# (moved here from tabs/dynamics_tab.py, which still re-exports them)
+class Player(QtCore.QObject):
+    """Plays back a precomputed time series in real time (QTimer, 30 ms) -- emits frame(index).
+
+    ``set_times(t, autoplay=True)`` only starts playing when the player's widget is actually on screen (the
+    owning tab is visible); a hidden tab never runs the 30 ms timer.  Tabs stop the player in ``on_hide``.
+    """
+    frame = QtCore.Signal(int)
+    SPEEDS = ["0.1×", "0.25×", "0.5×", "1×", "2×"]
+
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        self.t = np.zeros(1)
+        self.k = 0
+        self._t_sim = 0.0
+        self._t_wall = 0.0
+        self.timer = QtCore.QTimer(self)
+        self.timer.setInterval(30)
+        self.timer.timeout.connect(self._tick)
+        self.btn = button("▶ Play", self._toggled, checkable=True)
+        self.slider = QtWidgets.QSlider(QtCore.Qt.Horizontal)
+        self.slider.setRange(0, 0)
+        self.slider.valueChanged.connect(self._seek)
+        self.speed = combo(self.SPEEDS)
+        self.speed.setCurrentText("1×")
+        self.loop = checkbox("loop", checked=True)
+        self.lbl = value_label("no motion computed yet")
+        self.widget = QtWidgets.QWidget()
+        v = QtWidgets.QVBoxLayout(self.widget)
+        v.setContentsMargins(0, 0, 0, 0)
+        v.addLayout(hbox(self.btn, QtWidgets.QLabel("speed"), self.speed, self.loop, None))
+        v.addWidget(self.slider)
+        v.addWidget(self.lbl)
+
+    def owner_visible(self) -> bool:
+        """True if the tab that owns this player is on screen (parent widget, else the player's own widget)."""
+        p = self.parent()
+        w = p if isinstance(p, QtWidgets.QWidget) else self.widget
+        try:
+            return bool(w.isVisible())
+        except RuntimeError:            # C++ object already deleted
+            return False
+
+    def set_times(self, t, autoplay: bool = True):
+        self.t = np.asarray(t, float)
+        self.slider.blockSignals(True)
+        self.slider.setRange(0, len(self.t) - 1)
+        self.slider.setValue(0)
+        self.slider.blockSignals(False)
+        self._t_sim = 0.0
+        self.set_index(0)
+        if autoplay and self.owner_visible():
+            if self.btn.isChecked():
+                self._t_wall = time.perf_counter()
+            else:
+                self.btn.setChecked(True)
+
+    def playing(self) -> bool:
+        return self.btn.isChecked()
+
+    def stop(self):
+        if self.btn.isChecked():
+            self.btn.setChecked(False)
+
+    def _toggled(self, on):
+        self.btn.setText("❚❚ Pause" if on else "▶ Play")
+        if on and len(self.t) > 1:
+            if self.k >= len(self.t) - 1:
+                self.k = 0
+            self._t_sim = self.t[self.k]
+            self._t_wall = time.perf_counter()
+            self.timer.start()
+        else:
+            self.timer.stop()
+
+    def _tick(self):
+        now = time.perf_counter()
+        sp = float(self.speed.currentText().rstrip("×"))
+        self._t_sim += (now - self._t_wall) * sp
+        self._t_wall = now
+        T = self.t[-1]
+        if self._t_sim > T:
+            if self.loop.isChecked():
+                if self._t_sim > T + 0.8 * sp:      # short pause at the end, then restart
+                    self._t_sim = 0.0
+            else:
+                self.set_index(len(self.t) - 1)
+                self.stop()
+                return
+        k = int(np.clip(np.searchsorted(self.t, min(self._t_sim, T)), 0, len(self.t) - 1))
+        if k != self.k or self._t_sim == 0.0:
+            self.set_index(k)
+
+    def set_index(self, k):
+        self.k = int(k)
+        self.slider.blockSignals(True)
+        self.slider.setValue(self.k)
+        self.slider.blockSignals(False)
+        self.lbl.setText(f"t = {self.t[self.k]:6.3f} s  /  {self.t[-1]:.3f} s")
+        self.frame.emit(self.k)
+
+    def _seek(self, k):
+        self._t_sim = self.t[int(k)]
+        self.set_index(k)
+
+
+def form(*rows) -> QtWidgets.QFormLayout:
+    f = QtWidgets.QFormLayout()
+    f.setContentsMargins(0, 0, 0, 0)
+    f.setHorizontalSpacing(8)
+    f.setVerticalSpacing(3)
+    for r in rows:
+        if isinstance(r, tuple):
+            lab, w = r
+            f.addRow(lab, w)
+        else:
+            f.addRow(r)
+    return f
+
+
+def compact(w, chars: int = 16):
+    """Keep long combo boxes from widening the control column."""
+    w.setSizeAdjustPolicy(QtWidgets.QComboBox.AdjustToMinimumContentsLengthWithIcon)
+    w.setMinimumContentsLength(chars)
+    return w
+
+
+def default_goal(robot) -> np.ndarray:
+    d = np.resize([0.9, -0.7, 0.8, 0.6, -0.6, 0.8, 0.5], robot.n)
+    if robot.planar:
+        d = np.resize([-1.3, -1.1, 0.9], robot.n)
+    lo, hi = robot.joint_limits[:, 0], robot.joint_limits[:, 1]
+    return np.clip(robot.home + d, lo + 0.05, hi - 0.05)
+
+
+def no_si(pw):
+    """Plain axis numbers (pyqtgraph's automatic SI prefixes mangle labels such as '1/s')."""
+    for ax in ("left", "bottom"):
+        pw.getAxis(ax).enableAutoSIPrefix(False)
+    return pw
+
+
+def time_cursor(pw):
+    ln = pg.InfiniteLine(pos=0, angle=90, pen=pg.mkPen((255, 255, 255, 90), width=1))
+    pw.addItem(ln, ignoreBounds=True)
+    return ln
+
+
+def limit_lines(pw, robot, scale=1.0):
+    for i in range(robot.n):
+        for sgn in (1, -1):
+            pw.addItem(pg.InfiniteLine(pos=sgn * robot.tau_max[i] * scale, angle=0, pen=pen(i, 1.0, "dash")),
+                       ignoreBounds=True)

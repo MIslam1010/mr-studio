@@ -77,3 +77,4 @@ typing_extensions==4.16.0
 virtualenv==21.14.5
 xacro==2.1.1
 xacrodoc==2.0.1
+pyserial==3.5

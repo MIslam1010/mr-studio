@@ -10,7 +10,8 @@
                                   run the full cross-validation suite (the Validation tab) headless.
 
 A windowed app on Windows has no console (sys.stdout is None); output then goes to the --report file
-and to %TEMP%/mrstudio.log.
+and to the log file (`_log_file`: ~/Library/Logs/MR Studio/mrstudio.log on macOS,
+%LOCALAPPDATA%\\MR Studio\\mrstudio.log on Windows). Native crashes (faulthandler) are written there too.
 """
 from __future__ import annotations
 
@@ -26,15 +27,51 @@ if not FROZEN:  # running from source: make `mrstudio` and `bundle_config` impor
     sys.path.insert(0, HERE)
 
 
+def _log_file() -> str:
+    """Path of the app's log file. The app's own `log_path()` is preferred so that both write to one file;
+    the fallback repeats its rule (macOS ~/Library/Logs/MR Studio, Windows %LOCALAPPDATA%\\MR Studio)."""
+    try:
+        from mrstudio.gui.app import log_path
+        return str(log_path())
+    except ImportError:
+        pass
+    if sys.platform == "darwin":
+        base = os.path.join(os.path.expanduser("~"), "Library", "Logs", "MR Studio")
+    elif sys.platform == "win32":
+        base = os.path.join(os.environ.get("LOCALAPPDATA") or os.path.expanduser("~"), "MR Studio")
+    else:
+        base = os.path.join(os.environ.get("XDG_STATE_HOME") or os.path.join(os.path.expanduser("~"), ".local", "state"),
+                            "MR Studio")
+    return os.path.join(base, "mrstudio.log")
+
+
+_LOG = None   # keeps the log file open for the whole run (faulthandler needs a live file object)
+
+
+def _open_log():
+    global _LOG
+    if _LOG is None:
+        try:
+            path = _log_file()
+            os.makedirs(os.path.dirname(path), exist_ok=True)
+            _LOG = open(path, "a", encoding="utf-8", buffering=1)
+        except OSError:
+            _LOG = open(os.devnull, "w")
+    return _LOG
+
+
 def _ensure_streams() -> None:
-    """GUI builds have no stdout/stderr; some libraries call sys.stderr.write directly."""
+    """GUI builds have no stdout/stderr; some libraries call sys.stderr.write directly. A frozen app also sends
+    native crashes (segfaults in Qt/OpenGL) to the log file with a Python traceback."""
+    if FROZEN:
+        import faulthandler
+        try:
+            faulthandler.enable(file=_open_log(), all_threads=True)
+        except (OSError, RuntimeError, ValueError):
+            pass
     if sys.stdout is not None and sys.stderr is not None:
         return
-    import tempfile
-    try:
-        log = open(os.path.join(tempfile.gettempdir(), "mrstudio.log"), "a", encoding="utf-8", buffering=1)
-    except OSError:
-        log = open(os.devnull, "w")
+    log = _open_log()
     if sys.stdout is None:
         sys.stdout = log
     if sys.stderr is None:
@@ -153,6 +190,40 @@ def self_test(report: str | None = None, tabs: bool = True) -> int:
             raise FileNotFoundError(exe)
         return os.path.basename(exe)
     _step(rep, "ffmpeg binary for MP4 recording", _ffmpeg)
+
+    def _toppra():
+        import numpy as np
+        import toppra as ta
+        import toppra.algorithm as algo
+        import toppra.constraint as constraint
+        path = ta.SplineInterpolator(np.linspace(0, 1, 3), np.array([[0.0, 0.0], [0.5, 0.3], [1.0, 0.0]]))
+        vlim = np.array([[-1.0, 1.0], [-1.0, 1.0]])
+        alim = np.array([[-2.0, 2.0], [-2.0, 2.0]])
+        inst = algo.TOPPRA([constraint.JointVelocityConstraint(vlim),
+                            constraint.JointAccelerationConstraint(alim)], path, solver_wrapper="seidel")
+        traj = inst.compute_trajectory(0, 0)
+        if traj is None or not traj.duration > 0:
+            raise RuntimeError("toppra returned no trajectory")
+        return f"duration {traj.duration:.2f} s"
+    _step(rep, "toppra solve (tiny time-optimal path)", _toppra)
+
+    def _sympy():
+        import sympy as sp
+        x = sp.symbols("x")
+        d = sp.simplify(sp.diff(sp.sin(x) ** 2 + sp.cos(x) ** 2 + x ** 2, x))
+        if d != 2 * x:
+            raise AssertionError(f"d/dx = {d}")
+        return str(d)
+    _step(rep, "sympy expression (simplify, diff)", _sympy)
+
+    def _scipy_ls():
+        import numpy as np
+        from scipy.optimize import least_squares
+        sol = least_squares(lambda p: np.array([p[0] - 1.0, 10.0 * (p[1] - p[0] ** 2)]), [0.0, 0.0])
+        if not np.allclose(sol.x, [1.0, 1.0], atol=1e-6):
+            raise AssertionError(f"solution {sol.x}")
+        return f"x = {np.round(sol.x, 6).tolist()}"
+    _step(rep, "scipy.optimize.least_squares", _scipy_ls)
 
     if tabs:
         def _tabs():

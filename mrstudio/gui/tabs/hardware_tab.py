@@ -3,22 +3,34 @@
 Streams a joint trajectory to the arm at 50 Hz, logs commanded vs measured joints in the CSV formats of
 the SBEG 361 (hwcompare.py) and SBEG 461 (hardware.py) starters, enforces the course-arm hardware safety
 checklist and computes the hardware acceptance tests HW-2 ... HW-6.
+
+During a run the serial I/O happens on a worker thread (``_StreamWorker``) that owns the driver; the GUI
+thread only draws the samples it publishes, so STOP is never queued behind a slow USB transfer.  With a
+hand-advanced ``ManualClock`` (tests) the same ``HardwareRun.step`` is driven synchronously by ``_tick``.
 """
 from __future__ import annotations
 
+import atexit
 import dataclasses
+import functools
 import os
+import sys
+import threading
+import time
+from datetime import datetime
+from pathlib import Path
 
 import numpy as np
 import pyqtgraph as pg
 from PySide6 import QtCore, QtGui, QtWidgets
 
-from ...hardware import COURSE_ARM, HardwareError, SimulatedArm, course_arm_robot
+from ...hardware import COURSE_ARM, HardwareError, ManualClock, SimulatedArm, course_arm_robot
 from ...hardware import metrics as hwm
 from ...hardware.logger import FORMATS, load_trajectory
-from ...hardware.mycobot import MyCobotDriver, list_serial_ports, sdk_available
+from ...hardware.mycobot import (BAUD_RATES, DEFAULT_STREAM_SPEED_PCT, MyCobotCalibration, MyCobotDriver,
+                                 default_calibration_path, list_serial_ports, sdk_available)
 from ...hardware.safety import SESSION_LABELS, SESSIONS, SafetySupervisor, retime_to_speed
-from ...hardware.session import HardwareRun, concat, quintic_move, with_approach
+from ...hardware.session import HardwareRun, LatestValue, concat, quintic_move, with_approach
 from ...references import further_reading
 from .. import theme
 from ..base import BaseTab
@@ -61,6 +73,12 @@ $$e_{task}(t)=\left|\,p(\theta_{cmd}(t))-p(\theta_{meas}(t))\,\right|\approx|J_v
 <b>latched stop</b> with torque off · 7 e-stop tested, supervisor present.
 The software enforces 1, 3 and 4 and blocks <b>Run</b> until the people at the bench confirm the rest.
 <b>Stop</b> is always active and latches the arm until <i>Reset latch</i>.</p>
+<h3>Run-time guards</h3>
+<p>While streaming, each set-point may move at most $\dot{\theta}_{cap}\,\min(\Delta t, 40\ \mathrm{ms})$
+from the previous one; a tick gap above 100 ms holds the trajectory time (no jump ahead after a stall);
+$|\theta_{cmd}-\theta_{meas}|>10^{\circ}$ on any joint for more than 150 ms, three failed joint reads in a
+row or any communication error stop and latch the arm.  On the myCobot every set-point is mapped with
+the commissioned sign and offset, $\theta_{servo}=s\,\theta+o$, and clamped 10° inside the servo travel.</p>
 """
 THEORY += further_reading([
     ('corke', '§3.1.1, pp. 43–45', 'quintic polynomial trajectories (boundary-value system)'),
@@ -76,6 +94,66 @@ _SHORT = {"induction": "Safety induction done by all at the arm (5)",
           "payload": "Payload weighed and entered (4)"}
 _RATE_MS = 20          # 50 Hz streaming (briefs: >= 20 Hz)
 _POLL_MS = 100         # idle read-back
+_FRESH_MAX_S = 0.2     # Run refuses to start on joint readings older than this
+_DEFAULT_PORTS = (["/dev/cu.usbserial-0001", "/dev/cu.wchusbserial0001"] if sys.platform == "darwin"
+                  else ["COM3"] if sys.platform.startswith("win") else ["/dev/ttyUSB0", "/dev/ttyACM0"])
+
+
+def _emergency_stop(driver):
+    """atexit hook registered on connect: halt, latch and close the port if MR Studio exits uncleanly."""
+    try:
+        driver.stop()
+    except Exception:
+        pass
+    try:
+        driver.disconnect()
+    except Exception:
+        pass
+
+
+class _StreamWorker(QtCore.QThread):
+    """Streams one ``HardwareRun`` off the GUI thread.
+
+    It owns the driver I/O for the run: every ``safe_step`` (set-point write + joint read) happens here at
+    the stream rate, and each sample is published through a latest-value mailbox plus the
+    ``sample_ready`` signal (the GUI draws only the newest).  STOP latches the driver from the GUI thread
+    (the latch is checked under the driver's I/O lock before every write) and sets ``wake`` so the
+    worker sends the halt and logs the deceleration without waiting for the next period."""
+    sample_ready = QtCore.Signal()
+
+    def __init__(self, run: HardwareRun, period_s: float, q_now, parent=None):
+        super().__init__(parent)
+        self.hw_run = run
+        self.period = float(period_s)
+        self.q_now = q_now
+        self.mailbox = LatestValue()
+        self.wake = threading.Event()
+
+    def run(self):
+        r = self.hw_run
+        try:
+            if not r.finished:
+                r.start(self.q_now)
+                self._publish()
+            next_t = time.monotonic()
+            while not r.finished:
+                next_t += self.period
+                delay = next_t - time.monotonic()
+                if delay < 0:                       # overran: re-phase instead of bursting to catch up
+                    next_t, delay = time.monotonic(), 0.0
+                if self.wake.wait(delay):
+                    self.wake.clear()
+                r.safe_step()
+                self._publish()
+        except Exception as e:                      # safe_step never raises; belt and braces
+            r.fail(e)
+
+    def _publish(self):
+        lg = self.hw_run.log
+        if len(lg):
+            t, cmd, meas = lg.snapshot()
+            self.mailbox.put((t[-1], cmd[-1], meas[-1]))
+            self.sample_ready.emit()
 
 
 class HardwareTab(BaseTab):
@@ -94,15 +172,27 @@ class HardwareTab(BaseTab):
         self.pose_a = self.spec.q_home.copy()
         self.pose_b = self.spec.q_home + np.radians([35, 20, -25, 15, 25, -30])
         self.csv_traj = None
+        self.worker: _StreamWorker | None = None
+        self.threaded = True                      # stream on a worker thread (off with a ManualClock)
+        self.sdk_factory = None                   # tests inject a fake pymycobot class here
+        self.calib_path = str(default_calibration_path())
+        self.session_events: list[dict] = []
+        self._atexit_cb = None
+        self._n_samples = 0
+        self.confirm = self._ask                   # (title, text) -> bool; tests replace it
         self.view = SceneView()
 
         # ---- connection ---------------------------------------------------------------------
         self.backend_box = combo(_BACKENDS, self._backend_changed)
         self.port_box = QtWidgets.QComboBox()
         self.port_box.setEditable(True)
-        self.port_box.addItems(list_serial_ports() or ["/dev/ttyUSB0", "/dev/tty.usbserial-0001", "COM3"])
+        self.port_box.addItems(list_serial_ports() or _DEFAULT_PORTS)
+        self.port_box.setToolTip("USB-serial ports of the arm first (CP210x / CH340); on macOS use /dev/cu.*")
+        self.baud_box = combo([str(b) for b in BAUD_RATES])
+        self.baud_box.setToolTip("115200 for the M5 / Pi editions; some boards use 1000000 (see the arm's manual)")
         self.connect_btn = button("Connect", self._toggle_connect, checkable=True, primary=True)
         self.conn_lbl = value_label("not connected")
+        self.health_lbl = value_label()
         model_txt = (f"Model: <b>{self.robot.name}</b>" +
                      (" — the registered course-arm model is not available yet; using the built-in "
                       "kinematic model (same screw axes)." if self.fallback else ""))
@@ -155,11 +245,43 @@ class HardwareTab(BaseTab):
         self.save_btn = button("Save log…", self._save_dialog)
         self.status_lbl = value_label("Connect a back-end to start.")
 
+        # ---- myCobot calibration (commissioning) -----------------------------------------------
+        self.sign_boxes, self.offset_spins = [], []
+        cal_grid = QtWidgets.QGridLayout()
+        cal_grid.addWidget(QtWidgets.QLabel("Joint"), 0, 0)
+        cal_grid.addWidget(QtWidgets.QLabel("servo turns the other way"), 0, 1)
+        cal_grid.addWidget(QtWidgets.QLabel("servo offset"), 0, 2)
+        for j in range(self.spec.n):
+            sb = checkbox("invert")
+            sb.setToolTip("q_servo = −q_model + offset for this joint")
+            sp = spin(-180.0, 180.0, 0.0, 1, 0.5, "°")
+            sp.setToolTip("Servo angle [deg] when the model angle is 0 (q_servo = sign·q_model + offset)")
+            self.sign_boxes.append(sb)
+            self.offset_spins.append(sp)
+            cal_grid.addWidget(QtWidgets.QLabel(f"J{j + 1}"), j + 1, 0)
+            cal_grid.addWidget(sb, j + 1, 1)
+            cal_grid.addWidget(sp, j + 1, 2)
+        self.stream_pct = QtWidgets.QSpinBox()
+        self.stream_pct.setRange(1, 100)
+        self.stream_pct.setValue(DEFAULT_STREAM_SPEED_PCT)
+        self.stream_pct.setSuffix(" %")
+        self.stream_pct.setToolTip("Firmware speed % sent with every streamed set-point (independent of the "
+                                   "session speed cap).  Measure its deg/s at commissioning.")
+        self.stream_pct.valueChanged.connect(self._stream_pct_changed)
+        self.calib_save_btn = button("Save calibration", lambda: self.save_calibration())
+        self.calib_lbl = value_label()
+        self.calib_lbl.setTextInteractionFlags(QtCore.Qt.TextSelectableByMouse)
+
         controls = QtWidgets.QWidget()
         cl = QtWidgets.QVBoxLayout(controls)
         cl.addWidget(group("Arm connection", hbox(QtWidgets.QLabel("Back-end"), self.backend_box),
-                           hbox(QtWidgets.QLabel("Port"), self.port_box), self.connect_btn,
-                           self.conn_lbl, self.model_lbl))
+                           hbox(QtWidgets.QLabel("Port"), self.port_box),
+                           hbox(QtWidgets.QLabel("Baud"), self.baud_box), self.connect_btn,
+                           self.conn_lbl, self.health_lbl, self.model_lbl))
+        self.calib_group = group("myCobot calibration (commissioning)", cal_grid,
+                                 hbox(QtWidgets.QLabel("Streaming speed (firmware)"), self.stream_pct),
+                                 self.calib_save_btn, self.calib_lbl)
+        cl.addWidget(self.calib_group)
         cl.addWidget(group("Session", self.session_box, self.first_run_cb,
                            hbox(QtWidgets.QLabel("Payload on the tool"), self.payload_spin), self.speed_lbl))
         cl.addWidget(group("Safety checklist — tick before Run", *cl_widgets, self.auto_lbl, self.ready_lbl))
@@ -217,7 +339,7 @@ class HardwareTab(BaseTab):
         bottom.setStretchFactor(0, 3)
         bottom.setStretchFactor(1, 2)
 
-        for cb_ in (self.backend_box, self.port_box, self.session_box, self.source_box, self.fmt_box):
+        for cb_ in (self.backend_box, self.port_box, self.baud_box, self.session_box, self.source_box, self.fmt_box):
             cb_.setSizeAdjustPolicy(QtWidgets.QComboBox.AdjustToMinimumContentsLengthWithIcon)
             cb_.setMinimumContentsLength(10)
             cb_.setSizePolicy(QtWidgets.QSizePolicy.Expanding, QtWidgets.QSizePolicy.Fixed)
@@ -241,6 +363,7 @@ class HardwareTab(BaseTab):
 
         soft = dataclasses.replace(self.robot, joint_limits=self.sup.soft_limits)
         self.sliders.set_robot(soft, self.pose_b)
+        self._load_calibration_ui()
         self._backend_changed(self.backend_box.currentText())
         self._source_changed(self.source_box.currentText())
         self._safety_changed()
@@ -265,14 +388,20 @@ class HardwareTab(BaseTab):
     # ================================================================== connection
     def _backend_changed(self, txt):
         sim = txt == _BACKENDS[0]
-        self.port_box.setEnabled(not sim)
-        if not sim and not sdk_available():
+        connected = self.driver is not None and self.driver.connected
+        self.port_box.setEnabled(not sim and not connected)
+        self.baud_box.setEnabled(not sim and not connected)
+        self.calib_group.setVisible(not sim)
+        if not sim and not sdk_available() and self.sdk_factory is None:
             self.conn_lbl.setText("pymycobot is not installed — install it with "
                                   "<tt>.venv/bin/python -m pip install pymycobot</tt> (or use the Simulated back-end).")
             self.conn_lbl.setStyleSheet(f"color:{theme.WARN}")
-        elif not (self.driver and self.driver.connected):
+        elif not connected:
             self.conn_lbl.setText("not connected")
             self.conn_lbl.setStyleSheet("")
+
+    def _is_mycobot(self) -> bool:
+        return isinstance(self.driver, MyCobotDriver)
 
     def _toggle_connect(self, on):
         if on:
@@ -280,39 +409,63 @@ class HardwareTab(BaseTab):
         else:
             self.disconnect_backend()
 
+    def _event(self, kind: str, msg: str = "") -> None:
+        """Session event for the log sidecar (connect, torque, calibration, idle stops ...)."""
+        ev = dict(t=None, wall=datetime.now().isoformat(timespec="milliseconds"), kind=kind, msg=msg)
+        self.session_events.append(ev)
+        if self.last_log is not None:
+            self.last_log.events.append(ev)
+
     def connect_backend(self) -> bool:
         self.disconnect_backend()
         if self.backend_box.currentText() == _BACKENDS[0]:
             drv = SimulatedArm(self.spec, q0=self.q_meas)
         else:
-            drv = MyCobotDriver(self.port_box.currentText().strip(), spec=self.spec)
+            cal = self._load_calibration()
+            drv = MyCobotDriver(self.port_box.currentText().strip(), int(self.baud_box.currentText()), spec=self.spec,
+                                sdk_factory=self.sdk_factory, calibration=cal,
+                                stream_speed_pct=self.stream_pct.value())
+            if cal is not None:
+                drv.calibration_path = self.calib_path
         try:
             drv.connect()
-        except HardwareError as e:
+            self.q_meas = drv.read_joints()
+        except Exception as e:      # HardwareError, or anything a driver bug lets through
+            try:
+                drv.disconnect()
+            except Exception:
+                pass
             self.conn_lbl.setText(str(e).replace("\n", "<br>"))
             self.conn_lbl.setStyleSheet(f"color:{theme.BAD}")
             self.connect_btn.blockSignals(True)
             self.connect_btn.setChecked(False)
             self.connect_btn.blockSignals(False)
+            self._event("connect-failed", str(e))
             self._update_buttons()
             return False
         self.driver = drv
-        self.q_meas = drv.read_joints()
-        self.conn_lbl.setText(f"connected: {drv.name}" + (f" on {drv.port}" if hasattr(drv, "port") else ""))
+        # an unclean exit (exception, window killed, Ctrl-C) must still halt the arm and close the port
+        self._atexit_cb = functools.partial(_emergency_stop, drv)
+        atexit.register(self._atexit_cb)
+        where = f" on {drv.port} at {drv.baud} baud" if hasattr(drv, "port") else ""
+        self._event("connect", f"{drv.name}{where}")
+        self.conn_lbl.setText(f"connected: {drv.name}{where}")
         self.conn_lbl.setStyleSheet(f"color:{theme.GOOD}")
         if getattr(drv, "offset_calibrated", True) is False:
-            self.conn_lbl.setText(self.conn_lbl.text() + "<br>⚠ servo zero offset not calibrated: the PoE zero "
-                                  "pose is assumed to be the servo zero. Check the measured pose against the "
-                                  "3-D view before the first run.")
+            self.conn_lbl.setText(self.conn_lbl.text() + f"<br>⚠ no calibration file ({self.calib_path}): the "
+                                  "servo signs and zero offsets are unknown, so Run is blocked. Compare the measured "
+                                  "pose with the 3-D view, set the signs and offsets below and Save.")
             self.conn_lbl.setStyleSheet(f"color:{theme.WARN}")
         self.connect_btn.blockSignals(True)
         self.connect_btn.setChecked(True)
         self.connect_btn.setText("Disconnect")
         self.connect_btn.blockSignals(False)
+        self._backend_changed(self.backend_box.currentText())
         self.status_lbl.setText("Connected. Tick the checklist, choose a trajectory, then Run.")
         self.status_lbl.setStyleSheet("")
         if self.isVisible():
             self.poll.start(_POLL_MS)
+        self._update_health()
         self._update_scene(self.q_meas, None)
         self._update_plan()
         self._update_buttons()
@@ -321,27 +474,127 @@ class HardwareTab(BaseTab):
     def disconnect_backend(self):
         if self.run is not None and not self.run.finished:
             self.stop_now()
+            self._join_worker()
+            self.run.finished = True          # a worker that did not end in time is abandoned here
             self._finish_run()
         self.poll.stop()
         if self.driver is not None:
-            self.driver.disconnect()
+            try:
+                self.driver.disconnect()
+            except Exception:
+                pass
+            self._event("disconnect")
+        self._unregister_atexit()
         self.driver = None
         self.connect_btn.blockSignals(True)
         self.connect_btn.setChecked(False)
         self.connect_btn.setText("Connect")
         self.connect_btn.blockSignals(False)
         self._backend_changed(self.backend_box.currentText())
+        self._update_health()
         self._update_buttons()
+
+    def _unregister_atexit(self):
+        if self._atexit_cb is not None:
+            atexit.unregister(self._atexit_cb)
+            self._atexit_cb = None
 
     def _poll(self):
         if self.driver is None or (self.run is not None and not self.run.finished):
             return
         try:
             self.q_meas = self.driver.read_joints()
-        except HardwareError as e:
+        except Exception as e:
             self.status_lbl.setText(f"read failed: {e}")
+            self._update_health()
             return
+        self._update_health()
         self._update_scene(self.q_meas, None)
+
+    def _update_health(self):
+        d = self.driver
+        if d is None:
+            self.health_lbl.setText("")
+            return
+        age = d.fresh_age()
+        age_txt = "never" if not np.isfinite(age) else f"{1e3 * age:.0f} ms ago"
+        txt = f"Joint readings: last fresh {age_txt} · {d.read_failures} failed reads"
+        if getattr(d, "clamp_count", 0):
+            txt += f" · {d.clamp_count} set-points clamped at the servo limits"
+        bad = d.consecutive_read_failures > 0 or age > _FRESH_MAX_S
+        self.health_lbl.setText(txt)
+        self.health_lbl.setStyleSheet(f"color:{theme.WARN}" if bad else "")
+
+    # ------------------------------------------------------------------ calibration
+    def calibration_from_ui(self) -> MyCobotCalibration:
+        return MyCobotCalibration(sign=[-1.0 if cb.isChecked() else 1.0 for cb in self.sign_boxes],
+                                  offset_deg=[sp.value() for sp in self.offset_spins])
+
+    def calibration_exists(self) -> bool:
+        return self._load_calibration() is not None
+
+    def _load_calibration(self) -> MyCobotCalibration | None:
+        if not Path(self.calib_path).is_file():
+            return None
+        try:
+            return MyCobotCalibration.load(self.calib_path)
+        except HardwareError:
+            return None
+
+    def _load_calibration_ui(self):
+        cal = self._load_calibration()
+        if cal is not None and len(cal.sign) == self.spec.n:
+            for cb, sg, sp, off in zip(self.sign_boxes, cal.sign, self.offset_spins, cal.offset_deg):
+                cb.setChecked(bool(sg < 0))
+                sp.setValue(float(off))
+            self.calib_lbl.setText(f"Loaded {self.calib_path}")
+            self.calib_lbl.setStyleSheet("")
+        elif Path(self.calib_path).exists():
+            self.calib_lbl.setText(f"✗ {self.calib_path} is unreadable — fix the values and Save.")
+            self.calib_lbl.setStyleSheet(f"color:{theme.BAD}")
+        else:
+            self.calib_lbl.setText(f"No calibration file yet ({self.calib_path}). Run on the myCobot is blocked "
+                                   "until the signs and offsets are commissioned and saved.")
+            self.calib_lbl.setStyleSheet(f"color:{theme.WARN}")
+
+    def save_calibration(self, path: str | None = None) -> bool:
+        """Write the calibration of the UI to the JSON file and apply it to a connected myCobot."""
+        if self.run is not None and not self.run.finished:
+            return False
+        if path is not None:
+            self.calib_path = str(path)
+        try:
+            cal = self.calibration_from_ui()
+            cal.save(self.calib_path)
+        except (OSError, ValueError) as e:
+            self.calib_lbl.setText(f"✗ could not save: {e}")
+            self.calib_lbl.setStyleSheet(f"color:{theme.BAD}")
+            return False
+        self.calib_lbl.setText(f"Saved {self.calib_path}")
+        self.calib_lbl.setStyleSheet(f"color:{theme.GOOD}")
+        self._event("calibration", f"saved {self.calib_path}: sign {cal.sign.astype(int).tolist()}, "
+                                   f"offset {cal.offset_deg.tolist()} deg")
+        if self._is_mycobot():
+            self.driver.set_calibration(cal, self.calib_path)
+            self.driver.stream_speed_pct = int(self.stream_pct.value())
+            try:
+                self.q_meas = self.driver.read_joints()
+            except Exception as e:
+                self._status(f"read failed: {e}", theme.BAD)
+            self._update_scene(self.q_meas, None)
+            self._update_plan()
+        self._update_buttons()
+        return True
+
+    def _stream_pct_changed(self, v):
+        if self._is_mycobot():
+            self.driver.stream_speed_pct = int(v)
+
+    def _ask(self, title: str, text: str) -> bool:
+        box = QtWidgets.QMessageBox.warning(self, title, text,
+                                            QtWidgets.QMessageBox.Yes | QtWidgets.QMessageBox.Cancel,
+                                            QtWidgets.QMessageBox.Cancel)
+        return box == QtWidgets.QMessageBox.Yes
 
     # ================================================================== safety
     def _safety_changed(self, *_):
@@ -382,7 +635,13 @@ class HardwareTab(BaseTab):
         self.reset_btn.setEnabled(latched and not running)
         self.torque_btn.setEnabled(latched and not running)
         self.torque_btn.setText("Torque on" if connected and not self.driver.torque_enabled else "Torque off")
-        self.save_btn.setEnabled(self.last_log is not None and len(self.last_log) > 0)
+        if connected and self._is_mycobot() and not self.driver.offset_calibrated:
+            self.run_btn.setEnabled(False)                 # no commissioning record: never move the real arm
+        # file dialogs are modal: never open one while the arm moves (STOP must stay reachable)
+        self.save_btn.setEnabled(not running and self.last_log is not None and len(self.last_log) > 0)
+        self.csv_btn.setEnabled(not running and self.source_box.currentIndex() == 2)
+        self.fmt_box.setEnabled(not running)
+        self.calib_group.setEnabled(not running)
         self.connect_btn.setEnabled(not running)
         self.backend_box.setEnabled(not running and not connected)
         for w in (self.session_box, self.first_run_cb, self.payload_spin, self.source_box, self.sliders):
@@ -390,10 +649,10 @@ class HardwareTab(BaseTab):
 
     # ================================================================== trajectory
     def _source_changed(self, *_):
-        src = self.source_box.currentIndex()
-        self.csv_btn.setEnabled(src == 2)
         self._update_ab()
         self._update_plan()
+        if hasattr(self, "timer"):
+            self._update_buttons()
 
     def _target(self) -> np.ndarray:
         return self.sliders.values()
@@ -496,90 +755,185 @@ class HardwareTab(BaseTab):
             return False
         try:
             self.q_meas = self.driver.read_joints()
-        except HardwareError as e:
+        except Exception as e:
             self._status(f"read failed: {e}", theme.BAD)
+            self._update_health()
             return False
+        self._update_health()
+        blocked = []
+        age = self.driver.fresh_age()
+        if age > _FRESH_MAX_S:
+            blocked.append(f"joint readings are stale (last fresh reading "
+                           f"{'never' if not np.isfinite(age) else f'{1e3 * age:.0f} ms ago'}, "
+                           f"{self.driver.read_failures} failed reads) — check power and cable")
+        if self._is_mycobot() and not (self.calibration_exists() and self.driver.offset_calibrated):
+            blocked.append(f"no myCobot calibration file ({self.calib_path}): commission the signs and "
+                           "offsets in 'myCobot calibration' and Save")
         p = self.plan()
         if p is None:
             self._status("No trajectory: load a CSV file first.", theme.WARN)
             return False
         t, q, note = p
         ok, probs = self.sup.preflight(self.ticked(), t, q)
-        if not ok:
+        probs = blocked + probs
+        if probs:
             self._status("Run blocked:\n• " + "\n• ".join(probs), theme.BAD)
             return False
         self.poll.stop()
         self.run = HardwareRun(self.driver, self.sup, t, q, auto_stop_at=self.auto_stop.value() or None)
+        self.run.log.events.extend(self.session_events)
+        self.run.log.meta = dict(self.driver.describe(), session=self.sup.session,
+                                 speed_fraction=self.sup.speed_fraction, rate_hz=1000 / _RATE_MS, trajectory=note)
         self.last_log = self.run.log
+        self._n_samples = 0
         self.report.setRowCount(0)
         self.report_lbl.setText("running…")
         for ln in (self.stop_line_q, self.stop_line_e):
             ln.setVisible(False)
         self._status(f"Running {note} — {t[-1]:.1f} s at ≤ {100 * self.sup.speed_fraction:.0f} % rated speed. "
                      "STOP (or Esc) halts and latches.", theme.ACCENT)
-        self.run.start()
-        self.timer.start(_RATE_MS)
+        if self.threaded and not isinstance(getattr(self.driver, "clock", None), ManualClock):
+            # real time: the worker owns the driver I/O for the whole run
+            self.worker = _StreamWorker(self.run, _RATE_MS / 1000.0, self.q_meas, self)
+            self.worker.sample_ready.connect(self._on_sample)
+            self.worker.finished.connect(self._worker_done)
+            self.worker.start(QtCore.QThread.TimeCriticalPriority)
+        else:
+            # hand-advanced clock (tests): the same step, driven synchronously by _tick
+            self.run.start(self.q_meas)
+            self.timer.start(_RATE_MS)
         self._update_buttons()
         return True
 
+    def _show_sample(self, cmd, meas):
+        self.q_meas = meas
+        self._update_scene(meas, cmd)
+        self._n_samples += 1
+        if self._n_samples % 3 == 0:
+            self._redraw_plots()
+        if self._n_samples % 10 == 0:
+            self._update_health()
+
+    def _on_sample(self):
+        """Worker published a sample (queued to the GUI thread): draw the newest one."""
+        s = self.worker.mailbox.take() if self.worker is not None else None
+        if s is not None:
+            try:
+                self._show_sample(s[1], s[2])
+            except Exception:          # a drawing problem must never interfere with the run
+                pass
+
+    def _worker_done(self):
+        if self.run is not None and self.worker is not None and self.sender() is self.worker:
+            self._finish_run()
+
+    def _join_worker(self, timeout_ms: int = 3000) -> bool:
+        w = self.worker
+        if w is None:
+            return True
+        w.wake.set()
+        done = w.wait(timeout_ms) if w.isRunning() else True
+        if done:
+            w.deleteLater()
+            self.worker = None
+        return done
+
     def _tick(self):
+        """Synchronous stream step (QTimer with a ManualClock, and the tests)."""
         if self.run is None:
             self.timer.stop()
             return
         try:
             r = self.run.step()
-        except HardwareError as e:
-            self.run.request_stop(f"communication error: {e}")
-            self._status(f"Communication error — stopped and latched: {e}", theme.BAD)
-            r = None
-        if r is not None:
-            _, cmd, meas = r
-            self.q_meas = meas
-            self._update_scene(meas, cmd)
-            if len(self.run.log) % 3 == 0:
-                self._redraw_plots()
+            if r is not None:
+                self._show_sample(r[1], r[2])
+        except Exception as e:      # serial or any other error: latch, end the run, tell the user
+            self.run.fail(e)
         if self.run.finished:
             self._finish_run()
 
     def _finish_run(self):
         self.timer.stop()
+        if self.worker is not None and not self.worker.isRunning():
+            self.worker.deleteLater()
+            self.worker = None
         run = self.run
         self._redraw_plots()
-        if run.t_stop is not None:
+        self._update_health()
+        if run.stop_confirmed is False:
+            self._stop_not_confirmed(run.error or run.reason)
+        elif run.error:
+            self._status(f"Communication error — arm stopped and LATCHED: {run.error}", theme.BAD)
+        elif run.t_stop is not None:
             self._status(f"Stopped ({run.reason}) at t = {run.t_stop:.2f} s — arm LATCHED. "
                          "Reset latch before the next run.", theme.WARN)
+        elif len(run.log) == 0:
+            self._status(f"Stopped before the first set-point ({run.reason}) — arm LATCHED.", theme.WARN)
         else:
-            self._status(f"Run complete: {len(run.log)} samples, {run.log.t[-1]:.2f} s.", theme.GOOD)
+            self._status(f"Run complete: {len(run.log)} samples, {run.log.t[-1]:.2f} s."
+                         + (f" {run.stalls} timing stall(s): trajectory time was held." if run.stalls else ""),
+                         theme.GOOD)
         self.fill_report()
         if self.isVisible() and self.driver is not None:
             self.poll.start(_POLL_MS)
         self._update_buttons()
 
-    def stop_now(self):
-        """STOP button: halt + latch, whatever the state."""
+    def _stop_not_confirmed(self, why: str = ""):
+        self.status_lbl.setText("<b>STOP NOT CONFIRMED — switch off the arm's power now.</b><br>"
+                                "The halt command failed twice" + (f" ({why})" if why else "") +
+                                ". The software latch blocks further set-points, but the arm may still be moving.")
+        self.status_lbl.setStyleSheet(f"color:{theme.BAD}; font-weight:700")
+
+    def stop_now(self) -> bool:
+        """STOP button: halt + latch, whatever the state.  Returns whether the halt was confirmed."""
         if self.run is not None and not self.run.finished:
-            self.run.request_stop("STOP pressed")
+            ok = self.run.request_stop("STOP pressed")
+            if self.worker is not None:
+                self.worker.wake.set()
         elif self.driver is not None:
-            self.driver.stop()
-        self._status("STOP — arm halted and latched. Reset latch to continue.", theme.BAD)
+            try:
+                ok = bool(self.driver.stop())
+            except Exception:
+                ok = False
+            self._event("stop", "STOP pressed (idle)" + ("" if ok else " — HALT NOT CONFIRMED"))
+        else:
+            ok = True
+        if ok:
+            self._status("STOP — arm halted and latched. Reset latch to continue.", theme.BAD)
+        else:
+            self._stop_not_confirmed()
         self._update_buttons()
+        return ok
 
     def reset_latch(self):
         if self.driver is None:
             return
-        self.driver.reset_latch()
-        self._status("Latch reset — torque on. Check the keep-out zone before the next run.", theme.WARN)
+        try:
+            self.driver.reset_latch()
+        except Exception as e:
+            self._status(f"Reset failed (still latched): {e}", theme.BAD)
+        else:
+            self._event("reset-latch")
+            self._status("Latch reset — torque on. Check the keep-out zone before the next run.", theme.WARN)
         self._update_buttons()
 
     def _toggle_torque(self):
         if self.driver is None:
             return
+        on = not self.driver.torque_enabled
+        if not on and not self.confirm(
+                "Release servo torque?",
+                "Support the arm by hand before you continue.\n\nWith torque off the servos let go: the arm "
+                "drops under gravity (J2 and J3 first).  Is someone holding the arm?"):
+            self._status("Torque release cancelled — torque still on.", theme.WARN)
+            return
         try:
-            self.driver.set_torque(not self.driver.torque_enabled)
-        except HardwareError as e:
-            self._status(str(e), theme.BAD)
+            self.driver.set_torque(on)
+        except Exception as e:
+            self._status(f"Torque {'on' if on else 'off'} failed: {e}", theme.BAD)
         else:
-            self._status("Torque OFF — the arm may sag under gravity; a hand may enter with the safety "
+            self._event("torque", "on" if on else "off")
+            self._status("Torque OFF — keep supporting the arm; a hand may enter with the safety "
                          "officer's approval (rule 6)."
                          if not self.driver.torque_enabled else "Torque on (still latched).", theme.WARN)
         self._update_buttons()
@@ -595,7 +949,8 @@ class HardwareTab(BaseTab):
             for c in self.c_cmd + self.c_meas + self.c_err:
                 c.setData([], [])
             return
-        t, cmd, meas = lg.t, np.degrees(lg.cmd), np.degrees(lg.meas)
+        t, cmd, meas = lg.snapshot()               # the worker may be appending right now
+        cmd, meas = np.degrees(cmd), np.degrees(meas)
         sel = self.joint_box.currentIndex() - 1
         for i in range(self.spec.n):
             vis = sel < 0 or sel == i
@@ -645,10 +1000,18 @@ class HardwareTab(BaseTab):
         return res
 
     def save_log(self, path: str, fmt: str | None = None):
+        """The log in the chosen course format plus the MR Studio sidecars (.meta.json, .diag.csv)."""
         if self.last_log is None:
             raise ValueError("nothing to save")
-        self.last_log.save(path, fmt or self._fmt_key())
-        self._status(f"Log saved: {path}", theme.GOOD)
+        if self.run is not None and not self.run.finished:
+            raise ValueError("a run is in progress")
+        fmt = fmt or self._fmt_key()
+        self.last_log.save(path, fmt)
+        if self.driver is not None:
+            self.last_log.meta.update(self.driver.describe())
+        self.last_log.meta["format"] = fmt
+        meta_p, diag_p = self.last_log.save_sidecars(path)
+        self._status(f"Log saved: {path}\n(+ {meta_p.name}, {diag_p.name})", theme.GOOD)
 
     def _save_dialog(self):
         fmt = self._fmt_key()
@@ -658,15 +1021,28 @@ class HardwareTab(BaseTab):
             self.save_log(fn, fmt)
 
     def shutdown(self):
-        """Application quit: stop and latch the arm, then release the connection."""
+        """Window close / application quit: halt and latch the arm, end the streaming worker, close the
+        port.  Idempotent and never raises (also wired to ``aboutToQuit``)."""
+        drv = self.driver
         try:
             self.timer.stop()
             self.poll.stop()
-            if self.driver is not None:
-                self.driver.stop()
-                self.driver.disconnect()
+            if self.run is not None and not self.run.finished:
+                self.run.request_stop("MR Studio closing")
+            elif drv is not None:
+                drv.stop()
         except Exception:
             pass
+        try:
+            self._join_worker()
+        except Exception:
+            pass
+        try:
+            if drv is not None:
+                drv.disconnect()
+        except Exception:
+            pass
+        self._unregister_atexit()
         self.driver = None
 
     # ================================================================== show / hide
@@ -678,3 +1054,5 @@ class HardwareTab(BaseTab):
         self.poll.stop()
         if self.run is not None and not self.run.finished:     # never move the arm while its STOP is hidden
             self.run.request_stop("tab left during a run")
+            if self.worker is not None:
+                self.worker.wake.set()

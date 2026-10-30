@@ -15,8 +15,9 @@ from ...dynamics import DynamicsEngine
 from .. import theme
 from ..base import BaseTab
 from ..viewer import RobotGraphic, SceneView
-from ..widgets import button, checkbox, combo, group, hbox, pen, plot, spin, value_label
-from .dynamics_tab import AsyncMixin, Player, compact, form, no_si, time_cursor
+from ..jobs import AsyncMixin
+from ..widgets import (Player, button, checkbox, combo, compact, form, group, hbox, no_si, pen, plot, spin,
+                       time_cursor, value_label)
 
 THEORY = r"""
 <h2>Task-space, force, hybrid and impedance control</h2>
@@ -113,7 +114,7 @@ PARAMS = {
                "kd": ("K_d", 0, 200, 20.0, 1, 2, " 1/s"), "mass": ("Model mass scale", 0.2, 3, 1.0, 2, 0.05, " ×")},
     "force": {"fd": ("Desired force F_d", 0, 100, 15.0, 1, 1, " N"), "kfp": ("K_fp", 0, 20, 1.0, 2, 0.1, ""),
               "kfi": ("K_fi", 0, 200, 20.0, 1, 2, " 1/s"), "kdv": ("K_damp (linear)", 0, 500, 40.0, 1, 5, " N·s/m"),
-              "kdw": ("K_damp (angular)", 0, 50, 2.0, 2, 0.5, " N·m·s"), "gap": ("Initial gap", 0, 100, 10.0, 1, 1, " mm"),
+              "kdw": ("K_damp (angular)", 0, 50, 2.0, 2, 0.5, " N·m·s/rad"), "gap": ("Initial gap", 0, 100, 10.0, 1, 1, " mm"),
               "kenv": ("Surface stiffness", 100, 50000, 5000.0, 0, 500, " N/m"),
               "mass": ("Model mass scale", 0.2, 3, 1.0, 2, 0.05, " ×")},
     "hybrid": {"kp": ("K_p", 0, 2500, 100.0, 1, 10, " 1/s²"), "kd": ("K_d", 0, 200, 20.0, 1, 2, " 1/s"),
@@ -121,7 +122,7 @@ PARAMS = {
                "kfi": ("K_fi", 0, 200, 20.0, 1, 2, " 1/s"),
                "kenv": ("Surface stiffness", 100, 50000, 5000.0, 0, 500, " N/m"),
                "mass": ("Model mass scale", 0.2, 3, 1.0, 2, 0.05, " ×")},
-    "impedance": {"m": ("Virtual mass M", 0.1, 50, 2.0, 2, 0.5, " kg"), "b": ("Virtual damping B", 0, 500, 20.0, 1, 2, " N·s/m"),
+    "impedance": {"m": ("Virtual mass M", 0.25, 50, 2.0, 2, 0.5, " kg"), "b": ("Virtual damping B", 0, 500, 20.0, 1, 2, " N·s/m"),
                   "k": ("Virtual stiffness K", 0, 5000, 200.0, 0, 20, " N/m"), "f": ("Push force", 0, 100, 10.0, 1, 1, " N"),
                   "tp": ("Push duration", 0.05, 5, 1.0, 2, 0.1, " s")},
 }
@@ -130,6 +131,7 @@ PARAMS = {
 class AdvancedControlTab(AsyncMixin, BaseTab):
     title = "⑧ Task-space"
     needs_dynamics = True
+    uses_engine = False         # plant and model are always Pinocchio here
 
     def __init__(self, ctx):
         super().__init__(ctx)
@@ -178,9 +180,17 @@ class AdvancedControlTab(AsyncMixin, BaseTab):
             if mode == "impedance":
                 self.push_dir = combo(["−z (down)", "+x", "+y", "+z"])
                 self.cb_sensor = checkbox("Wrist F/T sensor: render M (11.66)", None, True)
+                self.imp_warn = value_label()
+                self.imp_warn.setWordWrap(True)
+                self.cb_unstable = checkbox("run anyway (unstable settings)", None, False)
                 v.addLayout(form(("Push direction", self.push_dir)))
                 v.addWidget(self.cb_sensor)
+                v.addWidget(self.imp_warn)
+                v.addWidget(self.cb_unstable)
             self.stack.addWidget(page)
+        for key in ("m", "b", "k"):
+            self.par["impedance"][key].valueChanged.connect(self._check_impedance)
+        self._check_impedance()
         self.run_btn = button("Run simulation", self.run, primary=True)
         self.cmp_btn = button("Compare variants", self.compare)
         self.res_lbl = value_label()
@@ -278,6 +288,10 @@ class AdvancedControlTab(AsyncMixin, BaseTab):
                               center=(0, 0, 0.25 * robot.reach * (not robot.planar)))
         self.size.setValue(tc.default_size(robot))
         self.wrist.setEnabled(not robot.planar and self.mode() in ("velocity", "motion"))
+        dirs = (["−z → −y (down, in the plane)", "+x", "+y", "+z → +y (in the plane)"] if robot.planar
+                else ["−z (down)", "+x", "+y", "+z"])
+        for i, txt in enumerate(dirs):
+            self.push_dir.setItemText(i, txt)
         if robot.planar and robot.n < 3:
             self.rep.setCurrentIndex(1)
         for p in (self.p_w, self.p_v, self.p_f, self.p_x, self.p_cmd, self.p_s, self.p_cmp):
@@ -352,7 +366,7 @@ class AdvancedControlTab(AsyncMixin, BaseTab):
         dirs = [np.array([0, 0, -1.0]), np.array([1.0, 0, 0]), np.array([0, 1.0, 0]), np.array([0, 0, 1.0])]
         d = dirs[s["dir"]]
         if robot.planar and abs(d[2]) > 0:
-            d = np.array([0, -1.0, 0])                     # planar: "down" is −y
+            d = np.array([0, np.sign(d[2]), 0])            # planar (x-y plane): −z ("down") → −y, +z → +y
         T = max(3.0, 0.5 + s["tp"] + 2.0)
         return tc.torque_control("impedance", robot, th_start, T, g, push=(s["f"] * d, 0.5, 0.5 + s["tp"]),
                                  plant=plant, model=model, label=label, progress=progress, cancel=cancel)
@@ -388,9 +402,27 @@ class AdvancedControlTab(AsyncMixin, BaseTab):
     def compare(self):
         self._launch(self._variants(self._settings()), compare=True)
 
+    def _check_impedance(self, *_) -> bool:
+        """Discrete-time stability of the rendered impedance at the 1 kHz control rate; updates the warning."""
+        p = self.par["impedance"]
+        ok, msg = tc.impedance_stability(p["m"].value(), p["b"].value(), p["k"].value(), dt=0.001)
+        if ok:
+            self.imp_warn.setText(f"<span style='color:{theme.muted_color()}'>stable at 1 kHz: {msg}</span>")
+        else:
+            self.imp_warn.setText(f"<span style='color:{theme.bad_color()}'>⚠ these settings are unstable at 1 kHz — "
+                                  f"raise M or lower B/K.</span><br><span style='color:{theme.muted_color()}'>{msg}</span>")
+        self.cb_unstable.setVisible(not ok)
+        return ok
+
     def _launch(self, runs, compare):
         robot, th0 = self.ctx.robot, self.th_start.copy()
         self.player.stop()
+        if runs and runs[0][1]["mode"] == "impedance" and not self._check_impedance() \
+                and not self.cb_unstable.isChecked():
+            self.status("⚠ these settings are unstable at 1 kHz — raise M or lower B/K "
+                        "(or tick “run anyway”)", theme.bad_color())
+            self.res_lbl.setText(self.imp_warn.text())
+            return
 
         def job(prog, canc):
             out = []
@@ -520,7 +552,7 @@ class AdvancedControlTab(AsyncMixin, BaseTab):
         el = r.info.get("elapsed", 0.0)
         txt = []
         if r.diverged:
-            txt.append(f"<span style='color:{theme.BAD}'>⚠ unstable — the simulation diverged at t = {r.t[-1]:.2f} s</span>")
+            txt.append(f"<span style='color:{theme.bad_color()}'>⚠ unstable — the simulation diverged at t = {r.t[-1]:.2f} s</span>")
         if r.mode == "hybrid":
             n = r.info["normal"]
             e = r.pd - r.p
@@ -542,7 +574,7 @@ class AdvancedControlTab(AsyncMixin, BaseTab):
             txt.append(f"peak displacement {1e3 * r.x_act.max():.1f} mm (ideal {1e3 * r.x_ref.max():.1f} mm), "
                        f"deviation from 11.64: {100 * dev:.2f} %")
         if r.smin is not None and len(r.smin) and r.smin.min() < 0.04:
-            txt.append(f"<span style='color:{theme.WARN}'>near a singularity: σ_min = {r.smin.min():.3f} "
+            txt.append(f"<span style='color:{theme.warn_color()}'>near a singularity: σ_min = {r.smin.min():.3f} "
                        "(damped least squares active)</span>")
         plant = "kinematic robot" if r.mode == "velocity" else "Pinocchio plant, 1 kHz control"
         txt.append(f"{len(r.t)} steps simulated in {el:.2f} s ({plant})")
@@ -653,3 +685,7 @@ class AdvancedControlTab(AsyncMixin, BaseTab):
 
     def on_hide(self):
         self.player.stop()
+
+    def shutdown(self):
+        self.player.stop()
+        super().shutdown()

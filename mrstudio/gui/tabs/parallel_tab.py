@@ -12,6 +12,7 @@ from ... import delta as dl
 from ... import parallel_planar as pp
 from .. import theme
 from ..base import BaseTab
+from ..jobs import JobRunner
 from ..viewer import SceneView
 from ..widgets import (MatrixView, SliderRow, button, checkbox, combo, group, hbox, pen, plot, spin,
                        value_label)
@@ -121,6 +122,10 @@ class ParallelRobotsTab(BaseTab):
         self.timer = QtCore.QTimer(self)
         self.timer.timeout.connect(self._tick)
         self._ws_cache = None
+        self.ws_jobs = JobRunner(self)          # Delta workspace cloud (background)
+        app = QtWidgets.QApplication.instance()
+        if app is not None and not hasattr(BaseTab, "shutdown"):   # older BaseTab without the quit hook
+            app.aboutToQuit.connect(self.shutdown)
 
         self.robot_box = combo(["3×RPR planar parallel robot (MR 7.1.1)", "Delta robot (Clavel; MR Ex. 2.7, 7.7)"])
         self.robot_box.currentIndexChanged.connect(self._robot_changed_idx)
@@ -235,6 +240,7 @@ class ParallelRobotsTab(BaseTab):
 
     def _robot_changed_idx(self, idx):
         self._stop_anim()
+        self._cancel_cloud()
         _fit_stack(self.page_stack, idx)
         self.bottom.setCurrentIndex(idx)
         self.view.remove_prefix("pr.")
@@ -477,14 +483,17 @@ class ParallelRobotsTab(BaseTab):
         dx, t1, kappa = d.singularity(self.th, self.p)
         dx0 = d.singularity(d.ik(d.p_home), d.p_home)[0]
         F = np.array([0.0, 0.0, -self.d_mass.value() * dl.G_ACC])
-        tau = d.static_torques(self.th, self.p, F)
+        chk = d.static_torques_checked(self.th, self.p, F)      # flags kappa(J_x) > 1e6 (Type II)
+        tau = chk.value
         th_d = np.degrees(self.th)
         self.state_lbl.setText(f"p = ({self.p[0]:+.4f}, {self.p[1]:+.4f}, {self.p[2]:+.4f}) m\n"
                                f"θ = ({th_d[0]:+.1f}°, {th_d[1]:+.1f}°, {th_d[2]:+.1f}°)\n"
                                f"τ = ({tau[0]:+.3f}, {tau[1]:+.3f}, {tau[2]:+.3f}) N·m  (payload {self.d_mass.value():.1f} kg)\n"
                                f"det Jₓ (unit nᵢ) = {dx:+.3f} ({dx / dx0:.2f} × home),  κ(J) = {kappa:.2f}\n"
                                f"min |cos∠(nᵢ, ∂Aᵢ/∂θᵢ)| = {t1:.3f}  (0 = arm ∥ forearm)")
-        if t1 < 0.08:
+        if chk.warning:
+            self.sing_lbl.setText(f"<span style='color:{theme.BAD}'>● {chk.warning}</span>")
+        elif t1 < 0.08:
             self.sing_lbl.setText(f"<span style='color:{theme.BAD}'>● End-effector singularity: an arm and its "
                                   "forearm are aligned (workspace boundary)</span>")
         else:
@@ -614,18 +623,42 @@ class ParallelRobotsTab(BaseTab):
             v.remove("dl.path")
         if self.d_ws.isChecked():
             if not hasattr(self, "_d_cloud"):
-                QtWidgets.QApplication.setOverrideCursor(QtCore.Qt.WaitCursor)
-                try:
-                    P, K = d.workspace_cloud(n=17)
-                finally:
-                    QtWidgets.QApplication.restoreOverrideCursor()
-                c = np.clip((np.log(K) - np.log(1.3)) / (np.log(6.0) - np.log(1.3)), 0, 1)
-                cols = np.c_[0.25 + 0.75 * c, 0.85 - 0.5 * c, 1.0 - 0.75 * c, np.full(len(c), 0.35)]
-                self._d_cloud = (P, cols)
-            P, cols = self._d_cloud
-            v.set_points("dl.ws", P, cols, 3)
+                self._start_cloud()
+            else:
+                P, cols = self._d_cloud
+                v.set_points("dl.ws", P, cols, 3)
         else:
+            self._cancel_cloud()
             v.remove("dl.ws")
+
+    def _start_cloud(self):
+        """FK over a 17³ grid of actuator angles in a background thread (progress in the FK label)."""
+        if self.ws_jobs.is_busy():
+            return
+        d = self.dlt
+
+        def job(progress, cancelled):
+            return d.workspace_cloud(n=17, cancelled=cancelled, progress=progress)
+
+        self.ws_jobs.run(job, on_done=self._cloud_done,
+                         on_error=lambda e: self.d_fk_lbl.setText("workspace cloud failed: "
+                                                                  + e.strip().splitlines()[-1]),
+                         on_progress=lambda f: self.d_fk_lbl.setText(
+                             f"workspace cloud: FK over 17³ actuator angles (background) … {100 * f:.0f} %"),
+                         label="Delta workspace")
+
+    def _cloud_done(self, out):
+        P, K = out
+        c = np.clip((np.log(K) - np.log(1.3)) / (np.log(6.0) - np.log(1.3)), 0, 1)
+        cols = np.c_[0.25 + 0.75 * c, 0.85 - 0.5 * c, 1.0 - 0.75 * c, np.full(len(c), 0.35)]
+        self._d_cloud = (P, cols)
+        self.d_fk_lbl.setText(f"workspace cloud: {len(P)} reachable points (colour = κ(J))")
+        if not self.is_rpr and self.d_ws.isChecked():
+            self._redraw()
+
+    def _cancel_cloud(self):
+        if self.ws_jobs.is_busy():
+            self.ws_jobs.cancel()
 
     # ================================================================ hooks
     def on_show(self):
@@ -633,6 +666,15 @@ class ParallelRobotsTab(BaseTab):
 
     def on_hide(self):
         self._stop_anim()
+        self._cancel_cloud()
+
+    def shutdown(self):
+        """Application quit: stop the animation, cancel the workspace job (brief wait only)."""
+        self._stop_anim()
+        self.ws_jobs.shutdown(500)
+        parent = getattr(super(), "shutdown", None)
+        if parent is not None:
+            parent()
 
 
 def _se2(q) -> np.ndarray:

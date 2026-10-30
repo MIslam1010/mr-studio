@@ -36,6 +36,32 @@ from .kinematics import rpy_to_rot, rot_to_rpy
 
 G_ACC = 9.81
 CATEGORY = "Parallel mechanisms"
+#: condition number above which a statics / inverse-dynamics solve is flagged (near a Type-II singularity
+#: the linear system J^T f = F is ill-conditioned: leg forces blow up and lose all accuracy)
+KAPPA_WARN = 1e6
+
+
+@dataclass
+class Checked:
+    """Result of a linear solve near a possible singularity: value, condition number of the matrix, warning."""
+    value: np.ndarray
+    kappa: float
+    warning: str | None = None
+
+
+def condition_warning(kappa: float, what: str = "statics") -> str | None:
+    """Warning text if kappa > KAPPA_WARN (near a Type-II / actuator singularity), else None."""
+    if not np.isfinite(kappa) or kappa > KAPPA_WARN:
+        return (f"⚠ {what}: condition number κ = {kappa:.1e} > {KAPPA_WARN:.0e} — near a Type-II (actuator) "
+                "singularity the forces are unbounded and the numbers are unreliable")
+    return None
+
+
+def _cond(A) -> float:
+    try:
+        return float(np.linalg.cond(A))
+    except np.linalg.LinAlgError:
+        return np.inf
 
 
 def pose(x=0.0, y=0.0, z=0.0, roll=0.0, pitch=0.0, yaw=0.0) -> np.ndarray:
@@ -123,6 +149,16 @@ class StewartPlatform:
         """Leg forces in static equilibrium J^T f + F_ext = 0 (f > 0: leg pushes = compression)."""
         return np.linalg.solve(self.jacobian(T).T, -np.asarray(F_ext, float))
 
+    def leg_forces_checked(self, T, F_ext) -> Checked:
+        """:meth:`leg_forces` plus the condition number of the dimensionless J_n^T and a warning when
+        kappa > KAPPA_WARN (near a Type-II singularity).  A singular J gives f = nan and kappa = inf."""
+        kappa = _cond(self.jacobian_normalised(T))
+        try:
+            f = self.leg_forces(T, F_ext)
+        except np.linalg.LinAlgError:
+            f, kappa = np.full(6, np.nan), np.inf
+        return Checked(f, kappa, condition_warning(kappa, "leg forces"))
+
     # -- forward kinematics ---------------------------------------------------------------------
     def fk(self, s_target, T0=None, tol=1e-12, max_iter=60, max_step=0.3) -> FKResult:
         """Newton-Raphson: V = J^-1 (s_target - s(T)),  T <- exp([V]) T   (MR 6.2 applied to 7.1.2)."""
@@ -148,8 +184,10 @@ class StewartPlatform:
         hist.append(err)
         return FKResult(T, err < 1e-9, hist, max_iter)
 
-    def fk_all(self, s_target, n_starts=150, seed=0, include=None) -> list[np.ndarray]:
-        """Multiple FK solutions from random initial poses (the general platform has up to 40)."""
+    def fk_all(self, s_target, n_starts=150, seed=0, include=None, cancelled=None,
+               progress=None) -> list[np.ndarray]:
+        """Multiple FK solutions from random initial poses (the general platform has up to 40).
+        ``cancelled()`` is polled between starts (raises InterruptedError); ``progress(fraction)``."""
         rng = np.random.default_rng(seed)
         sols: list[np.ndarray] = []
         starts = [] if include is None else [np.asarray(include, float)]
@@ -158,7 +196,11 @@ class StewartPlatform:
             w = rng.standard_normal(3)
             w *= rng.uniform(0, np.pi) / np.linalg.norm(w)
             starts.append(mr.RpToTrans(mr.MatrixExp3(mr.VecToso3(w)), p))
-        for T0 in starts:
+        for k, T0 in enumerate(starts):
+            if cancelled is not None and cancelled():
+                raise InterruptedError
+            if progress is not None and k % 10 == 0:
+                progress(k / len(starts))
             r = self.fk(s_target, T0, tol=1e-11, max_iter=80)
             if not r.converged or not np.all(np.isfinite(r.T)):
                 continue
@@ -218,7 +260,7 @@ class StewartPlatform:
         platform + payload.  Platform: uniform disk of radius 1.13 Rp, thickness 22 mm, CoM at the
         {b} origin; payload: solid sphere at `offset`.  Each CoM-frame inertia G_c = diag(I_c, m I) is
         moved to {b} with Steiner's theorem in adjoint form G_b = [Ad_Tcb]^T G_c [Ad_Tcb] (Eq. 8.42).
-        Assumption: the legs are massless (their inertia is lumped into the platform)."""
+        Assumption: leg inertia is neglected (massless legs)."""
         bodies = []
         mp, rp, h = self.platform_mass, self.Rp * 1.13, 0.022
         bodies.append((mp, np.zeros(3), np.diag([mp * (3 * rp ** 2 + h ** 2) / 12] * 2 + [mp * rp ** 2 / 2])))
@@ -249,6 +291,15 @@ class StewartPlatform:
         Fb = G @ dVb - mr.ad(Vb).T @ G @ Vb - self.gravity_wrench_b(T, m, rc)
         A = mr.Adjoint(T).T @ self.jacobian(T).T          # body wrench produced by unit leg forces
         return np.linalg.solve(A, Fb)
+
+    def inverse_dynamics_checked(self, T, Vb, dVb, body) -> Checked:
+        """:meth:`inverse_dynamics` plus kappa(J_n) and a warning near a Type-II singularity."""
+        kappa = _cond(self.jacobian_normalised(T))
+        try:
+            f = self.inverse_dynamics(T, Vb, dVb, body)
+        except np.linalg.LinAlgError:
+            f, kappa = np.full(6, np.nan), np.inf
+        return Checked(f, kappa, condition_warning(kappa, "inverse dynamics"))
 
     def forward_dynamics(self, T, Vb, f, body) -> np.ndarray:
         """Vdot_b = G_b^-1 ( [Ad_Tsb]^T J^T f + F_g,b + [ad_Vb]^T G_b V_b )."""
@@ -284,9 +335,10 @@ class StewartPlatform:
         V = Vb + h / 6 * (k1v + 2 * k2v + 2 * k3v + k4v)
         return T @ exp6(xi), V
 
-    def simulate(self, T0, V0, f_fn, t_final, h, body, stop_fn=None):
+    def simulate(self, T0, V0, f_fn, t_final, h, body, stop_fn=None, cancelled=None, progress=None):
         """Integrate the platform from (T0, V0) under leg forces f_fn(t, T, V_b).
-        Returns dict(t, T (list), V (n x 6), f (n x 6), s (n x 6), ke, pe)."""
+        Returns dict(t, T (list), V (n x 6), f (n x 6), s (n x 6), ke, pe).
+        ``cancelled()`` is polled every 25 steps (raises InterruptedError); ``progress(fraction)``."""
         T, V, t = np.asarray(T0, float).copy(), np.asarray(V0, float).copy(), 0.0
         out = dict(t=[], T=[], V=[], f=[], s=[], ke=[], pe=[])
         n = int(round(t_final / h))
@@ -296,6 +348,11 @@ class StewartPlatform:
             out["s"].append(self.ik(T)); out["ke"].append(ke); out["pe"].append(pe)
             if k == n or (stop_fn is not None and stop_fn(T)):
                 break
+            if k % 25 == 0:
+                if cancelled is not None and cancelled():
+                    raise InterruptedError
+                if progress is not None:
+                    progress(k / n)
             T, V = self.rk4_step(T, V, t, h, f_fn, body)
             t = (k + 1) * h
         for key in ("t", "V", "f", "s", "ke", "pe"):
@@ -331,7 +388,7 @@ class StewartPlatform:
         return out
 
     def push_simulation(self, body, leg=0, df=200.0, t_pulse=(0.1, 0.2), t_final=2.0, h=0.002,
-                        servo=True, kp=3.0e4, kd=None):
+                        servo=True, kp=3.0e4, kd=None, cancelled=None, progress=None):
         """Forward dynamics from rest at home under f = f_static(home) + pulse on one leg
         (+ optional leg-space PD servo  K_p (s_home - s) - K_d s_dot  holding the home leg lengths)."""
         m, rc, G = body
@@ -352,7 +409,8 @@ class StewartPlatform:
         def stop(T):
             s = self.ik(T)
             return bool(np.any(s < self.s_min - 0.15) or np.any(s > self.s_max + 0.15) or T[2, 3] < 0.1)
-        return self.simulate(T0, np.zeros(6), f_fn, t_final, h, body, stop_fn=stop)
+        return self.simulate(T0, np.zeros(6), f_fn, t_final, h, body, stop_fn=stop, cancelled=cancelled,
+                             progress=progress)
 
 
 # ============================================================================ validation
