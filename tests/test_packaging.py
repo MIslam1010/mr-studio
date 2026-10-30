@@ -257,7 +257,9 @@ def test_third_party_notices_are_bundled():
 def test_launcher_log_location_and_faulthandler():
     import launcher
     path = launcher._log_file()
-    assert path.endswith("mrstudio.log") and "MR Studio" in path
+    assert path.endswith("mrstudio.log")
+    if sys.platform in ("darwin", "win32"):   # Linux uses ~/.mrstudio (or $XDG_STATE_HOME)
+        assert "MR Studio" in path
     assert "faulthandler" in (PKG / "launcher.py").read_text(encoding="utf-8")
 
 
