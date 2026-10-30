@@ -3,4 +3,4 @@
 pytest==9.1.1
 pytest-timeout>=2.3
 PyYAML>=6.0          # tests/test_packaging.py parses the CI workflow
-ruff>=0.6            # CI lint step: ruff check (E9,F)
+ruff>=0.17.3            # CI lint step: ruff check (E9,F)
