@@ -47,8 +47,8 @@ The LGPL-3.0 text is at https://www.gnu.org/licenses/lgpl-3.0.html .
 The Record button writes MP4 files with the `ffmpeg` command-line program that the `imageio-ffmpeg` wheel
 ships as a **separate executable** (`imageio_ffmpeg/binaries/ffmpeg-*`); MR Studio starts it as a child
 process and does not link against it. The macOS arm64 build inside the wheel (FFmpeg 7.1) reports `--enable-gpl`
-and links libx264/libx265, i.e. it is licensed under the **GNU GPL (v2 or later)**. The Windows binary in the
-wheel should be checked the same way (`ffmpeg -version`). FFmpeg source code: https://ffmpeg.org/download.html
+and links libx264/libx265, i.e. it is licensed under the **GNU GPL (v2 or later)**. The Windows x64 binary
+(`ffmpeg-win-x86_64-v7.1.exe`) was checked the same way and is also built with `--enable-gpl` and libx264. FFmpeg source code: https://ffmpeg.org/download.html
 (release 7.1, https://ffmpeg.org/releases/ffmpeg-7.1.tar.xz); the build recipe of the wheel's binary is
 documented at https://github.com/imageio/imageio-binaries and https://github.com/imageio/imageio-ffmpeg .
 Anyone who redistributes MR Studio installers redistributes this GPL executable and must keep this notice and
