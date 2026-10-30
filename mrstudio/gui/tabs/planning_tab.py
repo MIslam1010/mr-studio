@@ -123,7 +123,7 @@ def _wrap_copies(xy: np.ndarray, wrap):
 
 
 class PlanningTab(BaseTab):
-    title = "⑪ Motion Planning"
+    title = "⑩ Planning"
     uses_serial_robot = True
 
     def __init__(self, ctx):

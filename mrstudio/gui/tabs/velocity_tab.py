@@ -145,7 +145,7 @@ class _Worker(QtCore.QThread):
 
 
 class VelocityTab(BaseTab):
-    title = "② Velocity && Statics"
+    title = "② Velocity"
 
     def __init__(self, ctx):
         super().__init__(ctx)

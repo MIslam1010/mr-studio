@@ -51,7 +51,7 @@ THEORY += further_reading([
 
 
 class FKTab(BaseTab):
-    title = "① Forward Kinematics"
+    title = "① FK"
 
     def __init__(self, ctx):
         super().__init__(ctx)

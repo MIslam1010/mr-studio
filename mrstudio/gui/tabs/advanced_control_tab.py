@@ -128,7 +128,7 @@ PARAMS = {
 
 
 class AdvancedControlTab(AsyncMixin, BaseTab):
-    title = "⑧ Task-space && Force"
+    title = "⑧ Task-space"
     needs_dynamics = True
 
     def __init__(self, ctx):

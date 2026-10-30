@@ -80,7 +80,7 @@ THEORY += further_reading([
 
 
 class ControlTab(AsyncMixin, BaseTab):
-    title = "⑤ Trajectory && Control"
+    title = "⑤ Control"
     needs_dynamics = True
 
     def __init__(self, ctx):

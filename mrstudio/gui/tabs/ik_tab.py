@@ -168,7 +168,7 @@ class _Worker(QtCore.QThread):
 
 
 class IKTab(BaseTab):
-    title = "③ Inverse Kinematics"
+    title = "③ IK"
 
     def __init__(self, ctx):
         super().__init__(ctx)

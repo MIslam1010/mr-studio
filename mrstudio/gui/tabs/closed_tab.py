@@ -94,7 +94,7 @@ def _break_jumps(y, jump=180.0):
 
 
 class ClosedChainTab(BaseTab):
-    title = "⑥ Closed Chains"
+    title = "⑥ Closed chains"
     uses_serial_robot = False
 
     def __init__(self, ctx):

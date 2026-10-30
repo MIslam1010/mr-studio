@@ -91,7 +91,7 @@ def _force_color(c: float):
 
 
 class StewartTab(BaseTab):
-    title = "⑦ Stewart–Gough"
+    title = "⑦ Stewart"
     uses_serial_robot = False
 
     def __init__(self, ctx):

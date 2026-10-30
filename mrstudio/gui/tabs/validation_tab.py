@@ -97,7 +97,7 @@ class _Worker(QtCore.QThread):
 
 
 class ValidationTab(BaseTab):
-    title = "⑩ Validation"
+    title = "⑭ Validation"
     uses_serial_robot = False
 
     def __init__(self, ctx):

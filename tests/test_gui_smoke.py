@@ -50,7 +50,7 @@ def test_validation_tab_headless(qapp, tmp_path):
     from mrstudio.gui.tabs.validation_tab import ValidationTab
 
     tab = ValidationTab(AppContext())
-    assert tab.title == "⑩ Validation" and tab.uses_serial_robot is False
+    assert tab.title == "⑭ Validation" and tab.uses_serial_robot is False
     tab._populate_planned()
     assert tab.table.rowCount() >= len(V.planned_checks())
     # feed a small synthetic result set through the same slots the worker uses

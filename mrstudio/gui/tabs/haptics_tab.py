@@ -97,7 +97,7 @@ def _registry_note(dev: hp.HapticDevice) -> str:
 
 
 class HapticsTab(BaseTab):
-    title = "⑫ Haptics && Impedance"
+    title = "⑪ Haptics"
     uses_serial_robot = False
 
     def __init__(self, ctx):

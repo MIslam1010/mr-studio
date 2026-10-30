@@ -58,7 +58,7 @@ PLACEHOLDER = ("<h2>Worked solution</h2><p style='color:gray'>Try the problem fi
 
 
 class PracticeTab(BaseTab):
-    title = "⑭ Practice Problems"
+    title = "⑬ Practice"
     uses_serial_robot = False
 
     def __init__(self, ctx):

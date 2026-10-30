@@ -102,7 +102,7 @@ def _fit_stack(stack: QtWidgets.QStackedWidget, idx: int):
 
 
 class ParallelRobotsTab(BaseTab):
-    title = "⑨ 3×RPR && Delta"
+    title = "⑨ Parallel"
     uses_serial_robot = False
 
     def __init__(self, ctx):

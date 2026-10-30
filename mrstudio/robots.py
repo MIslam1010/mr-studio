@@ -371,7 +371,7 @@ def puma560() -> SerialRobot:
                        "parameters (Armstrong/Corke) taken from Peter Corke's Robotics Toolbox DH "
                        "model and converted to screw axes + spatial inertias.",
                        tau_max=np.array([97.6, 186.4, 89.4, 24.2, 20.1, 21.3]),
-                       home=np.array([0.0, 0.6, -2.4, 0.0, -0.6, 0.0]))
+                       home=np.array([0.0, 0.6, -2.3, 0.0, -0.6, 0.0]))
 
 
 def panda() -> SerialRobot:

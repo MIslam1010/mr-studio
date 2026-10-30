@@ -79,7 +79,7 @@ _POLL_MS = 100         # idle read-back
 
 
 class HardwareTab(BaseTab):
-    title = "⑬ Hardware Bridge"
+    title = "⑫ Hardware"
     uses_serial_robot = False
 
     def __init__(self, ctx):
