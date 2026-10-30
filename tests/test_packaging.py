@@ -199,7 +199,7 @@ def test_workflow_yaml():
     assert set(job["strategy"]["matrix"]["os"]) == {"windows-2022", "macos-14"}
     assert job["needs"] == "test" and "pull_request" in job["if"]      # installers: not on every PR
     test_job = wf["jobs"]["test"]
-    assert test_job["runs-on"] == "ubuntu-latest"
+    assert test_job["runs-on"] == "ubuntu-24.04"   # fixed image, not the moving ubuntu-latest
     test_runs = " ".join(s.get("run", "") for s in test_job["steps"])
     assert "pytest" in test_runs and "ruff check" in test_runs and "libegl1" in test_runs
     assert "requirements-dev.txt" in test_runs
@@ -215,12 +215,12 @@ def test_workflow_yaml():
     rel = [s for s in release["steps"] if s.get("uses", "").startswith("softprops/action-gh-release")][0]
     assert rel["with"]["generate_release_notes"] is True and rel["with"]["fail_on_unmatched_files"] is True
     assert "SHA256SUMS.txt" in rel["with"]["files"]
-    # every action is pinned to a full version tag or SHA, never to a moving major tag
+    # every action is pinned to a full commit SHA (a tag can be moved; the "# vX.Y.Z" comment says which release)
     for j in wf["jobs"].values():
         for st in j["steps"]:
             if "uses" in st:
                 ref = st["uses"].split("@", 1)[1]
-                assert re.fullmatch(r"v\d+\.\d+\.\d+|[0-9a-f]{40}", ref), st["uses"]
+                assert re.fullmatch(r"[0-9a-f]{40}", ref), st["uses"]
 
 
 def test_dependabot_covers_actions_and_pip():

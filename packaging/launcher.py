@@ -278,6 +278,22 @@ def _pop_option(argv: list[str], name: str, has_value: bool = False):
     return val
 
 
+def _cli_exit(fn, report: str | None) -> None:
+    """Run a headless mode and end the process. A non-daemon thread (a preload, a worker) must not keep a frozen
+    app alive after an error: in CI that hung the Windows job until its 1 h limit."""
+    try:
+        code = fn(report)
+    except BaseException:  # noqa: BLE001 -- report it, then exit non-zero
+        traceback.print_exc()
+        code = 2
+    for stream in (sys.stdout, sys.stderr):
+        try:
+            stream.flush()
+        except Exception:  # noqa: BLE001
+            pass
+    os._exit(code)
+
+
 def run(argv: list[str] | None = None) -> int:
     argv = list(sys.argv[1:] if argv is None else argv)
     argv = [a for a in argv if not a.startswith("-psn_")]   # old macOS Finder launch argument
@@ -285,9 +301,9 @@ def run(argv: list[str] | None = None) -> int:
     report = _pop_option(argv, "--report", has_value=True)
     report = report if isinstance(report, str) else None
     if _pop_option(argv, "--self-test"):
-        return self_test(report)
+        _cli_exit(self_test, report)
     if _pop_option(argv, "--validate"):
-        return validate(report)
+        _cli_exit(validate, report)
     from mrstudio.gui.app import main
     return main(argv)
 
