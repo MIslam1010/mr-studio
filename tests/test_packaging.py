@@ -203,6 +203,9 @@ def test_workflow_yaml():
     test_runs = " ".join(s.get("run", "") for s in test_job["steps"])
     assert "pytest" in test_runs and "ruff check" in test_runs and "libegl1" in test_runs
     assert "requirements-dev.txt" in test_runs
+    # the GUI tests run on Linux too (Xvfb + Mesa); PySide6 is swapped there (6.12.0's Linux wheel leaks None refs)
+    assert "MRSTUDIO_NO_GUI_TESTS" not in str(test_job.get("env", {})) + str([s.get("env") for s in test_job["steps"]])
+    assert "xvfb-run" in test_runs and "s/^PySide6==.*/PySide6==" in test_runs
     steps = job["steps"]
     py = [s for s in steps if s.get("uses", "").startswith("actions/setup-python")]
     assert py and str(py[0]["with"]["python-version"]) == "3.11"

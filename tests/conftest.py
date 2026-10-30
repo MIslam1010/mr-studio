@@ -2,12 +2,15 @@
 
 * ``qapp`` -- one session-wide QApplication, torn down cleanly (timers stopped, widgets closed, deferred deletes
   processed, garbage collected) so that Qt/OpenGL objects are not destroyed during interpreter shutdown.
-* Exit status -- on some systems Qt/OpenGL objects destroyed during Python's final garbage collection segfault
-  (exit code 139) after a fully passing run (not fixed yet). As a guarded fallback the process exits with
+* Exit status -- on some systems Qt objects destroyed at the end of the session segfault (exit code 139) after a
+  fully passing run (not fixed yet). As a guarded fallback the process exits with
   ``os._exit(<pytest's real status>)`` right after the terminal summary. The status is *fail closed*: it starts at 1
   and is replaced by ``session.exitstatus`` only once pytest has set it, so a crash before that is never
   reported as success. Set the environment variable ``MRSTUDIO_PYTEST_HARD_EXIT=0`` to disable the hard exit
   (default: on) and let the interpreter shut down normally, e.g. to debug the teardown segfault.
+* PySide6 check -- a PySide6 build that drops references to None (PySide6 6.12.0's Linux wheel) makes Python 3.11
+  abort part-way through the GUI tests; the run stops at once with an explanation instead (see
+  ``_pyside_drops_none_refs``).
 """
 import gc
 import os
@@ -32,18 +35,48 @@ def _hard_exit() -> bool:
     return os.environ.get("MRSTUDIO_PYTEST_HARD_EXIT", "1").strip().lower() not in ("0", "false", "no", "off", "")
 
 
-def pytest_collection_modifyitems(config, items):
-    """MRSTUDIO_NO_GUI_TESTS=1 skips every test that needs a QApplication (the ``qapp`` fixture).
+def _pyside_drops_none_refs() -> bool:
+    """Does this PySide6 lose a reference to None on each call of a void method?
 
-    Used by the Linux CI job: Mesa's software OpenGL under Xvfb aborts when a 3-D view redraws. The GUI tests run
-    on the Windows and macOS build jobs instead, which are the platforms students use.
+    PySide6 6.12.0's Linux wheel (cp310-abi3-manylinux_2_34_x86_64) does: every ``QObject.setObjectName``,
+    ``QWidget.update`` ... decrements None's reference count. On Python 3.11 None is an ordinary object (immortal
+    only from 3.12, PEP 683), so after some 30,000 calls Python aborts with "Fatal Python error: none_dealloc:
+    deallocating None" -- with pytest's output capture the message is lost and only "Aborted (core dumped)" is seen.
+    The macOS wheel of 6.12.0 and PySide6 6.9-6.11 on Linux are fine.
     """
-    if os.environ.get("MRSTUDIO_NO_GUI_TESTS", "").strip() not in ("1", "true", "yes"):
-        return
-    skip = pytest.mark.skip(reason="GUI test (MRSTUDIO_NO_GUI_TESTS=1)")
-    for item in items:
-        if "qapp" in getattr(item, "fixturenames", ()):
+    if sys.version_info >= (3, 12):
+        return False
+    try:
+        from PySide6 import QtCore
+    except ImportError:
+        return False
+    obj = QtCore.QObject()
+    obj.setObjectName("probe")
+    before = sys.getrefcount(None)
+    for _ in range(200):
+        obj.setObjectName("probe")
+    return sys.getrefcount(None) < before - 100
+
+
+def pytest_collection_modifyitems(config, items):
+    """MRSTUDIO_NO_GUI_TESTS=1 skips every test that needs a QApplication (the ``qapp`` fixture), e.g. for a quick
+    numerical run on a machine without a display. CI runs the GUI tests on Linux (Xvfb), Windows and macOS.
+
+    If GUI tests are collected and the installed PySide6 drops references to None, the session stops here with a
+    non-zero status (it would abort later anyway, without a usable message).
+    """
+    gui = [item for item in items if "qapp" in getattr(item, "fixturenames", ())]
+    if os.environ.get("MRSTUDIO_NO_GUI_TESTS", "").strip() in ("1", "true", "yes"):
+        skip = pytest.mark.skip(reason="GUI test (MRSTUDIO_NO_GUI_TESTS=1)")
+        for item in gui:
             item.add_marker(skip)
+        return
+    if gui and _pyside_drops_none_refs():
+        import PySide6
+        pytest.exit(f"PySide6 {PySide6.__version__} on this platform drops a reference to None on every void Qt call; "
+                    f"Python {sys.version_info[0]}.{sys.version_info[1]} would abort part-way through the GUI tests "
+                    "('Fatal Python error: none_dealloc'). Install another PySide6 (CI on Linux uses 6.11.3), use "
+                    "Python >= 3.12, or set MRSTUDIO_NO_GUI_TESTS=1 to run only the non-GUI tests.", returncode=4)
 
 
 @pytest.fixture(scope="session")

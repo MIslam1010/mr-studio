@@ -65,22 +65,30 @@ jobs:
             libxcb-image0 libxcb-keysyms1 libxcb-randr0 libxcb-render-util0 libxcb-shape0 libxcb-xinerama0 \
             libxcb-xfixes0 libxcb-xkb1
 
+      # PySide6 6.12.0's Linux wheel (cp310-abi3-manylinux_2_34_x86_64) drops one reference to None on every call
+      # of a void Qt method (e.g. QObject.setObjectName, QWidget.update). On Python 3.11 None is not immortal, so
+      # after some 30,000 such calls Python aborts with "Fatal Python error: none_dealloc: deallocating None".
+      # The macOS 6.12.0 wheel and PySide6 6.9-6.11 on Linux do not have this bug, so Linux tests with 6.11.3
+      # (Windows uses conda-forge's 6.11.* too; macOS tests 6.12.0). tests/conftest.py stops the run with an
+      # explanation if an affected PySide6 is installed.
       - name: Install dependencies
         run: |
           python -m pip install --upgrade pip
-          python -m pip install -r requirements.txt -r requirements-dev.txt
+          sed 's/^PySide6==.*/PySide6==6.11.3/' requirements.txt > "$RUNNER_TEMP/requirements-linux.txt"
+          grep -qx 'PySide6==6.11.3' "$RUNNER_TEMP/requirements-linux.txt"
+          python -m pip install -r "$RUNNER_TEMP/requirements-linux.txt" -r requirements-dev.txt
 
       - name: Lint (syntax errors and undefined names)
         run: ruff check .
 
-      # Numerical and non-window tests only: Mesa's software OpenGL under Xvfb aborts when a 3-D view redraws.
-      # Every GUI test runs on the Windows and macOS build jobs below (the platforms students use).
+      # The whole suite, GUI tests included, on Xvfb with Mesa's software OpenGL (llvmpipe).
+      # --capture=sys: Python's own fatal-error report and Qt's messages from C++ go to the log, not to pytest's
+      # capture file (which is lost when the process aborts).
       - name: Run tests
         env:
           QT_QPA_PLATFORM: xcb
           LIBGL_ALWAYS_SOFTWARE: "1"
-          MRSTUDIO_NO_GUI_TESTS: "1"
-        run: xvfb-run -a -s "-screen 0 1920x1080x24" python -m pytest -q -ra --durations=15
+        run: xvfb-run -a -s "-screen 0 1920x1080x24" python -m pytest -q -ra --durations=15 --capture=sys --timeout=900
 
   build:
     name: build (${{ matrix.os }})
