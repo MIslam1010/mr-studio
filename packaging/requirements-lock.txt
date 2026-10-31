@@ -71,7 +71,7 @@ smmap==5.0.3
 spatialgeometry==1.4.2
 spatialmath-python==1.1.18
 sympy==1.14.0
-toppra==0.6.10
+toppra==0.6.3
 tqdm==4.70.1
 typing_extensions==4.16.0
 virtualenv==21.15.0

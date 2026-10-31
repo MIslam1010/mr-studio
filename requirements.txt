@@ -2,7 +2,7 @@
 modern-robotics==1.1.1          # Lynch & Park official library (the textbook's own code)
 pin==4.1.0                      # Pinocchio rigid-body dynamics (LAAS-CNRS), C++ with Python bindings
 roboticstoolbox-python==1.5.0   # Peter Corke's Robotics Toolbox (DH models, cross-checks)
-toppra==0.6.10                   # Time-optimal path parameterisation (Pham & Pham 2018)
+toppra==0.6.3                   # Time-optimal path parameterisation (Pham & Pham 2018)
 numpy==2.4.6
 scipy==1.17.1
 sympy==1.14.0
