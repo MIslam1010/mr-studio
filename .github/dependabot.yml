@@ -21,9 +21,19 @@ updates:
     ignore:
       - dependency-name: "*"
         update-types: ["version-update:semver-major"]
-      # toppra 0.6.10 publishes Linux wheels only (no macOS/Windows wheel, no sdist): the installers cannot use it
+      # toppra 0.6.6-0.6.10 publish Linux wheels only (no macOS/Windows wheel, no sdist): the installers cannot use them
       - dependency-name: "toppra"
-        versions: ["0.6.10"]
+        versions: [">0.6.3"]
+      # sympy 1.14 (pinned) requires mpmath < 1.4
+      - dependency-name: "mpmath"
+        versions: [">=1.4"]
+      # the validated maths core: a numpy/scipy minor upgrade is a deliberate change with a full re-validation
+      - dependency-name: "numpy"
+        update-types: ["version-update:semver-minor"]
+      - dependency-name: "scipy"
+        update-types: ["version-update:semver-minor"]
+      - dependency-name: "contourpy"
+        update-types: ["version-update:semver-minor"]
   - package-ecosystem: pip
     directory: /packaging
     schedule:
@@ -35,3 +45,16 @@ updates:
     ignore:
       - dependency-name: "*"
         update-types: ["version-update:semver-major"]
+      # toppra 0.6.6-0.6.10 publish Linux wheels only (no macOS/Windows wheel, no sdist): the installers cannot use them
+      - dependency-name: "toppra"
+        versions: [">0.6.3"]
+      # sympy 1.14 (pinned) requires mpmath < 1.4
+      - dependency-name: "mpmath"
+        versions: [">=1.4"]
+      # the validated maths core: a numpy/scipy minor upgrade is a deliberate change with a full re-validation
+      - dependency-name: "numpy"
+        update-types: ["version-update:semver-minor"]
+      - dependency-name: "scipy"
+        update-types: ["version-update:semver-minor"]
+      - dependency-name: "contourpy"
+        update-types: ["version-update:semver-minor"]
