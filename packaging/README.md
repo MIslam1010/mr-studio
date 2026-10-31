@@ -18,7 +18,7 @@ Windows installer on a Mac. Use GitHub Actions (option A) to get both without ow
 
 1. Put the project in a GitHub repository (the folder is not a git repository yet):
    ```bash
-   cd ~/Documents/Edu/Lectures/Robotics/MR-Studio
+   cd "$HOME/Documents/Edu/Lectures/Robotics/MR Studio Project/MR-Studio"
    git init && git add . && git commit -m "MR Studio"
    gh repo create mr-studio --private --source . --push   # or create the repo on github.com and `git push`
    ```
@@ -39,7 +39,7 @@ A run takes about 20–30 minutes. You can start one by hand with **Actions**, t
 From the project root (the `.venv` already has every requirement):
 
 ```bash
-cd ~/Documents/Edu/Lectures/Robotics/MR-Studio
+cd "$HOME/Documents/Edu/Lectures/Robotics/MR Studio Project/MR-Studio"
 ./packaging/build_macos.sh
 ```
 
