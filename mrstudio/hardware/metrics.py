@@ -9,6 +9,9 @@ helpers.  Angles in **degrees** here, as in the logs the starters read.
   HW-6  safe stop: time to halt and joint motion after the stop command
 
 ``validation_checks()`` verifies the pipeline quantitatively (Validation tab, category "Hardware").
+
+This is an example course setup: the course handout is authoritative for the thresholds and rules below, which
+mirror it in one place (``DEFAULTS``, ``SESSION_SPEED_FRACTION``) so another course or term can change them here.
 """
 from __future__ import annotations
 

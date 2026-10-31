@@ -323,7 +323,10 @@ class HardwareTab(BaseTab):
         rep = QtWidgets.QWidget()
         rl = QtWidgets.QVBoxLayout(rep)
         rl.setContentsMargins(0, 0, 0, 0)
-        rl.addWidget(QtWidgets.QLabel("<b>Hardware test report</b> (thresholds of the briefs)"))
+        title = QtWidgets.QLabel("<b>Hardware test report</b> (thresholds of the SBEG 361/461 course briefs)")
+        title.setToolTip("An example course setup: the course handout is authoritative for these thresholds.\n"
+                         "They are defined in one place, DEFAULTS in mrstudio/hardware/metrics.py.")
+        rl.addWidget(title)
         rl.addWidget(self.report, 1)
         rl.addWidget(self.report_lbl)
         plots = QtWidgets.QWidget()

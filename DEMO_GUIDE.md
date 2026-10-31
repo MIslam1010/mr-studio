@@ -149,7 +149,8 @@ $T(\theta) = e^{[\mathcal{S}_1]\theta_1}\cdots e^{[\mathcal{S}_n]\theta_n}M$ in 
 
 ### The SBEG 361/461 course robots (top-bar robot box)
 
-Six robots from the course materials are built in. They use exactly the numbers in the shared course file
+Six robots from the course materials are built in (an example of plugging a course's own robots and lab rules
+into MR Studio; the course handout stays authoritative for the hardware-test thresholds). They use exactly the numbers in the shared course file
 (`_build/shared/course_robots.py`, copied into `mrstudio/course_models.py`; a test checks that the two match):
 
 | Robot box entry | What it is | Good demo |

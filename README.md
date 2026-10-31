@@ -136,6 +136,13 @@ The tab drives the course arm (myCobot-280 class) over a serial port, or a built
 * **First-run protocol:** low speed first; move one joint only, by at most **±10°**; keep **a person at the power switch**; do a **cable-pull test** (unplug the USB cable while moving: the arm must stop safely); release the torque **last**, with the arm supported by hand or on its rest.
 * The installed app bundles pyserial but cannot install the myCobot SDK later; build the app with `pymycobot` installed if you need that back-end.
 
+**Course material in this tab (an example course setup).** The course robots, the two CSV log formats and the
+acceptance tests HW-2 … HW-6 come from the author's robotics courses (SBEG 361 / 461). They show how a course can
+plug its own lab rules into MR Studio. Students of those courses can check a log against the same verdicts their
+project uses; for everyone else they are a worked example. The **course handout is authoritative** for the
+thresholds and rules: the values in the app mirror it and live in one place, `DEFAULTS` and
+`SESSION_SPEED_FRACTION` in `mrstudio/hardware/metrics.py`, so another course (or a new term) can change them there.
+
 ### Robots
 
 | Robot | Source |
