@@ -17,7 +17,7 @@ cmeel-zlib==1.3.2
 coal==3.0.3
 colorama==0.4.6
 colored==2.3.2
-contourpy==1.4.0
+contourpy==1.3.3
 cycler==0.12.1
 distlib==0.4.4
 distro==1.9.0
@@ -38,7 +38,7 @@ matplotlib==3.11.2
 modern-robotics==1.1.1
 mpmath==1.4.1
 nodeenv==1.11.0
-numpy==2.5.4
+numpy==2.4.6
 packaging==26.3
 pgraph-python==0.6.5
 pillow==12.3.0
@@ -64,7 +64,7 @@ robot_descriptions==2.0.0
 roboticstoolbox-python==1.5.0
 rospkg==1.6.3
 rtb-data==2.0.0
-scipy==1.18.1
+scipy==1.17.1
 shiboken6==6.12.0
 six==1.17.0
 smmap==5.0.3
