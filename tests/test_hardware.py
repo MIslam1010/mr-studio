@@ -25,11 +25,16 @@ from mrstudio.hardware.safety import (CHECKLIST, SafetySupervisor, allowed_speed
                                       retime_to_speed, soft_limits)
 from mrstudio.hardware.session import quintic_duration, quintic_move, run_offline, with_approach
 
-# Override with MRSTUDIO_COURSE_SRC=<path to _build/src> (the starter comparisons are skipped when it is absent).
-_SRC = Path(os.environ.get("MRSTUDIO_COURSE_SRC") or (
-    Path.home() / "Documents/Edu/Lectures/Robotics/Robotics Track Course Materials/_build/src"))
-_361 = _SRC / "361/project/starter"
-_461 = _SRC / "461/project/starter"
+from course_paths import newest_course_file
+
+# Override with MRSTUDIO_COURSE_SRC=<path to _build/src>; by default the newest course-materials copy of each starter
+# (tests/course_paths.py). The starter comparisons are skipped when it is absent.
+if os.environ.get("MRSTUDIO_COURSE_SRC"):
+    _361 = Path(os.environ["MRSTUDIO_COURSE_SRC"]) / "361/project/starter"
+    _461 = Path(os.environ["MRSTUDIO_COURSE_SRC"]) / "461/project/starter"
+else:
+    _361 = newest_course_file("src/361/project/starter/hwcompare.py").parent
+    _461 = newest_course_file("src/461/project/starter/sbeg461_project/hardware.py").parent.parent
 
 
 def _hwcompare():

@@ -22,11 +22,13 @@ from mrstudio import kinematics as kin  # noqa: E402
 from mrstudio.dynamics import DynamicsEngine, simulate  # noqa: E402
 from mrstudio.robots import ROBOTS, get_robot  # noqa: E402
 
+from course_paths import newest_course_file  # noqa: E402
+
 NAMES = ["Course arm (myCobot-280 class 6R)", "EOD arm (6R on UGV)", "EOD arm (3R planar)",
          "Arm–exoskeleton 2R", "Rehab robot 2R (planar)", "Hapkit (1-DOF haptic paddle)"]
-# Override with MRSTUDIO_COURSE_SHARED=<path to course_robots.py> (the comparison test is skipped when it is absent).
-SHARED = Path(os.environ.get("MRSTUDIO_COURSE_SHARED") or (
-    Path.home() / "Documents/Edu/Lectures/Robotics/Robotics Track Course Materials/_build/shared" / "course_robots.py"))
+# Override with MRSTUDIO_COURSE_SHARED=<path to course_robots.py>; by default the newest course-materials copy
+# (tests/course_paths.py). The comparison test is skipped when it is absent.
+SHARED = Path(os.environ.get("MRSTUDIO_COURSE_SHARED") or newest_course_file("shared/course_robots.py"))
 
 
 def _states(r, k=8, seed=0):
@@ -184,6 +186,8 @@ def _serial_tab_classes():
 
 
 def test_every_serial_tab_accepts_every_course_robot(qapp):
+    from PySide6 import QtCore
+
     from mrstudio.gui.base import AppContext
     errors = []
     old_hook = sys.excepthook
@@ -203,7 +207,9 @@ def test_every_serial_tab_accepts_every_course_robot(qapp):
                 tab.on_hide()
                 qapp.processEvents()
             tab.on_hide()
-            tab.deleteLater()
+            tab.shutdown()        # join worker threads and stop timers first, then really delete the tab:
+            tab.deleteLater()     # processEvents() alone never runs DeferredDelete, which left a half-dead tab
+            qapp.sendPostedEvents(None, QtCore.QEvent.DeferredDelete)   # for the session teardown (exit 139)
             qapp.processEvents()
     finally:
         sys.excepthook = old_hook
