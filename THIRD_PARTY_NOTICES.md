@@ -14,7 +14,7 @@ component remains under its own licence; the full licence texts ship inside the 
 | Coal (collision library used by Pinocchio) | 3.0.3 | BSD-3-Clause | https://github.com/coal-library/coal |
 | EigenPy | 3.13.0 | BSD-2-Clause | https://github.com/stack-of-tasks/eigenpy |
 | Boost (cmeel-boost) and other cmeel wheels (assimp, urdfdom, octomap, qhull, tinyxml2, zlib, console_bridge) | see wheels | cmeel-boost: BSL-1.0; others under their own permissive licences, stated in each wheel's `dist-info` | https://github.com/cmake-wheel |
-| Robotics Toolbox for Python | 1.4.4 | MIT | https://github.com/petercorke/robotics-toolbox-python |
+| Robotics Toolbox for Python | 1.5.0 | MIT | https://github.com/petercorke/robotics-toolbox-python |
 | Spatial Maths for Python | 1.1.18 | MIT | https://github.com/bdaiinstitute/spatialmath-python |
 | rtb-data (example URDFs and meshes, subset) | see wheel | as stated in the wheel | https://github.com/petercorke/rtb-data |
 | modern_robotics (Lynch & Park) | 1.1.1 | MIT | https://github.com/NxRLab/ModernRobotics |

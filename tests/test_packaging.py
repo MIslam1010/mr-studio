@@ -340,3 +340,27 @@ def test_optional_hidden_imports_are_only_the_installed_ones():
 def test_macos_minimum_version_matches_pyside6_wheel():
     spec = (PKG / "mrstudio.spec").read_text(encoding="utf-8")
     assert '"LSMinimumSystemVersion": "14.0"' in spec
+
+
+def test_third_party_notice_versions_match_lock():
+    """THIRD_PARTY_NOTICES.md ships inside the installers: its version column must match what is bundled."""
+    rows = {"Qt for Python (PySide6, shiboken6) and the Qt libraries": "pyside6", "Pinocchio (`pin`)": "pin",
+            "Coal (collision library used by Pinocchio)": "coal", "EigenPy": "eigenpy",
+            "Robotics Toolbox for Python": "roboticstoolbox-python", "Spatial Maths for Python": "spatialmath-python",
+            "modern_robotics (Lynch & Park)": "modern-robotics", "toppra": "toppra", "NumPy": "numpy",
+            "SciPy": "scipy", "SymPy": "sympy", "Matplotlib": "matplotlib", "pyqtgraph": "pyqtgraph",
+            "PyOpenGL": "pyopengl", "imageio": "imageio", "imageio-ffmpeg": "imageio-ffmpeg", "Pillow": "pillow",
+            "pyserial": "pyserial"}
+    lock = {}
+    for line in (PKG / "requirements-lock.txt").read_text(encoding="utf-8").splitlines():
+        if "==" in line and not line.startswith("#"):
+            name, ver = line.split("==")
+            lock[name.strip().lower().replace("_", "-")] = ver.strip()
+    table = {}
+    for line in (ROOT / "THIRD_PARTY_NOTICES.md").read_text(encoding="utf-8").splitlines():
+        cells = [c.strip() for c in line.split("|")]
+        if len(cells) > 3 and cells[1] in rows:
+            table[cells[1]] = cells[2]
+    assert set(table) == set(rows), f"notice rows missing: {set(rows) - set(table)}"
+    for row, pkg in rows.items():
+        assert table[row] == lock[pkg], f"THIRD_PARTY_NOTICES '{row}' says {table[row]}, the lock bundles {lock[pkg]}"
