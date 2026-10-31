@@ -99,11 +99,11 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        os: [windows-2022, macos-14]
+        os: [windows-2022, macos-15]
         include:
           - os: windows-2022
             shell: bash -el {0}        # login shell: activates the conda environment of setup-miniconda
-          - os: macos-14
+          - os: macos-15
             shell: bash                # NOT a login shell: macOS path_helper would put /usr/bin before setup-python
     env:
       CONDA_PKGS_DIR: ${{ github.workspace }}/.conda-pkgs      # cached below (Windows)

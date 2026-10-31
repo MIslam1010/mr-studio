@@ -196,7 +196,7 @@ def test_workflow_yaml():
     on = wf.get("on", wf.get(True))   # PyYAML reads the key `on` as True
     assert {"push", "pull_request", "workflow_dispatch"} <= set(on)
     job = wf["jobs"]["build"]
-    assert set(job["strategy"]["matrix"]["os"]) == {"windows-2022", "macos-14"}
+    assert set(job["strategy"]["matrix"]["os"]) == {"windows-2022", "macos-15"}   # GitHub retired macos-14 on 2026-11-02
     assert job["needs"] == "test" and "pull_request" in job["if"]      # installers: not on every PR
     test_job = wf["jobs"]["test"]
     assert test_job["runs-on"] == "ubuntu-24.04"   # fixed image, not the moving ubuntu-latest
