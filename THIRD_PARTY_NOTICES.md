@@ -26,7 +26,7 @@ component remains under its own licence; the full licence texts ship inside the 
 | pyqtgraph | 0.14.0 | MIT | https://www.pyqtgraph.org |
 | PyOpenGL | 3.1.10 | BSD (classifier: BSD License) | https://mcfletch.github.io/pyopengl/ |
 | imageio | 2.38.1 | BSD-2-Clause | https://github.com/imageio/imageio |
-| imageio-ffmpeg | 0.6.0 | BSD-2-Clause (the wrapper; see FFmpeg below) | https://github.com/imageio/imageio-ffmpeg |
+| imageio-ffmpeg | 0.7.0 | BSD-2-Clause (the wrapper; see FFmpeg below) | https://github.com/imageio/imageio-ffmpeg |
 | FFmpeg executable (shipped inside imageio-ffmpeg) | 7.1 | see below | https://ffmpeg.org |
 | Pillow | 12.3.0 | MIT-CMU (HPND) | https://python-pillow.github.io |
 | pyserial | 3.5 | BSD | https://github.com/pyserial/pyserial |
