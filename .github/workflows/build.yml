@@ -146,19 +146,36 @@ jobs:
           key: win-deps-${{ hashFiles('requirements.txt', 'packaging/requirements-build.txt', 'packaging/bundle_config.py') }}
           restore-keys: win-deps-
 
+      # The environment starts EMPTY (no python-version): Python comes with the packages below, or with the cached
+      # environment (setup-miniconda's documented caching pattern). Solving + installing it took ~3.5 min.
       - uses: conda-incubator/setup-miniconda@be893c923ea9cf1cf7cd510fbdde27c7e18cbdcb  # v4.1.0
         if: runner.os == 'Windows'
         with:
           miniforge-version: latest
-          python-version: "3.11"
           activate-environment: mrstudio
           channels: conda-forge
           conda-remove-defaults: "true"
 
-      - name: Install dependencies (Windows)
+      - name: Cache key month (Windows)
         if: runner.os == 'Windows'
+        id: month
+        run: echo "month=$(date -u +%Y-%m)" >> "$GITHUB_OUTPUT"
+
+      # The whole conda environment (conda-forge Pinocchio/PySide6 + the pip requirements + PyInstaller). Saved only
+      # by a successful job; a new key whenever a requirement changes, and every month (fresh conda-forge builds).
+      - name: Cache the conda environment (Windows)
+        if: runner.os == 'Windows'
+        id: envcache
+        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9  # v6.1.0
+        with:
+          path: ${{ env.CONDA }}/envs/mrstudio
+          key: win-env-${{ steps.month.outputs.month }}-${{ hashFiles('requirements.txt', 'packaging/requirements-build.txt', 'packaging/bundle_config.py') }}
+
+      - name: Install dependencies (Windows)
+        if: runner.os == 'Windows' && steps.envcache.outputs.cache-hit != 'true'
         run: |
-          conda install -y -c conda-forge --override-channels $(python packaging/bundle_config.py conda-packages)
+          # the environment has no Python yet: read the conda specs with the base installation's Python
+          conda install -y -c conda-forge --override-channels python=3.11 $("$CONDA/python.exe" packaging/bundle_config.py conda-packages)
           python packaging/bundle_config.py windows-requirements requirements.txt packaging/build/requirements-windows.txt
           python -m pip install --upgrade pip
           python -m pip install -r packaging/build/requirements-windows.txt -r packaging/requirements-build.txt
