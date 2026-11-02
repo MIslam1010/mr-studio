@@ -200,6 +200,21 @@ jobs:
         if: runner.os == 'Windows'
         run: pwsh -NoProfile -File packaging/build_windows.ps1 -Python "$(python -c 'import sys; print(sys.executable)')" -NoInstall -SkipTests
 
+      - name: TEMP Inno Setup compression experiment
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          $iscc = (Get-Command iscc -ErrorAction SilentlyContinue).Source
+          if (-not $iscc) { $iscc = "${env:ProgramFiles(x86)}\Inno Setup 6\ISCC.exe" }
+          $v = (python packaging/bundle_config.py version).Trim()
+          Get-ChildItem packaging\dist\*.exe, packaging\dist\*.zip | ForEach-Object { Write-Host "CURRENT $($_.Name) $($_.Length)" }
+          foreach ($c in @(@("max", "1"), @("normal", "2"), @("fast", "2"))) {
+            $out = Join-Path $PWD "packaging\build\exp-$($c[0])-$($c[1])"
+            $t = Measure-Command { & $iscc /Qp "/DMyAppVersion=$v" "/DLzmaLevel=$($c[0])" "/DLzmaThreads=$($c[1])" "/O$out" packaging\mrstudio.iss | Out-Null }
+            $f = Get-ChildItem "$out\*.exe"
+            Write-Host ("EXPERIMENT lzma2/{0} threads={1}: {2:N1} s, {3} bytes" -f $c[0], $c[1], $t.TotalSeconds, $f.Length)
+          }
+
       - name: Build (macOS)
         if: runner.os == 'macOS'
         run: PYTHON=python ./packaging/build_macos.sh --no-install --skip-tests
