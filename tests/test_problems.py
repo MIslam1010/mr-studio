@@ -46,7 +46,7 @@ def test_all_math_renders_in_gui():
 
 
 def test_mixed_topic_and_bad_input():
-    assert [P.generate(P.MIXED, s).topic for s in range(7)] == P.TOPIC_KEYS
+    assert [P.generate(P.MIXED, s).topic for s in range(len(P.TOPIC_KEYS))] == P.TOPIC_KEYS
     with pytest.raises(ValueError):
         P.generate("nope", 1)
     with pytest.raises(ValueError):
@@ -146,12 +146,125 @@ def test_validation_checks_pass():
     assert all(c.passed for c in checks), [(c.name, c.error) for c in checks if not c.passed]
 
 
+# --- Ch. 8 topics: inertia, forward dynamics, task-space mass matrix, constrained dynamics -----------
+
+CH8 = ["inertia", "fwd_dynamics", "task_space", "constrained"]
+
+
+def test_ch8_topics_registered():
+    for t in CH8:
+        assert t in P.TOPIC_KEYS and P.TOPICS[t]["title"].endswith("(Ch. 8)")
+    # the original seven topics keep their random streams (a shared seed still gives the same problem)
+    assert [P._RNG_ID[t] for t in ("rotation", "fk", "jacobian", "ik", "dynamics", "trajectory", "control")] == \
+        list(range(7))
+    assert sorted(P._RNG_ID) == sorted(P.TOPIC_KEYS) and len(set(P._RNG_ID.values())) == len(P.TOPIC_KEYS)
+
+
+@pytest.mark.parametrize("topic", CH8)
+@pytest.mark.parametrize("diff", (1, 2, 3))
+def test_ch8_verified_rendered_deterministic(topic, diff):
+    from mrstudio.gui.theory import validate_all
+    for seed in (1, 2, 3):
+        p = P.generate(topic, seed, diff)
+        assert p.topic == topic and p.difficulty == diff and p.chapter.startswith("Ch. 8")
+        assert P.verify(p) < 1e-6, (topic, diff, seed)
+        assert validate_all(["$" + m + "$" for m in p.all_math()]) == [], (topic, diff, seed)
+        md = p.markdown(1, with_solution=True)
+        assert "### Solution" in md and "**Final answer.**" in md and "Step 1." in md
+        q = P.generate(topic, seed, diff)
+        assert (q.statement, q.solution) == (p.statement, p.solution)
+
+
+@pytest.mark.parametrize("topic", CH8)
+def test_ch8_verifier_catches_a_wrong_answer(topic):
+    p = P.generate(topic, 2, 3)
+    key = {"inertia": "KE", "fwd_dynamics": "ddtheta", "task_space": "m_u", "constrained": "lam"}[topic]
+    p.answer[key] = p.answer[key] + 1e-3
+    assert P.verify(p) > 1e-4
+
+
+def test_inertia_textbook_facts():
+    for s in range(12):
+        for d in (1, 2, 3):
+            p = P.generate("inertia", s, d)
+            dd, a = p.data, p.answer
+            m, Ib = dd["m"], a["Ib"]
+            if dd["shape"] == "box" and len(set(dd["dims"])) == 1:
+                assert np.allclose(np.diag(Ib), m * dd["dims"][0] ** 2 / 6)      # cube: m a^2 / 6
+            if dd["shape"] == "cylinder":
+                assert np.isclose(Ib[2, 2], m * dd["dims"][0] ** 2 / 2)
+            # triangle inequality of principal moments, and G_b = diag(I_b, m I)
+            ev = np.sort(np.diag(Ib))
+            assert ev[0] + ev[1] >= ev[2] - 1e-12
+            assert np.allclose(a["Gb"][3:, 3:], m * np.eye(3)) and np.allclose(a["Gb"][:3, 3:], 0)
+            if d >= 2:
+                pp = dd["p"]
+                # upper-left block of G_a is Steiner's I_a; coupling block is m [p]
+                assert np.allclose(a["Ga"][:3, :3], a["Ia"], atol=1e-12)
+                assert np.allclose(a["Ga"][:3, 3:], m * mr.VecToso3(pp), atol=1e-12)
+                assert np.isclose(np.trace(a["Ia"]), np.trace(Ib) + 2 * m * pp @ pp)
+            if d == 3:
+                assert np.allclose(np.linalg.eigvalsh(a["Ic"]), np.sort(np.diag(Ib)), atol=1e-12)
+
+
+def test_fwd_dynamics_euler_steps():
+    for s in range(8):
+        p = P.generate("fwd_dynamics", s, 2)
+        d, a = p.data, p.answer
+        th_e, dth_e = mr.EulerStep(d["theta"], d["dtheta"], a["ddtheta"], d["dt"])
+        assert np.allclose(th_e, a["theta_explicit"]) and np.allclose(dth_e, a["dtheta_explicit"])
+        assert np.allclose(a["dtheta_semi"], a["dtheta_explicit"])
+        assert np.allclose(a["theta_semi"] - a["theta_explicit"], d["dt"] ** 2 * a["ddtheta"])
+        # point masses: the general closed form reduces to MR (8.9)-(8.10)
+        Mm, c, g, _ = P.lagrange_2r(d["L1"], d["L2"], d["m1"], d["m2"], d["theta"], d["dtheta"], np.zeros(2))
+        assert np.allclose(Mm, a["M"]) and np.allclose(c, a["c"]) and np.allclose(g, a["g"])
+    assert P.generate("fwd_dynamics", 1, 3).data["rods"] is True
+
+
+def test_task_space_felt_mass_and_reflected_inertia():
+    for s in range(8):
+        p = P.generate("task_space", s, 3)
+        d, a = p.data, p.answer
+        assert abs(np.sin(d["theta"][1])) > 0.4                         # away from the elbow singularity
+        lo, hi = a["Lam_eig"]
+        assert lo - 1e-12 <= a["m_u"] <= hi + 1e-12                    # felt mass between eigenvalues of Lambda
+        assert np.allclose(np.diag(a["M_rot"] - a["M"]), d["gear"] ** 2 * d["I_rot"])
+        assert a["m_u_rot"] > a["m_u"]                                  # rotors only add inertia
+        # an impulse along u: the tip velocity component along u is impulse / felt mass
+        v = np.linalg.solve(a["Lam"], d["u"])
+        assert np.isclose(d["u"] @ v, 1.0 / a["m_u"])
+
+
+def test_constrained_multiplier_does_no_work():
+    seen = set()
+    for s in range(10):
+        for diff in (1, 2, 3):
+            p = P.generate("constrained", s, diff)
+            d, a = p.data, p.answer
+            seen.add(d["kind"])
+            A = a["A"][0]
+            assert abs(A @ d["dtheta"]) < 1e-12 and abs(a["power"]) < 1e-12
+            assert abs(A @ a["ddtheta"] + a["Adot_dtheta"][0]) < 1e-9
+            if diff == 1:
+                assert np.allclose(d["dtheta"], 0)
+            if d["kind"] == "orientation":
+                assert np.allclose(A, [1, 1]) and np.isclose(a["ddtheta"].sum(), 0)
+    assert seen == {"orientation", "line"}
+
+
+def test_mixed_problem_set_covers_every_topic():
+    probs = P.problem_set(len(P.TOPIC_KEYS), P.MIXED, 2, seed=3)
+    assert [p.topic for p in probs] == P.TOPIC_KEYS
+    assert all(P.verify(p) < 1e-6 for p in probs)
+
+
 # --- export -----------------------------------------------------------------------------------------
 
 def test_problem_set_versions_share_topics():
     a = P.problem_set(9, P.MIXED, 2, seed=5, version=0)
     b = P.problem_set(9, P.MIXED, 2, seed=5, version=1)
-    assert [p.topic for p in a] == [p.topic for p in b] == [P.TOPIC_KEYS[k % 7] for k in range(9)]
+    assert [p.topic for p in a] == [p.topic for p in b] == [P.TOPIC_KEYS[k % len(P.TOPIC_KEYS)]
+                                                             for k in range(9)]
     assert all(x.statement != y.statement for x, y in zip(a, b))
     md = P.problem_set_markdown(a, with_solutions=True, version=0)
     assert "version A" in md and "# Solutions" in md and md.count("## Problem") == 18

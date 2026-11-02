@@ -34,7 +34,15 @@ $$T(\theta) = e^{[\mathcal{S}_1]\theta_1}\cdots e^{[\mathcal{S}_n]\theta_n}M = M
 singularities Sec. 5.3 p. 189.</p>
 <p><b>Ch. 6</b> Newton–Raphson with the body Jacobian, Sec. 6.2.2 p. 228 (Example 6.1, pp. 229–230):</p>
 $$[\mathcal{V}_b] = \log\left(T_{sb}^{-1}(\theta^{i})T_{sd}\right),\quad \theta^{i+1} = \theta^{i} + J_b^{\dagger}(\theta^{i})\mathcal{V}_b$$
-<p><b>Ch. 8</b> 2R Lagrangian dynamics (8.9)–(8.10) p. 273; Newton–Euler (8.50)–(8.55) pp. 292–293.</p>
+<p><b>Ch. 8</b> rigid-body inertia (Sec. 8.2): principal moments of a block or cylinder, the rotated inertia
+$R\mathcal{I}_bR^{T}$, Steiner's theorem, the spatial inertia $\mathcal{G}_b$ (8.32) and its change of frame (8.42),
+kinetic energy $\frac{1}{2}\mathcal{V}^{T}\mathcal{G}\mathcal{V}$; 2R Lagrangian dynamics (8.9)–(8.10) p. 273;
+Newton–Euler (8.50)–(8.55) pp. 292–293; forward dynamics with one explicit or semi-implicit Euler step
+(Sec. 8.5); the task-space mass matrix (8.90), the mass felt at the tip along a direction $\hat{u}$ and the
+reflected rotor inertia $G^{2}\mathcal{I}_{rot}$ of a geared joint (Secs. 8.6, 8.9.2); constrained dynamics
+with a Pfaffian constraint $A(\theta)\dot{\theta} = 0$ and its Lagrange multiplier (Sec. 8.7):</p>
+$$\ddot{\theta} = M^{-1}(\tau - c - g),\quad \Lambda = J^{-T}MJ^{-1},\quad \mathfrak{m}_{\hat{u}} = \frac{1}{\hat{u}^{T}\Lambda^{-1}\hat{u}}$$
+$$M\ddot{\theta} + h = \tau + A^{T}\lambda,\quad A\ddot{\theta} + \dot{A}\dot{\theta} = 0$$
 <p><b>Ch. 9</b> cubic time scaling (9.9)–(9.13) pp. 331–332; quintic p. 332.</p>
 <p><b>Ch. 11</b> second-order error dynamics (11.8) p. 412, overshoot and settling time pp. 414–415,
 PD control (11.26) p. 425, computed torque (11.33)–(11.35) p. 431:</p>
@@ -72,7 +80,8 @@ class PracticeTab(BaseTab):
 
         # ---------------------------------------------------------------- controls
         self.topic = combo(["Mixed (topic from seed)"] + [P.TOPICS[k]["title"] for k in P.TOPIC_KEYS])
-        self.topic.setToolTip("Mixed: the topic is seed mod 7 (rotation, FK, Jacobian, IK, dynamics, trajectory, control)")
+        self.topic.setToolTip(f"Mixed: the topic is seed mod {len(P.TOPIC_KEYS)} "
+                              f"({', '.join(P.TOPIC_KEYS)})")
         self.diff = combo([f"{k} — {v}" for k, v in P.DIFFICULTIES.items()])
         self.diff.setCurrentIndex(1)
         self.seed = QtWidgets.QSpinBox()
@@ -98,7 +107,7 @@ class PracticeTab(BaseTab):
             w.setMinimumContentsLength(12)
         self.n_spin = QtWidgets.QSpinBox()
         self.n_spin.setRange(1, 60)
-        self.n_spin.setValue(7)
+        self.n_spin.setValue(len(P.TOPIC_KEYS))      # a mixed set covers every topic once
         self.v_spin = QtWidgets.QSpinBox()
         self.v_spin.setRange(1, 8)
         self.v_spin.setValue(1)

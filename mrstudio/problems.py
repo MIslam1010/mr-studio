@@ -9,8 +9,8 @@ Every generator is deterministic in ``(topic, seed, difficulty)`` and returns a 
 
 All answers are computed with Lynch & Park's ``modern_robotics`` package (``mr``).  Each topic also
 has an *independent* re-solver (SciPy matrix exponentials, finite differences, closed-form
-Lagrangian, boundary-value solve of the polynomial, eigenvalues of the error dynamics) used by
-:func:`verify`, :func:`validation_checks` and the test-suite.
+Lagrangian, exact quadrature over a solid, KKT solves, boundary-value solve of the polynomial,
+eigenvalues of the error dynamics) used by :func:`verify`, :func:`validation_checks` and the test-suite.
 
 Topics (MR sections, printed pages of the Dec-2019 updated first edition):
 
@@ -21,7 +21,13 @@ fk         Ch. 4  space / body PoE (4.14) p. 140, (4.16) p. 147
 jacobian   Ch. 5  J_s (5.11) p. 178, J_b (5.18) p. 183, J_b = [Ad_Tbs] J_s (5.22) p. 185,
                   singularities Sec. 5.3 p. 189
 ik         Ch. 6  Newton-Raphson with the body Jacobian, Sec. 6.2.2 p. 228, Example 6.1 pp. 229-230
+inertia    Ch. 8  box / cylinder principal inertias, Steiner, rotated inertia (Sec. 8.2.1), spatial
+                  inertia G_b (8.32), G_a = [Ad_Tba]^T G_b [Ad_Tba] (8.42), kinetic energy
 dynamics   Ch. 8  2R Lagrangian (8.9)-(8.10) p. 273, Newton-Euler RNEA (8.50)-(8.55) pp. 292-293
+fwd_dynamics Ch. 8 2R forward dynamics M^-1 (tau - c - g) (Sec. 8.5), explicit / semi-implicit Euler step
+task_space Ch. 8  Lambda = J^-T M J^-1 (8.90), felt mass along a direction, reflected rotor inertia
+                  G^2 I_rotor (Sec. 8.9.2)
+constrained Ch. 8 Pfaffian constraint A(theta) dtheta = 0, Lagrange multiplier, constraint power (Sec. 8.7)
 trajectory Ch. 9  cubic (9.9)-(9.13) pp. 331-332, quintic p. 332 (Fig. 9.4 p. 333)
 control    Ch. 11 second-order error dynamics (11.8) p. 412, overshoot / settling pp. 414-415,
                   PD (11.25)-(11.26) p. 425, computed torque (11.33)-(11.35) p. 431
@@ -407,7 +413,7 @@ def _robot_visual(spec: RobotSpec, theta, ghost=None, frames=None) -> dict:
 
 
 def _rng(topic: str, seed: int, difficulty: int) -> np.random.Generator:
-    return np.random.default_rng([int(seed) & 0xFFFFFFFF, TOPIC_KEYS.index(topic), int(difficulty)])
+    return np.random.default_rng([int(seed) & 0xFFFFFFFF, _RNG_ID[topic], int(difficulty)])
 
 
 # ------------------------------------------------------------------------------------------------
@@ -1390,6 +1396,695 @@ def _verify_control(p: Problem) -> float:
 
 
 # ------------------------------------------------------------------------------------------------
+# Ch. 8 -- rigid-body inertia, forward dynamics, task-space mass matrix, constrained dynamics
+# ------------------------------------------------------------------------------------------------
+
+
+def arm_2r(L1, L2, m1, m2, rods: bool = False):
+    """2R arm in a vertical plane (gravity along -y_s).  ``rods=False``: point masses at the link tips (as
+    :func:`point_mass_2r`); ``rods=True``: uniform slender rods (centre of mass mid-link, centroidal inertia
+    mL²/12 about the axis parallel to the joints).  Returns (Mlist, Glist, Slist, g, params) where ``params``
+    feeds the closed-form :func:`lagrange_2r_general`."""
+    if not rods:
+        Mlist, Glist, Slist, g = point_mass_2r(L1, L2, m1, m2)
+        return Mlist, Glist, Slist, g, dict(L1=L1, lc1=L1, lc2=L2, m1=m1, m2=m2, I1=0.0, I2=0.0)
+    I1, I2 = m1 * L1**2 / 12, m2 * L2**2 / 12
+    Mlist = [mr.RpToTrans(np.eye(3), [L1 / 2, 0, 0]), mr.RpToTrans(np.eye(3), [(L1 + L2) / 2, 0, 0]),
+             mr.RpToTrans(np.eye(3), [L2 / 2, 0, 0])]
+    Glist = [np.diag([0, I1, I1, m1, m1, m1]), np.diag([0, I2, I2, m2, m2, m2])]
+    Slist = np.array([[0, 0, 1, 0, 0, 0], [0, 0, 1, 0, -L1, 0]], float).T
+    return (Mlist, Glist, Slist, np.array([0, -G, 0]),
+            dict(L1=L1, lc1=L1 / 2, lc2=L2 / 2, m1=m1, m2=m2, I1=I1, I2=I2))
+
+
+def lagrange_2r_general(L1, lc1, lc2, m1, m2, I1, I2, th, dth, g=G):
+    """Closed-form 2R dynamics (centres of mass at lc1, lc2 from the joints, centroidal inertias I1, I2 about
+    the joint-parallel axes, gravity along -y).  Independent of modern_robotics.  Returns (M, c, g(theta))."""
+    c1, c2, s2, c12 = np.cos(th[0]), np.cos(th[1]), np.sin(th[1]), np.cos(th[0] + th[1])
+    Mm = np.array([[m1 * lc1**2 + I1 + m2 * (L1**2 + lc2**2 + 2 * L1 * lc2 * c2) + I2,
+                    m2 * (lc2**2 + L1 * lc2 * c2) + I2],
+                   [m2 * (lc2**2 + L1 * lc2 * c2) + I2, m2 * lc2**2 + I2]])
+    a = m2 * L1 * lc2 * s2
+    c = np.array([-a * (2 * dth[0] * dth[1] + dth[1]**2), a * dth[0]**2])
+    gv = np.array([(m1 * lc1 + m2 * L1) * g * c1 + m2 * lc2 * g * c12, m2 * lc2 * g * c12])
+    return Mm, c, gv
+
+
+def _tip_jacobian_mr(L1, L2, th) -> np.ndarray:
+    """2x2 Jacobian of the tip's (x, y) velocity in {s}: rotate the linear rows of mr.JacobianBody."""
+    spec = _two_r_spec(L1, L2)
+    Tsb = mr.FKinBody(spec.M, spec.Blist, th)
+    return (Tsb[:3, :3] @ mr.JacobianBody(spec.Blist, th)[3:, :])[:2]
+
+
+def _tip_jacobian_closed(L1, L2, th) -> np.ndarray:
+    s1, c1, s12, c12 = np.sin(th[0]), np.cos(th[0]), np.sin(th.sum()), np.cos(th.sum())
+    return np.array([[-L1 * s1 - L2 * s12, -L2 * s12], [L1 * c1 + L2 * c12, L2 * c12]])
+
+
+def _arm_statement(L1, L2, m1, m2, rods: bool, gravity: bool = True) -> str:
+    plane = "a vertical plane (gravity $g = 9.81$ m/s² along $-\\hat{y}_s$)" if gravity else "a horizontal plane"
+    if rods:
+        return (f"A planar 2R arm moves in {plane}.  Its links are uniform slender rods: $L_1 = {num(L1)}$ m, "
+                f"$\\mathfrak{{m}}_1 = {num(m1)}$ kg and $L_2 = {num(L2)}$ m, $\\mathfrak{{m}}_2 = {num(m2)}$ kg "
+                "(centre of mass mid-link, centroidal inertia $\\mathfrak{m}L^{2}/12$ about the joint-parallel axis); "
+                "no joint friction.")
+    return (f"A planar 2R arm moves in {plane}.  Links of length $L_1 = {num(L1)}$ m and $L_2 = {num(L2)}$ m carry "
+            f"point masses $\\mathfrak{{m}}_1 = {num(m1)}$ kg and $\\mathfrak{{m}}_2 = {num(m2)}$ kg at their tips "
+            "(massless links); no joint friction.")
+
+
+def _mass_matrix_doc(doc: Doc, rods: bool, prm: dict, Mm):
+    if rods:
+        doc.p(f"Rod links: $l_{{c1}} = L_1/2 = {num(prm['lc1'])}$ m, $l_{{c2}} = L_2/2 = {num(prm['lc2'])}$ m, "
+              f"$\\mathcal{{I}}_1 = {num(prm['I1'], 5)}$ kg·m², $\\mathcal{{I}}_2 = {num(prm['I2'], 5)}$ kg·m²; the "
+              "Lagrangian gives")
+        doc.eq(r"M_{11} = \mathfrak{m}_1l_{c1}^{2} + \mathcal{I}_1 + \mathfrak{m}_2\left(L_1^{2} + l_{c2}^{2} + "
+               r"2L_1l_{c2}\cos\theta_2\right) + \mathcal{I}_2,\quad M_{12} = \mathfrak{m}_2\left(l_{c2}^{2} + "
+               r"L_1l_{c2}\cos\theta_2\right) + \mathcal{I}_2,\quad M_{22} = \mathfrak{m}_2l_{c2}^{2} + \mathcal{I}_2")
+    else:
+        doc.p("Point masses at the link tips, from (8.10):")
+        doc.eq(r"M_{11} = \mathfrak{m}_1L_1^{2} + \mathfrak{m}_2\left(L_1^{2} + 2L_1L_2\cos\theta_2 + L_2^{2}\right),"
+               r"\quad M_{12} = \mathfrak{m}_2\left(L_1L_2\cos\theta_2 + L_2^{2}\right),\quad M_{22} = "
+               r"\mathfrak{m}_2L_2^{2}")
+    doc.mat("M(\\theta)", Mm, 4)
+    doc.p("(`mr.MassMatrix`).")
+
+
+def _random_2r_arm(rng):
+    L1, L2 = _pick(rng, [0.5, 0.6, 0.8, 1.0]), _pick(rng, [0.4, 0.5, 0.6, 0.8])
+    m1, m2 = _pick(rng, [1.0, 1.5, 2.0, 3.0]), _pick(rng, [0.5, 1.0, 1.5, 2.0])
+    th = np.array([int(rng.integers(-3, 4)) * 30, int(rng.integers(1, 6)) * 30 * _pick(rng, [-1, 1])], float) * DEG
+    return float(L1), float(L2), float(m1), float(m2), th
+
+
+# -- rigid-body inertia ----------------------------------------------------------------------------
+
+_SIDES = [0.1, 0.2, 0.3, 0.4, 0.5, 0.6]
+_OMEGAS = [(0, 0, 1), (0, 0, 2), (1, 0, 0), (0, 2, 0), (1, 1, 0), (0, 1, 1), (1, 0, 2), (2, 0, -1), (-1, 2, 0)]
+_VELS = [(0, 0, 0), (0.5, 0, 0), (0, 0.5, 0), (0, 0, 1), (0.2, 0.4, 0), (1, 0, 0.5), (0, -0.3, 0.4)]
+
+
+def _shape_inertia(shape: str, m: float, dims) -> np.ndarray:
+    if shape == "box":
+        a, b, c = dims
+        return np.diag([m * (b * b + c * c) / 12, m * (a * a + c * c) / 12, m * (a * a + b * b) / 12])
+    r, h = dims
+    ixx = m * (3 * r * r + h * h) / 12
+    return np.diag([ixx, ixx, m * r * r / 2])
+
+
+def _shape_quadrature(shape: str, m: float, dims):
+    """Mass points and weights that integrate any polynomial of degree <= 2 (3 radially) over the solid exactly:
+    tensor Gauss-Legendre for the box; Gauss-Legendre in r (with the r dr Jacobian), 8 equal angles and
+    Gauss-Legendre in z for the cylinder.  Used by the independent inertia re-solve."""
+    g2 = np.array([-1.0, 1.0]) / np.sqrt(3.0)
+    if shape == "box":
+        a, b, c = dims
+        pts = np.array([[a / 2 * x, b / 2 * y, c / 2 * z] for x in g2 for y in g2 for z in g2])
+        return pts, np.full(len(pts), m / len(pts))
+    R, h = dims
+    rho = 1.0 / (np.pi * R * R * h)
+    phis = 2 * np.pi * np.arange(8) / 8
+    pts, w = [], []
+    for r in R / 2 * (1 + g2):
+        for ph in phis:
+            for z in h / 2 * g2:
+                pts.append([r * np.cos(ph), r * np.sin(ph), z])
+                w.append(m * rho * (R / 2) * r * (2 * np.pi / 8) * (h / 2))
+    return np.array(pts), np.array(w)
+
+
+def _shape_md(shape: str, m: float, dims) -> str:
+    if shape == "box":
+        a, b, c = dims
+        return (f"a solid rectangular block of mass $\\mathfrak{{m}} = {num(m)}$ kg with side lengths "
+                f"$a = {num(a)}$ m, $b = {num(b)}$ m, $c = {num(c)}$ m along $\\hat{{x}}_b$, $\\hat{{y}}_b$, "
+                "$\\hat{z}_b$")
+    r, h = dims
+    return (f"a solid circular cylinder of mass $\\mathfrak{{m}} = {num(m)}$ kg, radius $r = {num(r)}$ m and "
+            f"height $h = {num(h)}$ m, its axis along $\\hat{{z}}_b$")
+
+
+def _spatial(I, m) -> np.ndarray:
+    Gm = np.zeros((6, 6))
+    Gm[:3, :3] = I
+    Gm[3:, 3:] = m * np.eye(3)
+    return Gm
+
+
+def gen_inertia(seed: int, difficulty: int) -> Problem:
+    rng = _rng("inertia", seed, difficulty)
+    shape = _pick(rng, ["box", "cylinder"])
+    m = float(_pick(rng, [1.0, 2.0, 3.0, 4.0, 6.0]))
+    if shape == "box":
+        dims = tuple(float(_pick(rng, _SIDES)) for _ in range(3))
+    else:
+        dims = (float(_pick(rng, [0.05, 0.1, 0.15, 0.2])), float(_pick(rng, [0.2, 0.3, 0.4, 0.6])))
+    w = np.array(_pick(rng, _OMEGAS), float)
+    v = np.array(_pick(rng, _VELS), float)
+    V = np.r_[w, v]
+    R, p = np.eye(3), np.zeros(3)
+    if difficulty >= 2:
+        p = np.array([_pick(rng, [-0.3, -0.2, 0.2, 0.3, 0.4]), _pick(rng, [0.0, -0.1, 0.1, 0.2]),
+                      _pick(rng, [0.0, 0.1, 0.2, -0.2])])
+    ax, ang = None, 0.0
+    if difficulty == 3:
+        ax = _rand_axis(rng, bool(rng.random() < 0.5))
+        ang = int(rng.integers(1, 6)) * 30 * DEG
+        R = mr.MatrixExp3(mr.VecToso3(ax * ang))
+    Ib = _shape_inertia(shape, m, dims)
+    Gb = _spatial(Ib, m)
+
+    st = Doc()
+    st.p(f"A rigid body is {_shape_md(shape, m, dims)}.  Frame {{b}} sits at its centre of mass with axes along "
+         "the symmetry axes.")
+    if difficulty == 1:
+        st.p("**(a)** Find the principal moments of inertia and the rotational inertia matrix $\\mathcal{I}_b$.  "
+             "**(b)** Write the $6\\times 6$ spatial inertia matrix $\\mathcal{G}_b$.  **(c)** The body moves with "
+             f"twist $\\mathcal{{V}}_b = (\\omega_b, v_b)$, $\\omega_b = {vec(w)}$ rad/s, $v_b = {vec(v)}$ m/s "
+             "(expressed in {b}).  Compute its kinetic energy.")
+    else:
+        where = (f"has the same orientation as {{a}}" if difficulty == 2 else
+                 f"is rotated relative to {{a}} by $R_{{ab}} = \\mathrm{{Rot}}(\\hat{{\\omega}}, \\theta)$ with "
+                 f"$\\hat{{\\omega}} = {_axis_md(ax)}$, $\\theta = {mdeg(ang)}$")
+        st.p(f"A second frame {{a}} is attached to the same body; frame {{b}} {where}, and the origin of {{b}} "
+             f"(the centre of mass) is at $p = {vec(p)}$ m in {{a}} coordinates.")
+        parts = ["**(a)** Find $\\mathcal{I}_b$ and $\\mathcal{G}_b$."]
+        if difficulty == 3:
+            parts.append("**(b)** Express the centroidal inertia in axes parallel to {a}: "
+                         "$\\mathcal{I}_c = R_{ab}\\mathcal{I}_bR_{ab}^{T}$.")
+        k = "c" if difficulty == 3 else "b"
+        parts.append(f"**({k})** Use Steiner's theorem to find the rotational inertia $\\mathcal{{I}}_a$ about the "
+                     "origin of {a} (axes of {a}).")
+        k2 = "d" if difficulty == 3 else "c"
+        parts.append(f"**({k2})** Find the spatial inertia $\\mathcal{{G}}_a$ and the kinetic energy for the twist "
+                     f"$\\mathcal{{V}}_a = (\\omega_a, v_a)$, $\\omega_a = {vec(w)}$ rad/s, $v_a = {vec(v)}$ m/s "
+                     "(expressed in {a}).")
+        st.p("  ".join(parts))
+
+    steps = []
+    s1 = Doc()
+    if shape == "box":
+        s1.p("For a uniform rectangular block about its centre of mass the symmetry axes are principal axes and")
+        s1.eq(r"\mathcal{I}_{xx} = \frac{\mathfrak{m}}{12}(b^{2}+c^{2}),\quad \mathcal{I}_{yy} = \frac{\mathfrak{m}}{12}"
+              r"(a^{2}+c^{2}),\quad \mathcal{I}_{zz} = \frac{\mathfrak{m}}{12}(a^{2}+b^{2})")
+    else:
+        s1.p("For a uniform solid cylinder about its centre of mass the axis and any two perpendicular diameters are "
+             "principal axes and")
+        s1.eq(r"\mathcal{I}_{xx} = \mathcal{I}_{yy} = \frac{\mathfrak{m}}{12}(3r^{2}+h^{2}),\quad "
+              r"\mathcal{I}_{zz} = \frac{\mathfrak{m}r^{2}}{2}")
+    s1.p(f"Principal moments $({num(Ib[0, 0], 5)}, {num(Ib[1, 1], 5)}, {num(Ib[2, 2], 5)})$ kg·m², so "
+         "$\\mathcal{I}_b$ is diagonal:")
+    s1.mat("\\mathcal{I}_b", Ib, 5)
+    steps.append(Step("Principal inertias at the centre of mass", s1))
+    s2 = Doc()
+    s2.p("In the centre-of-mass frame the spatial inertia (8.32) is block-diagonal: $\\mathcal{I}_b$ in the "
+         "upper-left $3\\times 3$ block, $\\mathfrak{m}I$ in the lower-right one, zero coupling blocks.")
+    s2.mat("\\mathcal{G}_b", Gb, 5)
+    steps.append(Step("Spatial inertia in {b}", s2))
+    ans = dict(Ib=Ib, Gb=Gb)
+    if difficulty == 1:
+        KE = 0.5 * V @ Gb @ V
+        s3 = Doc()
+        s3.eq(r"K = \frac{1}{2}\mathcal{V}_b^{T}\mathcal{G}_b\mathcal{V}_b = \frac{1}{2}\omega_b^{T}\mathcal{I}_b"
+              r"\omega_b + \frac{1}{2}\mathfrak{m}v_b^{T}v_b")
+        rot, tr = 0.5 * w @ Ib @ w, 0.5 * m * v @ v
+        s3.p(f"Rotational part ${num(rot, 6)}$ J, translational part ${num(tr, 6)}$ J, so $K = {num(KE, 6)}$ J.  "
+             "(The split is valid because {b} is at the centre of mass.)")
+        steps.append(Step("Kinetic energy", s3))
+        ans["KE"] = KE
+        ad = Doc().p(f"Principal moments $({num(Ib[0, 0], 5)}, {num(Ib[1, 1], 5)}, {num(Ib[2, 2], 5)})$ kg·m², "
+                     f"$\\mathcal{{G}}_b = \\mathrm{{diag}}({', '.join(num(x, 5) for x in np.diag(Gb))})$, "
+                     f"$K = {num(KE, 6)}$ J.")
+        chap = "Ch. 8 (Sec. 8.2, eq. 8.32)"
+    else:
+        Ic = R @ Ib @ R.T
+        Ia = Ic + m * (p @ p * np.eye(3) - np.outer(p, p))
+        Tab = mr.RpToTrans(R, p)
+        Ad = mr.Adjoint(mr.TransInv(Tab))
+        Ga = Ad.T @ Gb @ Ad
+        KE = 0.5 * V @ Ga @ V
+        Vb = Ad @ V
+        if difficulty == 3:
+            s3 = Doc()
+            s3.p("Rotating the body-frame inertia into axes parallel to {a} (same centre of mass):")
+            s3.mat("R_{ab}", R, 4)
+            s3.eq(r"\mathcal{I}_c = R_{ab}\mathcal{I}_bR_{ab}^{T}")
+            s3.mat("\\mathcal{I}_c", Ic, 5)
+            s3.p("The trace (sum of principal moments) and the eigenvalues are unchanged by the rotation: "
+                 f"$\\mathrm{{tr}}\\,\\mathcal{{I}}_c = {num(np.trace(Ic), 5)}$.")
+            steps.append(Step("Rotated inertia", s3))
+            ans["Ic"] = Ic
+        s4 = Doc()
+        base = "\\mathcal{I}_c" if difficulty == 3 else "\\mathcal{I}_b"
+        s4.p(f"Steiner's theorem moves the reference point from the centre of mass by $p = {vec(p)}$ m "
+             f"($p^{{T}}p = {num(p @ p, 4)}$ m²):")
+        s4.eq(r"\mathcal{I}_a = " + base + r" + \mathfrak{m}\left(p^{T}p\,I - pp^{T}\right)")
+        s4.mat("\\mathfrak{m}\\left(p^{T}p\\,I - pp^{T}\\right)", m * (p @ p * np.eye(3) - np.outer(p, p)), 5)
+        s4.mat("\\mathcal{I}_a", Ia, 5)
+        steps.append(Step("Steiner's (parallel-axis) theorem", s4))
+        s5 = Doc()
+        s5.p("With $T_{ab} = (R_{ab}, p)$ and $T_{ba} = T_{ab}^{-1}$, the spatial inertia transforms as (8.42):")
+        s5.eq(r"\mathcal{G}_a = \left[\mathrm{Ad}_{T_{ba}}\right]^{T}\mathcal{G}_b\left[\mathrm{Ad}_{T_{ba}}\right]")
+        s5.mat("\\mathcal{G}_a", Ga, 5)
+        s5.p("Its upper-left $3\\times 3$ block is exactly $\\mathcal{I}_a$ from Steiner's theorem; the off-diagonal "
+             "blocks $\\mathfrak{m}[p]$ appear because {a} is not at the centre of mass.")
+        s5.eq(r"K = \frac{1}{2}\mathcal{V}_a^{T}\mathcal{G}_a\mathcal{V}_a = " + num(KE, 6) + r"\ \mathrm{J}")
+        s5.p(f"Check: $\\mathcal{{V}}_b = [\\mathrm{{Ad}}_{{T_{{ba}}}}]\\mathcal{{V}}_a = {vec(Vb, 4)}$ gives the same "
+             f"$\\frac{{1}}{{2}}\\mathcal{{V}}_b^{{T}}\\mathcal{{G}}_b\\mathcal{{V}}_b = {num(0.5 * Vb @ Gb @ Vb, 6)}$ J "
+             "(`mr.Adjoint`, `mr.TransInv`).")
+        steps.append(Step("Spatial inertia in {a} and kinetic energy", s5))
+        ans.update(Ia=Ia, Ga=Ga, KE=KE)
+        ad = Doc().p(f"Principal moments $({num(Ib[0, 0], 5)}, {num(Ib[1, 1], 5)}, {num(Ib[2, 2], 5)})$ kg·m²; "
+                     f"$K = {num(KE, 6)}$ J.")
+        ad.mat("\\mathcal{I}_a", Ia, 5)
+        chap = "Ch. 8 (Sec. 8.2, eqs. 8.32, 8.42)"
+    data = dict(shape=shape, m=m, dims=dims, R=R, p=p, V=V)
+    vis = dict(kind="frames", frames={"R": R, "T": mr.RpToTrans(R, p)}, axis=w / np.linalg.norm(w))
+    title = ("Inertia of a rigid body: principal moments and kinetic energy" if difficulty == 1 else
+             "Inertia of a rigid body: Steiner shift and spatial inertia")
+    return Problem("inertia", seed, difficulty, title, chap, st, data, steps, ans, ad, vis)
+
+
+def _verify_inertia(p: Problem) -> float:
+    """Re-solve by integrating over the solid with an exact quadrature rule (no inertia formulas, no Adjoint)."""
+    d, a = p.data, p.answer
+    pts, wts = _shape_quadrature(d["shape"], d["m"], d["dims"])
+    ra = pts @ np.asarray(d["R"]).T + d["p"]
+
+    def rot_inertia(r):
+        return sum(wi * (ri @ ri * np.eye(3) - np.outer(ri, ri)) for ri, wi in zip(r, wts))
+
+    def spatial(r):
+        out = np.zeros((6, 6))
+        for ri, wi in zip(r, wts):
+            B = np.hstack([-_skew(ri), np.eye(3)])      # velocity of the mass point = v - [r] w
+            out += wi * B.T @ B
+        return out
+
+    w, v = d["V"][:3], d["V"][3:]
+    KE = 0.5 * sum(wi * np.sum((v + np.cross(w, ri))**2) for ri, wi in zip(ra, wts))
+    e = max(np.abs(rot_inertia(pts) - a["Ib"]).max(), np.abs(spatial(pts) - a["Gb"]).max(), abs(KE - a["KE"]))
+    if "Ia" in a:
+        e = max(e, np.abs(rot_inertia(ra) - a["Ia"]).max(), np.abs(spatial(ra) - a["Ga"]).max())
+    if "Ic" in a:
+        e = max(e, np.abs(rot_inertia(pts @ np.asarray(d["R"]).T) - a["Ic"]).max())
+    return float(e)
+
+
+# -- forward dynamics and one integration step -----------------------------------------------------
+
+def gen_fwd_dynamics(seed: int, difficulty: int) -> Problem:
+    rng = _rng("fwd_dynamics", seed, difficulty)
+    L1, L2, m1, m2, th = _random_2r_arm(rng)
+    rods = difficulty == 3
+    dth = np.array([_pick(rng, [-1.0, -0.5, 0.0, 0.5, 1.0]), _pick(rng, [-1.0, 0.5, 1.0, 2.0])])
+    tau = np.array([_pick(rng, [-10.0, -5.0, 0.0, 5.0, 10.0, 20.0]), _pick(rng, [-4.0, -2.0, 0.0, 2.0, 5.0])])
+    dt = float(_pick(rng, [0.01, 0.02, 0.05]))
+    Mlist, Glist, Slist, gvec, prm = arm_2r(L1, L2, m1, m2, rods)
+    Mm = mr.MassMatrix(th, Mlist, Glist, Slist)
+    c = mr.VelQuadraticForces(th, dth, Mlist, Glist, Slist)
+    gt = mr.GravityForces(th, gvec, Mlist, Glist, Slist)
+    ddth = mr.ForwardDynamics(th, dth, tau, gvec, np.zeros(6), Mlist, Glist, Slist)
+
+    st = Doc()
+    st.p(_arm_statement(L1, L2, m1, m2, rods))
+    st.p(f"State: $\\theta = $ {degs(th)}, $\\dot{{\\theta}} = {vec(dth)}$ rad/s; the motors apply "
+         f"$\\tau = {vec(tau)}$ N·m.")
+    q = ("**(a)** Compute the mass matrix $M(\\theta)$, the velocity-product torques $c(\\theta,\\dot{\\theta})$ "
+         "and the gravity torques $g(\\theta)$.  **(b)** Solve the forward dynamics for the joint accelerations "
+         "$\\ddot{\\theta}$.")
+    if difficulty >= 2:
+        q += (f"  **(c)** Advance the state by one time step $\\Delta t = {num(dt)}$ s with (i) explicit Euler and "
+              "(ii) semi-implicit (symplectic) Euler, which uses the *updated* velocity to update the angles.")
+    st.p(q)
+
+    steps = []
+    s1 = Doc()
+    c1, c2, s2v, c12 = np.cos(th[0]), np.cos(th[1]), np.sin(th[1]), np.cos(th.sum())
+    s1.p(f"$\\cos\\theta_1 = {num(c1, 4)}$, $\\cos\\theta_2 = {num(c2, 4)}$, $\\sin\\theta_2 = {num(s2v, 4)}$, "
+         f"$\\cos(\\theta_1+\\theta_2) = {num(c12, 4)}$.")
+    _mass_matrix_doc(s1, rods, prm, Mm)
+    steps.append(Step("Mass matrix", s1))
+    s2 = Doc()
+    if rods:
+        s2.eq(r"c = \left(-\mathfrak{m}_2L_1l_{c2}\sin\theta_2\left(2\dot{\theta}_1\dot{\theta}_2 + \dot{\theta}_2^{2}"
+              r"\right),\ \mathfrak{m}_2L_1l_{c2}\sin\theta_2\,\dot{\theta}_1^{2}\right)")
+        s2.eq(r"g(\theta) = \left((\mathfrak{m}_1l_{c1} + \mathfrak{m}_2L_1)g\cos\theta_1 + \mathfrak{m}_2l_{c2}g"
+              r"\cos(\theta_1+\theta_2),\ \mathfrak{m}_2l_{c2}g\cos(\theta_1+\theta_2)\right)")
+    else:
+        s2.eq(r"c = \left(-\mathfrak{m}_2L_1L_2\sin\theta_2\left(2\dot{\theta}_1\dot{\theta}_2 + \dot{\theta}_2^{2}"
+              r"\right),\ \mathfrak{m}_2L_1L_2\dot{\theta}_1^{2}\sin\theta_2\right)")
+        s2.eq(r"g(\theta) = \left((\mathfrak{m}_1+\mathfrak{m}_2)L_1g\cos\theta_1 + \mathfrak{m}_2gL_2\cos(\theta_1+"
+              r"\theta_2),\ \mathfrak{m}_2gL_2\cos(\theta_1+\theta_2)\right)")
+    s2.p(f"$c = {vec(c, 4)}$ N·m (`mr.VelQuadraticForces`), $g(\\theta) = {vec(gt, 4)}$ N·m (`mr.GravityForces`).")
+    steps.append(Step("Velocity-product and gravity torques", s2))
+    s3 = Doc()
+    rhs = tau - c - gt
+    s3.p("The equations of motion $M\\ddot{\\theta} + c + g = \\tau$ are solved for the accelerations:")
+    s3.eq(r"\ddot{\theta} = M^{-1}(\theta)\left(\tau - c(\theta,\dot{\theta}) - g(\theta)\right)")
+    s3.p(f"$\\tau - c - g = {vec(rhs, 4)}$ N·m and")
+    s3.mat("M^{-1}", np.linalg.inv(Mm), 4)
+    s3.p(f"so $\\ddot{{\\theta}} = {vec(ddth, 4)}$ rad/s² (`mr.ForwardDynamics`).")
+    steps.append(Step("Forward dynamics", s3))
+    ans = dict(M=Mm, c=c, g=gt, ddtheta=ddth)
+    ad = Doc().p(f"$\\ddot{{\\theta}} = {vec(ddth, 4)}$ rad/s²  ($c = {vec(c, 4)}$, $g = {vec(gt, 4)}$ N·m).")
+    if difficulty >= 2:
+        th_e, dth_e = mr.EulerStep(th, dth, ddth, dt)
+        dth_s = dth + dt * ddth
+        th_s = th + dt * dth_s
+        s4 = Doc()
+        s4.p("Explicit Euler (`mr.EulerStep`) uses the old velocity for the angles:")
+        s4.eq(r"\theta_{k+1} = \theta_k + \Delta t\,\dot{\theta}_k,\quad \dot{\theta}_{k+1} = "
+              r"\dot{\theta}_k + \Delta t\,\ddot{\theta}_k")
+        s4.p("Semi-implicit Euler updates the velocity first and uses the new one:")
+        s4.eq(r"\dot{\theta}_{k+1} = \dot{\theta}_k + \Delta t\,\ddot{\theta}_k,\quad "
+              r"\theta_{k+1} = \theta_k + \Delta t\,\dot{\theta}_{k+1}")
+        s4.table(["method", r"$\theta_{k+1}$ [rad]", r"$\theta_{k+1}$ [°]", r"$\dot{\theta}_{k+1}$ [rad/s]"],
+                 [["explicit Euler (`mr.EulerStep`)", vec(th_e, 5), vec(np.degrees(th_e), 3), vec(dth_e, 5)],
+                  ["semi-implicit Euler", vec(th_s, 5), vec(np.degrees(th_s), 3), vec(dth_s, 5)]])
+        s4.p(f"Both give the same velocity; the angles differ by $\\Delta t^{{2}}\\ddot{{\\theta}} = "
+             f"{vec(th_s - th_e, 6)}$ rad.  Semi-implicit Euler is the usual choice for long simulations because it "
+             "keeps the energy error bounded, while explicit Euler tends to add energy.")
+        steps.append(Step("One Euler step", s4))
+        ans.update(theta_explicit=th_e, dtheta_explicit=dth_e, theta_semi=th_s, dtheta_semi=dth_s)
+        ad.p(f"Explicit Euler: $\\theta = {vec(th_e, 5)}$ rad, $\\dot{{\\theta}} = {vec(dth_e, 5)}$ rad/s; "
+             f"semi-implicit: $\\theta = {vec(th_s, 5)}$ rad, $\\dot{{\\theta}} = {vec(dth_s, 5)}$ rad/s.")
+    data = dict(L1=L1, L2=L2, m1=m1, m2=m2, rods=rods, theta=th, dtheta=dth, tau=tau, dt=dt)
+    title = ("Forward dynamics of a 2R arm" if difficulty == 1 else
+             "Forward dynamics of a 2R arm and one Euler step")
+    return Problem("fwd_dynamics", seed, difficulty, title, "Ch. 8 (eqs. 8.9–8.10, Sec. 8.5)", st, data, steps,
+                   ans, ad, _robot_visual(_two_r_spec(L1, L2), th))
+
+
+def _verify_fwd_dynamics(p: Problem) -> float:
+    d, a = p.data, p.answer
+    _, _, _, gvec, prm = arm_2r(d["L1"], d["L2"], d["m1"], d["m2"], d["rods"])
+    Mm, c, gv = lagrange_2r_general(**prm, th=d["theta"], dth=d["dtheta"])
+    ddth = np.linalg.solve(Mm, d["tau"] - c - gv)
+    e = max(np.abs(Mm - a["M"]).max(), np.abs(c - a["c"]).max(), np.abs(gv - a["g"]).max(),
+            np.abs(ddth - a["ddtheta"]).max())
+    # the accelerations reproduce the applied torques through Newton-Euler inverse dynamics
+    Mlist, Glist, Slist, gvec, _ = arm_2r(d["L1"], d["L2"], d["m1"], d["m2"], d["rods"])
+    tau = mr.InverseDynamics(d["theta"], d["dtheta"], a["ddtheta"], gvec, np.zeros(6), Mlist, Glist, Slist)
+    e = max(e, np.abs(tau - d["tau"]).max())
+    if "theta_explicit" in a:
+        dt = d["dt"]
+        e = max(e, np.abs(d["theta"] + dt * d["dtheta"] - a["theta_explicit"]).max(),
+                np.abs(d["dtheta"] + dt * ddth - a["dtheta_explicit"]).max(),
+                np.abs(d["dtheta"] + dt * ddth - a["dtheta_semi"]).max(),
+                np.abs(d["theta"] + dt * (d["dtheta"] + dt * ddth) - a["theta_semi"]).max())
+    return float(e)
+
+
+# -- task-space mass matrix, felt mass, reflected rotor inertia ------------------------------------
+
+_DIRS2 = [(1, 0), (0, 1), (1, 1), (1, -1), (3, 4), (4, -3), (-1, 1)]
+
+
+def _sci_tex(k: int, e: int) -> str:
+    return f"{k}\\times 10^{{{e}}}"
+
+
+def gen_task_space(seed: int, difficulty: int) -> Problem:
+    rng = _rng("task_space", seed, difficulty)
+    L1, L2, m1, m2, th = _random_2r_arm(rng)
+    rods = difficulty == 3
+    Mlist, Glist, Slist, _, prm = arm_2r(L1, L2, m1, m2, rods)
+    Mm = mr.MassMatrix(th, Mlist, Glist, Slist)
+    J = _tip_jacobian_mr(L1, L2, th)
+    Jinv = np.linalg.inv(J)
+    Lam = Jinv.T @ Mm @ Jinv
+    u = np.array(_pick(rng, _DIRS2), float)
+    u /= np.linalg.norm(u)
+
+    st = Doc()
+    st.p(_arm_statement(L1, L2, m1, m2, rods, gravity=False))
+    st.p(f"Configuration $\\theta = $ {degs(th)}.  Task coordinates are the tip position $x = (x, y)$ in {{s}}, with "
+         "$\\dot{x} = J(\\theta)\\dot{\\theta}$.")
+    q = ("**(a)** Find the tip Jacobian $J(\\theta)$ and the mass matrix $M(\\theta)$.  **(b)** Compute the task-space "
+         "mass matrix $\\Lambda = J^{-T}MJ^{-1}$.")
+    if difficulty >= 2:
+        q += (f"  **(c)** A person pushes the tip along the unit direction $\\hat{{u}} = {_axis_md(u)}$.  What mass do "
+              "they feel?  Give also the largest and smallest felt masses over all directions.")
+    if difficulty == 3:
+        k1, e1 = _pick(rng, [(1, -5), (2, -5), (5, -5), (1, -4)])
+        Ir = k1 * 10.0**e1
+        gr = np.array([float(_pick(rng, [20, 50, 80, 100])), float(_pick(rng, [20, 50, 80, 100]))])
+        q += (f"  **(d)** Each joint is driven through a gearbox: rotor inertia $\\mathcal{{I}}_{{rot}} = "
+              f"{_sci_tex(k1, e1)}$ kg·m², gear ratios $G_1 = {num(gr[0])}$, $G_2 = {num(gr[1])}$ (motor turns $G$ "
+              "times faster than the joint).  Including the reflected rotor inertias in the joint-space mass matrix "
+              "(neglect the rotor's gyroscopic coupling), how do $\\Lambda$ and the felt mass along $\\hat{u}$ change?")
+    st.p(q)
+
+    steps = []
+    s1 = Doc()
+    s1.p("Differentiating the tip position $(L_1\\cos\\theta_1 + L_2\\cos(\\theta_1+\\theta_2),\\ "
+         "L_1\\sin\\theta_1 + L_2\\sin(\\theta_1+\\theta_2))$:")
+    s1.eq(r"J_{11} = -L_1\sin\theta_1 - L_2\sin(\theta_1+\theta_2),\quad J_{12} = -L_2\sin(\theta_1+\theta_2)")
+    s1.eq(r"J_{21} = L_1\cos\theta_1 + L_2\cos(\theta_1+\theta_2),\quad J_{22} = L_2\cos(\theta_1+\theta_2)")
+    s1.mat("J", J, 4)
+    s1.p(f"(linear rows of `mr.JacobianBody` rotated into {{s}}).  $\\det J = L_1L_2\\sin\\theta_2 = "
+         f"{num(np.linalg.det(J), 4)}$ ≠ 0, so the configuration is not singular and $J^{{-1}}$ exists.")
+    _mass_matrix_doc(s1, rods, prm, Mm)
+    steps.append(Step("Jacobian and joint-space mass matrix", s1))
+    s2 = Doc()
+    s2.p("Kinetic energy must be the same in both coordinates, $\\frac{1}{2}\\dot{\\theta}^{T}M\\dot{\\theta} = "
+         "\\frac{1}{2}\\dot{x}^{T}\\Lambda\\dot{x}$, which gives (8.90):")
+    s2.eq(r"\Lambda(\theta) = J^{-T}(\theta)M(\theta)J^{-1}(\theta)")
+    s2.mat("J^{-1}", Jinv, 4)
+    s2.mat("\\Lambda", Lam, 4, "\\mathrm{kg}")
+    steps.append(Step("Task-space mass matrix", s2))
+    ans = dict(J=J, M=Mm, Lam=Lam)
+    ad = Doc().mat("\\Lambda", Lam, 4, "\\mathrm{kg}")
+    if difficulty >= 2:
+        Li = np.linalg.inv(Lam)
+        mu = 1.0 / (u @ Li @ u)
+        ev = np.linalg.eigvalsh(Lam)
+        s3 = Doc()
+        s3.p("A force $f$ applied at the tip produces the acceleration $\\ddot{x} = \\Lambda^{-1}f$ (from rest).  The "
+             "component along $\\hat{u}$ of the response to $f = \\hat{u}$ gives the felt (effective) mass:")
+        s3.eq(r"\mathfrak{m}_{\hat{u}} = \frac{1}{\hat{u}^{T}\Lambda^{-1}\hat{u}}")
+        s3.mat("\\Lambda^{-1}", Li, 4)
+        s3.p(f"$\\hat{{u}}^{{T}}\\Lambda^{{-1}}\\hat{{u}} = {num(u @ Li @ u, 5)}$, so $\\mathfrak{{m}}_{{\\hat{{u}}}} = "
+             f"{num(mu, 4)}$ kg.  Over all directions the felt mass ranges between the eigenvalues of $\\Lambda$: "
+             f"${num(ev[0], 4)}$ kg (lightest direction) to ${num(ev[1], 4)}$ kg (heaviest).")
+        steps.append(Step("Felt mass along a direction", s3))
+        ans.update(m_u=mu, Lam_eig=ev)
+        ad.p(f"Felt mass along $\\hat{{u}}$: ${num(mu, 4)}$ kg; range ${num(ev[0], 4)}$ – ${num(ev[1], 4)}$ kg.")
+    if difficulty == 3:
+        refl = gr**2 * Ir
+        Mr = Mm + np.diag(refl)
+        Lam_r = Jinv.T @ Mr @ Jinv
+        mu_r = 1.0 / (u @ np.linalg.inv(Lam_r) @ u)
+        s4 = Doc()
+        s4.p("A rotor spinning $G$ times faster than its joint stores kinetic energy "
+             "$\\frac{1}{2}\\mathcal{I}_{rot}(G\\dot{\\theta}_i)^{2}$, so it appears at the joint as the reflected "
+             "inertia $G^{2}\\mathcal{I}_{rot}$ (Sec. 8.9.2):")
+        s4.p(f"$G_1^{{2}}\\mathcal{{I}}_{{rot}} = {num(refl[0], 5)}$ kg·m², $G_2^{{2}}\\mathcal{{I}}_{{rot}} = "
+             f"{num(refl[1], 5)}$ kg·m², added to the diagonal of $M$:")
+        s4.mat("M_{rot}", Mr, 4)
+        s4.mat("\\Lambda_{rot} = J^{-T}M_{rot}J^{-1}", Lam_r, 4, "\\mathrm{kg}")
+        s4.p(f"Felt mass along $\\hat{{u}}$: ${num(mu_r, 4)}$ kg instead of ${num(mu, 4)}$ kg "
+             f"({num(100 * (mu_r / mu - 1), 2)}% more): with high gear ratios the motors, not the links, can dominate "
+             "what a person feels at the tip.")
+        steps.append(Step("Reflected rotor inertia", s4))
+        ans.update(M_rot=Mr, Lam_rot=Lam_r, m_u_rot=mu_r)
+        ad.p(f"With the rotors: felt mass ${num(mu_r, 4)}$ kg.")
+    data = dict(L1=L1, L2=L2, m1=m1, m2=m2, rods=rods, theta=th, u=u)
+    if difficulty == 3:
+        data.update(I_rot=Ir, gear=gr)
+    title = ("Task-space mass matrix of a 2R arm" if difficulty == 1 else
+             "Task-space mass matrix and felt mass" if difficulty == 2 else
+             "Task-space mass matrix, felt mass and reflected rotor inertia")
+    spec = _two_r_spec(L1, L2)
+    tip = mr.FKinBody(spec.M, spec.Blist, th)
+    return Problem("task_space", seed, difficulty, title, "Ch. 8 (Sec. 8.6, eq. 8.90; Sec. 8.9.2)", st, data, steps,
+                   ans, ad, _robot_visual(spec, th, frames={"tip": tip}))
+
+
+def _verify_task_space(p: Problem) -> float:
+    d, a = p.data, p.answer
+    _, _, _, _, prm = arm_2r(d["L1"], d["L2"], d["m1"], d["m2"], d["rods"])
+    Mm, _, _ = lagrange_2r_general(**prm, th=d["theta"], dth=np.zeros(2))
+    J = _tip_jacobian_closed(d["L1"], d["L2"], d["theta"])
+    Lam = np.linalg.inv(J @ np.linalg.solve(Mm, J.T))           # (J M^-1 J^T)^-1, no explicit J^-1
+    e = max(np.abs(J - a["J"]).max(), np.abs(Mm - a["M"]).max(), np.abs(Lam - a["Lam"]).max())
+
+    def felt(Mq):
+        """Least kinetic energy (x2) to give the tip unit speed along u: KKT of min th'^T M th' s.t. u^T J th' = 1."""
+        Ju = d["u"] @ J
+        K = np.block([[2 * Mq, -Ju[:, None]], [Ju[None, :], np.zeros((1, 1))]])
+        sol = np.linalg.solve(K, np.r_[0.0, 0.0, 1.0])
+        return float(sol[:2] @ Mq @ sol[:2])
+
+    if "m_u" in a:
+        e = max(e, abs(felt(Mm) - a["m_u"]), np.abs(np.sort(np.linalg.eigvals(Lam).real) - a["Lam_eig"]).max())
+    if "m_u_rot" in a:
+        Mr = Mm + np.diag(d["gear"]**2 * d["I_rot"])
+        e = max(e, np.abs(Mr - a["M_rot"]).max(), abs(felt(Mr) - a["m_u_rot"]),
+                np.abs(np.linalg.inv(J @ np.linalg.solve(Mr, J.T)) - a["Lam_rot"]).max())
+    return float(e)
+
+
+# -- constrained dynamics with a Pfaffian constraint -----------------------------------------------
+
+def _tip_quadratic_accel(L1, L2, th, dth) -> np.ndarray:
+    """J-dot(theta) theta-dot for the tip of a 2R arm (centripetal part of the tip acceleration)."""
+    w1, w12 = dth[0], dth[0] + dth[1]
+    return np.array([-L1 * np.cos(th[0]) * w1**2 - L2 * np.cos(th.sum()) * w12**2,
+                     -L1 * np.sin(th[0]) * w1**2 - L2 * np.sin(th.sum()) * w12**2])
+
+
+def gen_constrained(seed: int, difficulty: int) -> Problem:
+    rng = _rng("constrained", seed, difficulty)
+    L1, L2, m1, m2, th = _random_2r_arm(rng)
+    rods = difficulty == 2
+    tau = np.array([_pick(rng, [-10.0, -5.0, 0.0, 5.0, 10.0, 20.0]), _pick(rng, [-4.0, -2.0, 0.0, 2.0, 5.0])])
+    Mlist, Glist, Slist, gvec, prm = arm_2r(L1, L2, m1, m2, rods)
+
+    st = Doc()
+    st.p(_arm_statement(L1, L2, m1, m2, rods))
+    steps = []
+    s1 = Doc()
+    if difficulty < 3:
+        kind = "orientation"
+        A = np.array([[1.0, 1.0]])
+        if difficulty == 1:
+            dth = np.zeros(2)
+        else:
+            wv = float(_pick(rng, [-1.5, -1.0, -0.5, 0.5, 1.0, 1.5]))
+            dth = np.array([wv, -wv])
+        adq = np.zeros(1)
+        st.p("A guide holds the tool (link 2) at a constant orientation $\\phi = \\theta_1 + \\theta_2$, i.e. the "
+             "Pfaffian velocity constraint $A\\dot{\\theta} = \\dot{\\theta}_1 + \\dot{\\theta}_2 = 0$.")
+        st.p(f"State: $\\theta = $ {degs(th)}, $\\dot{{\\theta}} = {vec(dth)}$ rad/s (consistent with the constraint); "
+             f"motor torques $\\tau = {vec(tau)}$ N·m.")
+        s1.p("$A = [1\\ \\ 1]$ is constant, so $\\dot{A} = 0$ and differentiating the constraint gives "
+             "$A\\ddot{\\theta} = 0$.  The constraint torque $A^{T}\\lambda = (\\lambda, \\lambda)$ is a pure moment "
+             "$\\lambda$ exerted by the guide on link 2.")
+        s1.p(f"Check: $A\\dot{{\\theta}} = {num((A @ dth)[0], 6)}$.")
+    else:
+        kind = "line"
+        dvec = np.array(_pick(rng, [(1, 0), (0, 1), (1, 1), (1, -1)]), float)
+        dvec /= np.linalg.norm(dvec)
+        nvec = np.array([-dvec[1], dvec[0]])
+        vt = float(_pick(rng, [-0.5, -0.3, 0.2, 0.4, 0.5]))
+        J = _tip_jacobian_mr(L1, L2, th)
+        A = (nvec @ J)[None, :]
+        dth = np.linalg.solve(J, vt * dvec)
+        adq = np.array([nvec @ _tip_quadratic_accel(L1, L2, th, dth)])
+        st.p(f"The tip slides without friction along a straight guide rail with unit direction $\\hat{{d}} = "
+             f"{_axis_md(dvec)}$ (normal $\\hat{{n}} = {_axis_md(nvec)}$): the tip velocity has no component along "
+             "$\\hat{n}$, i.e. $A(\\theta)\\dot{\\theta} = \\hat{n}^{T}J(\\theta)\\dot{\\theta} = 0$.")
+        st.p(f"State: $\\theta = $ {degs(th)} with the tip moving along the rail at $\\dot{{x}} = {num(vt)}\\,\\hat{{d}}$ "
+             f"m/s; motor torques $\\tau = {vec(tau)}$ N·m.")
+        s1.mat("J", J, 4)
+        s1.p(f"$A = \\hat{{n}}^{{T}}J = {vec(A[0], 4)}$ and the joint velocities that move the tip at "
+             f"${num(vt)}\\,\\hat{{d}}$ m/s are $\\dot{{\\theta}} = J^{{-1}}({num(vt)}\\hat{{d}}) = {vec(dth, 4)}$ rad/s "
+             f"(check $A\\dot{{\\theta}} = {num((A @ dth)[0], 6)}$).")
+        s1.p("$A$ depends on $\\theta$, so the differentiated constraint is $A\\ddot{\\theta} + \\dot{A}\\dot{\\theta} = 0$ "
+             "with $\\dot{A}\\dot{\\theta} = \\hat{n}^{T}\\dot{J}\\dot{\\theta}$, the normal component of the "
+             "centripetal tip acceleration:")
+        s1.eq(r"\dot{J}\dot{\theta} = -\left(L_1\cos\theta_1\dot{\theta}_1^{2} + L_2\cos(\theta_1+\theta_2)"
+              r"\dot{\phi}^{2},\ L_1\sin\theta_1\dot{\theta}_1^{2} + L_2\sin(\theta_1+\theta_2)\dot{\phi}^{2}\right),"
+              r"\quad \dot{\phi} = \dot{\theta}_1 + \dot{\theta}_2")
+        s1.p(f"$\\dot{{J}}\\dot{{\\theta}} = {vec(_tip_quadratic_accel(L1, L2, th, dth), 4)}$ m/s², so "
+             f"$\\dot{{A}}\\dot{{\\theta}} = {num(adq[0], 5)}$.  The constraint torque $A^{{T}}\\lambda = "
+             "J^{T}(\\lambda\\hat{n})$ is the rail's normal force $\\lambda\\hat{n}$ (N) at the tip.")
+    q = ("Write the equations of motion with the sign convention $M\\ddot{\\theta} + c + g = \\tau + A^{T}\\lambda$, "
+         "where $A^{T}\\lambda$ are the joint torques produced by the constraint.  **(a)** Find the Lagrange "
+         "multiplier $\\lambda$.  **(b)** Find the constrained accelerations $\\ddot{\\theta}$.  **(c)** Show that "
+         "the constraint torques do no work.")
+    if difficulty >= 2:
+        q += "  **(d)** Compare with the accelerations the arm would have without the constraint."
+    st.p(q)
+    steps.append(Step("Constraint matrix", s1))
+
+    Mm = mr.MassMatrix(th, Mlist, Glist, Slist)
+    c = mr.VelQuadraticForces(th, dth, Mlist, Glist, Slist)
+    gt = mr.GravityForces(th, gvec, Mlist, Glist, Slist)
+    h = c + gt
+    Minv = np.linalg.inv(Mm)
+    s2 = Doc()
+    _mass_matrix_doc(s2, rods, prm, Mm)
+    s2.p(f"$h = c + g = {vec(c, 4)} + {vec(gt, 4)} = {vec(h, 4)}$ N·m (`mr.VelQuadraticForces`, "
+         "`mr.GravityForces`).")
+    steps.append(Step("Mass matrix and bias torques", s2))
+
+    AMA = (A @ Minv @ A.T)[0, 0]
+    lam = (-adq[0] - (A @ Minv @ (tau - h))[0]) / AMA
+    ddth = Minv @ (tau - h + A[0] * lam)
+    tcon = A[0] * lam
+    power = float(tcon @ dth)
+    ddth_free = Minv @ (tau - h)
+    s3 = Doc()
+    s3.p("Substitute $\\ddot{\\theta} = M^{-1}(\\tau - h + A^{T}\\lambda)$ into the differentiated constraint "
+         "$A\\ddot{\\theta} = -\\dot{A}\\dot{\\theta}$ (Sec. 8.7) and solve for the multiplier:")
+    s3.eq(r"\lambda = \left(AM^{-1}A^{T}\right)^{-1}\left(-\dot{A}\dot{\theta} - AM^{-1}(\tau - h)\right)")
+    s3.p(f"$AM^{{-1}}A^{{T}} = {num(AMA, 5)}$, $AM^{{-1}}(\\tau - h) = {num((A @ Minv @ (tau - h))[0], 5)}$, so "
+         f"$\\lambda = {num(lam, 4)}$ {'N·m' if kind == 'orientation' else 'N'}.")
+    steps.append(Step("Lagrange multiplier", s3))
+    s4 = Doc()
+    s4.p(f"Constraint torques $A^{{T}}\\lambda = {vec(tcon, 4)}$ N·m and")
+    s4.eq(r"\ddot{\theta} = M^{-1}\left(\tau - h + A^{T}\lambda\right) = " + vec(ddth, 4) + r"\ \mathrm{rad/s^{2}}")
+    s4.p(f"Check: $A\\ddot{{\\theta}} + \\dot{{A}}\\dot{{\\theta}} = {num((A @ ddth)[0] + adq[0], 8)}$.  Power of the "
+         f"constraint torques: $(A^{{T}}\\lambda)^{{T}}\\dot{{\\theta}} = \\lambda\\,A\\dot{{\\theta}} = {num(power, 8)}$ W "
+         "— the constraint does no work because it only acts in the directions the arm is not allowed to move.")
+    steps.append(Step("Constrained accelerations and power", s4))
+    ans = dict(A=A, Adot_dtheta=adq, lam=lam, ddtheta=ddth, tau_con=tcon, power=power)
+    unit = "N·m" if kind == "orientation" else "N"
+    ad = Doc().p(f"$\\lambda = {num(lam, 4)}$ {unit}, $\\ddot{{\\theta}} = {vec(ddth, 4)}$ rad/s², constraint torques "
+                 f"${vec(tcon, 4)}$ N·m, constraint power $0$.")
+    if difficulty >= 2:
+        s5 = Doc()
+        s5.p(f"Without the constraint $\\ddot{{\\theta}}_{{free}} = M^{{-1}}(\\tau - h) = {vec(ddth_free, 4)}$ rad/s², "
+             f"which violates it: $A\\ddot{{\\theta}}_{{free}} + \\dot{{A}}\\dot{{\\theta}} = "
+             f"{num((A @ ddth_free)[0] + adq[0], 4)}$.")
+        steps.append(Step("(d) Unconstrained comparison", s5))
+        ans["ddtheta_free"] = ddth_free
+        ad.p(f"(d) Unconstrained: $\\ddot{{\\theta}}_{{free}} = {vec(ddth_free, 4)}$ rad/s².")
+    data = dict(L1=L1, L2=L2, m1=m1, m2=m2, rods=rods, theta=th, dtheta=dth, tau=tau, kind=kind)
+    if kind == "line":
+        data.update(d=dvec, n=nvec, v=vt)
+    title = ("Constrained dynamics: constant tool orientation" if kind == "orientation" else
+             "Constrained dynamics: tip on a guide rail")
+    return Problem("constrained", seed, difficulty, title, "Ch. 8 (Sec. 8.7)", st, data, steps, ans, ad,
+                   _robot_visual(_two_r_spec(L1, L2), th))
+
+
+def _verify_constrained(p: Problem) -> float:
+    """Closed-form Lagrangian, A(theta) from the closed-form Jacobian, A-dot theta-dot by central differences, and
+    the joint KKT system [[M, -A^T], [A, 0]] (theta-dd, lambda) = (tau - h, -A-dot theta-dot) solved at once."""
+    d, a = p.data, p.answer
+    th, dth = d["theta"], d["dtheta"]
+    _, _, _, _, prm = arm_2r(d["L1"], d["L2"], d["m1"], d["m2"], d["rods"])
+    Mm, c, gv = lagrange_2r_general(**prm, th=th, dth=dth)
+
+    def A_of(t):
+        if d["kind"] == "orientation":
+            return np.array([1.0, 1.0])
+        return d["n"] @ _tip_jacobian_closed(d["L1"], d["L2"], t)
+
+    A = A_of(th)
+    eps = 1e-5
+    adq = (A_of(th + eps * dth) - A_of(th - eps * dth)) / (2 * eps) @ dth
+    K = np.block([[Mm, -A[:, None]], [A[None, :], np.zeros((1, 1))]])
+    sol = np.linalg.solve(K, np.r_[d["tau"] - c - gv, -adq])
+    ddth, lam = sol[:2], sol[2]
+    tcon = A * lam
+    e = max(np.abs(A - a["A"][0]).max(), abs(adq - a["Adot_dtheta"][0]), abs(lam - a["lam"]),
+            np.abs(ddth - a["ddtheta"]).max(), np.abs(tcon - a["tau_con"]).max(),
+            abs(tcon @ dth), abs(a["power"]), abs(A @ dth))
+    if d["kind"] == "line":
+        e = max(e, np.abs(_tip_jacobian_closed(d["L1"], d["L2"], th) @ dth - d["v"] * d["d"]).max())
+    if "ddtheta_free" in a:
+        e = max(e, np.abs(np.linalg.solve(Mm, d["tau"] - c - gv) - a["ddtheta_free"]).max())
+    return float(e)
+
+
+# ------------------------------------------------------------------------------------------------
 # registry and public API
 # ------------------------------------------------------------------------------------------------
 
@@ -1398,13 +2093,25 @@ TOPICS: dict[str, dict] = {
     "fk": dict(title="PoE forward kinematics, space & body (Ch. 4)", gen=gen_fk, verify=_verify_fk),
     "jacobian": dict(title="Space / body Jacobian & singularities (Ch. 5)", gen=gen_jacobian, verify=_verify_jacobian),
     "ik": dict(title="Newton–Raphson IK iteration table (Ch. 6)", gen=gen_ik, verify=_verify_ik),
+    "inertia": dict(title="Rigid-body inertia: principal moments, Steiner, spatial inertia (Ch. 8)", gen=gen_inertia,
+                    verify=_verify_inertia),
     "dynamics": dict(title="2R dynamics: Lagrange mass matrix / RNEA torques (Ch. 8)", gen=gen_dynamics,
                      verify=_verify_dynamics),
+    "fwd_dynamics": dict(title="2R forward dynamics and an Euler step (Ch. 8)", gen=gen_fwd_dynamics,
+                         verify=_verify_fwd_dynamics),
+    "task_space": dict(title="Task-space mass matrix, felt mass, reflected inertia (Ch. 8)", gen=gen_task_space,
+                       verify=_verify_task_space),
+    "constrained": dict(title="Constrained dynamics: Pfaffian constraint, Lagrange multiplier (Ch. 8)",
+                        gen=gen_constrained, verify=_verify_constrained),
     "trajectory": dict(title="Cubic / quintic time scaling (Ch. 9)", gen=gen_trajectory, verify=_verify_trajectory),
     "control": dict(title="PD / computed-torque error dynamics ζ, ωₙ (Ch. 11)", gen=gen_control,
                     verify=_verify_control),
 }
 TOPIC_KEYS = list(TOPICS)
+#: fixed random-stream id per topic (topics are listed by chapter, but a seed keeps giving the same problem
+#: when topics are added or reordered)
+_RNG_ID = {"rotation": 0, "fk": 1, "jacobian": 2, "ik": 3, "dynamics": 4, "trajectory": 5, "control": 6,
+           "inertia": 7, "fwd_dynamics": 8, "task_space": 9, "constrained": 10}
 MIXED = "mixed"
 
 
@@ -1429,8 +2136,8 @@ def version_label(v: int) -> str:
 
 
 def problem_set(n: int, topic: str = MIXED, difficulty: int = 2, seed: int = 1, version: int = 0) -> list[Problem]:
-    """``n`` problems.  With topic "mixed" problem k is on topic k mod 7, so every quiz version has the same
-    topic per question; versions differ only in their numbers (seed offset)."""
+    """``n`` problems.  With topic "mixed" problem k is on topic k mod len(TOPICS), so every quiz version has the
+    same topic per question; versions differ only in their numbers (seed offset)."""
     out = []
     for k in range(n):
         tp = TOPIC_KEYS[k % len(TOPIC_KEYS)] if topic == MIXED else topic
@@ -1498,7 +2205,8 @@ def validation_checks() -> list[Check]:
     out: list[Check] = []
     cat = "Practice problems"
     chap = {"rotation": "MR 3.2–3.3", "fk": "MR 4.1", "jacobian": "MR 5.1–5.3", "ik": "MR 6.2",
-            "dynamics": "MR 8.1, 8.3", "trajectory": "MR 9.2", "control": "MR 11.2–11.4"}
+            "dynamics": "MR 8.1, 8.3", "trajectory": "MR 9.2", "control": "MR 11.2–11.4", "inertia": "MR 8.2",
+            "fwd_dynamics": "MR 8.1, 8.5", "task_space": "MR 8.6, 8.9.2", "constrained": "MR 8.7"}
     how = {"rotation": "SciPy Rotation / expm vs mr.MatrixExp3/Log3/Exp6/Log6",
            "fk": "screw axes rebuilt as q×ω, SciPy expm products (space and M⁻¹[S]M body form) vs mr.FKinSpace",
            "jacobian": "central finite differences of the PoE map (SciPy expm) vs mr.JacobianSpace/Body; rank decision",
@@ -1506,7 +2214,14 @@ def validation_checks() -> list[Check]:
            "dynamics": "closed-form Lagrangian (8.9)-(8.10) vs mr.MassMatrix / VelQuadraticForces / GravityForces / "
                        "InverseDynamics",
            "trajectory": "polynomial re-solved from its boundary conditions; peaks by dense sampling vs mr time scaling",
-           "control": "ζ, ωn from the eigenvalues of the error-dynamics matrix; overshoot from solve_ivp"}
+           "control": "ζ, ωn from the eigenvalues of the error-dynamics matrix; overshoot from solve_ivp",
+           "inertia": "exact Gauss quadrature over the solid (inertia, G, kinetic energy of the mass points) vs "
+                      "closed-form principal moments, Steiner and mr.Adjoint (8.42)",
+           "fwd_dynamics": "closed-form Lagrangian solve vs mr.ForwardDynamics; θ̈ fed back through "
+                           "mr.InverseDynamics; Euler steps recomputed",
+           "task_space": "Λ = (J M⁻¹ Jᵀ)⁻¹ from the closed-form J and M; felt mass as a minimum-energy KKT solve",
+           "constrained": "KKT system [[M, −Aᵀ], [A, 0]] with the closed-form Lagrangian and Ȧθ̇ by central "
+                          "differences vs the multiplier formula"}
     for t in TOPIC_KEYS:
         err, n = 0.0, 0
         for d in (1, 2, 3):

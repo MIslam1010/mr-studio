@@ -123,7 +123,7 @@ generated automatically, and a robot you build is then validated by the ⑭ Vali
 | **⑩ Planning** | Motion planning for the planar 2R / 3R arms: configuration-space obstacles, grid search (Dijkstra, A*), sampling planners (PRM, RRT, RRT*), shortcut smoothing, and time scaling of the planned path. | Ch. 10, 9 |
 | **⑪ Haptics** | A Hapkit-type 1-DOF haptic paddle rendering sampled-data virtual walls and springs (impedance and admittance rendering) with a user-hand model, passivity / stability indicators and the energy-leak plot. | Sec. 11.7 |
 | **⑫ Hardware** | Hardware bridge for the course arm (or its simulation): streams a joint trajectory at 50 Hz, logs commanded vs measured joints in the SBEG 361 / 461 CSV formats, enforces the safety checklist and computes the hardware acceptance tests HW-2 … HW-6. See *Hardware bridge* below. | — |
-| **⑬ Practice** | Randomised exercises with worked solutions and quiz export. | Ch. 3–11 |
+| **⑬ Practice** | Randomised exercises with worked solutions and quiz export: 11 topics, including Ch. 8 rigid-body inertia, forward dynamics with an Euler step, the task-space mass matrix (felt mass, reflected rotor inertia) and constrained dynamics with a Lagrange multiplier. | Ch. 3–11 |
 | **⑭ Validation** | One-click cross-validation of everything above (500+ checks), with a colour-coded table, a details pane per check, a theory panel and an HTML report export. | Ch. 4–9, 11 |
 
 ### Hardware bridge (tab ⑫)
