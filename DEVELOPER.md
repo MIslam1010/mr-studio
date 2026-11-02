@@ -23,6 +23,9 @@ Pins: `requirements.txt` is the source of the validated versions; `packaging/req
 (.github/workflows/dependabot-sync.yml) runs the same script on it, commits the result to the pull request and starts the full
 CI (build.yml) on its branch. Dependabot no longer rebases a pull request that has such a commit: comment `@dependabot recreate`
 to start over, or run the script yourself and push.
+Branch protection on `main`: a change must have a green `tests (ubuntu)` check before it lands, and force pushes and
+deleting `main` are blocked. `enforce_admins` is off, so the repository owner can still push directly; run build.yml on the
+branch first (`gh workflow run build.yml --ref <branch>`) and fast-forward `main` only when it is green.
 Course robots (SBEG 361/461) live in `mrstudio/course_models.py`; hardware drivers in `mrstudio/hardware/`; installers in `packaging/`.
 Look at the PNG with the Read tool. A broken tab shows its traceback inside the tab (see `gui/app.py`).
 
