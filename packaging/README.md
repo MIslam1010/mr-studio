@@ -108,6 +108,7 @@ console, so read `st.txt`. Normal options also work: `--robot`, `--tab`, `--proj
 | `build_macos.sh`, `build_windows.ps1` | One-command builds |
 | `requirements-build.txt` | PyInstaller and its hooks, pinned to the tested versions (only needed to build) and pyserial (bundled for the Hardware / Haptics serial ports) |
 | `requirements-lock.txt` | `pip freeze` of the tested macOS venv (constraints for reproducible builds) |
+| `sync_pins.py` | copies the pins of `requirements.txt` into `requirements-lock.txt` and the lock's versions into `THIRD_PARTY_NOTICES.md` (`--check`: report only) |
 | `icon.png`, `make_icon.py` | App icon (1024×1024, drawn with Qt). PyInstaller converts it to `.icns` and `.ico` |
 
 What gets bundled:

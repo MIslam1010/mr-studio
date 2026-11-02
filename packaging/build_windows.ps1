@@ -90,7 +90,15 @@ if ($p.ExitCode -ne 0) { throw "self-test of the frozen app failed (exit code $(
 Write-Host "==> Portable zip"
 $Zip = Join-Path $Dist "MR-Studio-$Version-Windows-x64.zip"
 if (Test-Path $Zip) { Remove-Item $Zip }
-Compress-Archive -Path $AppDir -DestinationPath $Zip
+# 7-Zip (on GitHub's Windows runners, and on many PCs) is several times faster than Compress-Archive; -mx=3 is a
+# fast deflate level (the installer, not the zip, is the small download). Fall back to Compress-Archive without it.
+$SevenZip = (Get-Command 7z -ErrorAction SilentlyContinue).Source
+if (-not $SevenZip -and (Test-Path "$env:ProgramFiles\7-Zip\7z.exe")) { $SevenZip = "$env:ProgramFiles\7-Zip\7z.exe" }
+if ($SevenZip) {
+    Invoke-Checked $SevenZip @("a", "-tzip", "-mx=3", "-mmt=on", "-bso0", "-bsp0", $Zip, $AppDir)
+} else {
+    Compress-Archive -Path $AppDir -DestinationPath $Zip
+}
 
 Write-Host "==> Installer (Inno Setup)"
 $Iscc = (Get-Command iscc -ErrorAction SilentlyContinue).Source

@@ -4,7 +4,8 @@
     MRStudio --self-test [--report FILE]
                                   headless smoke test of the *bundle*: every library imports, Pinocchio and
                                   Modern Robotics agree on the UR5 dynamics, the Corke DH models and the
-                                  bundled URDFs load, equations render, ffmpeg is present, every tab imports.
+                                  bundled URDFs load, equations render, ffmpeg encodes and re-reads a short
+                                  H.264 MP4, every tab imports.
                                   Exit code 0 = OK. Used by the build scripts and CI after freezing.
     MRStudio --validate [--report FILE]
                                   run the full cross-validation suite (the Validation tab) headless.
@@ -196,6 +197,40 @@ def self_test(report: str | None = None, tabs: bool = True) -> int:
             raise FileNotFoundError(exe)
         return os.path.basename(exe)
     _step(rep, "ffmpeg binary for MP4 recording", _ffmpeg)
+
+    def _mp4():
+        """Encode a short clip with the Record button's settings and read it back (ffmpeg really runs)."""
+        import tempfile
+
+        import imageio.v2 as iio
+        import numpy as np
+        from mrstudio.video import open_writer
+        n, fps = 30, 30
+        fd, path = tempfile.mkstemp(prefix="mrstudio_selftest_", suffix=".mp4")
+        os.close(fd)
+        try:
+            writer = open_writer(path, fps)
+            try:
+                for i in range(n):
+                    frame = np.zeros((64, 64, 3), np.uint8)
+                    frame[:, : 2 * (i + 1)] = (255, 128, 0)   # a moving edge: every frame differs
+                    writer.append_data(frame)
+            finally:
+                writer.close()
+            reader = iio.get_reader(path)
+            try:
+                got_fps, got_n = reader.get_meta_data().get("fps"), reader.count_frames()
+            finally:
+                reader.close()
+            if got_fps is None or abs(float(got_fps) - fps) > 1e-6 or got_n != n:
+                raise AssertionError(f"wrote {n} frames @ {fps} fps, read back {got_n} frames @ {got_fps} fps")
+            return f"{got_n} frames @ {float(got_fps):g} fps, {os.path.getsize(path) / 1024:.1f} kB"
+        finally:
+            try:
+                os.remove(path)
+            except OSError:
+                pass
+    _step(rep, "MP4 (H.264) round trip with the recorder's settings", _mp4)
 
     def _toppra():
         import numpy as np

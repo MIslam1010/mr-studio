@@ -154,12 +154,10 @@ class Recorder(QtCore.QObject):
             self._error = str(e)
 
     def _encode_loop(self, path, fps, q, stop_evt):
-        import imageio.v2 as iio
+        from mrstudio.video import open_writer
         writer = None
         try:
-            writer = iio.get_writer(path, fps=fps, codec="libx264", quality=8, pixelformat="yuv420p",
-                                    macro_block_size=2, ffmpeg_log_level="error",
-                                    ffmpeg_params=["-preset", "veryfast", "-tune", "animation"])
+            writer = open_writer(path, fps)
             while True:
                 try:
                     item = q.get(timeout=0.05)

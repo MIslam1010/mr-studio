@@ -10,36 +10,17 @@ updates:
     groups:
       actions:
         patterns: ["*"]
+  # ONE pip entry for both directories, ONE group: requirements.txt (/) and packaging/requirements-lock.txt
+  # (/packaging) must carry the same pins (tests/test_packaging.py), so a bump has to change both in the same
+  # pull request; two entries produced two pull requests that each failed that test. The
+  # "dependabot pin sync" workflow then runs packaging/sync_pins.py on the pull request (lock <- requirements.txt,
+  # THIRD_PARTY_NOTICES.md <- lock) for whatever Dependabot did not bump alike.
   - package-ecosystem: pip
-    directory: /
+    directories: ["/", "/packaging"]
     schedule:
       interval: monthly
     groups:
       python:
-        patterns: ["*"]
-        update-types: ["minor", "patch"]
-    ignore:
-      - dependency-name: "*"
-        update-types: ["version-update:semver-major"]
-      # toppra 0.6.6-0.6.10 publish Linux wheels only (no macOS/Windows wheel, no sdist): the installers cannot use them
-      - dependency-name: "toppra"
-        versions: [">0.6.3"]
-      # sympy 1.14 (pinned) requires mpmath < 1.4
-      - dependency-name: "mpmath"
-        versions: [">=1.4"]
-      # the validated maths core: a numpy/scipy minor upgrade is a deliberate change with a full re-validation
-      - dependency-name: "numpy"
-        update-types: ["version-update:semver-minor"]
-      - dependency-name: "scipy"
-        update-types: ["version-update:semver-minor"]
-      - dependency-name: "contourpy"
-        update-types: ["version-update:semver-minor"]
-  - package-ecosystem: pip
-    directory: /packaging
-    schedule:
-      interval: monthly
-    groups:
-      build-tools:
         patterns: ["*"]
         update-types: ["minor", "patch"]
     ignore:

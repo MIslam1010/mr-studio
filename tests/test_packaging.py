@@ -156,6 +156,15 @@ def test_launcher_self_test_passes(tmp_path):
     assert launcher.self_test(str(report)) == 0
     text = report.read_text(encoding="utf-8")
     assert "FAIL" not in text and "Pinocchio == Modern Robotics" in text
+    assert "30 frames @ 30 fps" in text      # the MP4 round trip with the recorder's writer settings
+
+
+def test_recorder_uses_the_shared_writer_settings():
+    from mrstudio import video
+    assert video.WRITER_KWARGS["codec"] == "libx264" and video.WRITER_KWARGS["pixelformat"] == "yuv420p"
+    src = (ROOT / "mrstudio/gui/recorder.py").read_text(encoding="utf-8")
+    assert "open_writer(" in src and "libx264" not in src     # one definition, in the Qt-free module
+    assert "PySide6" not in (ROOT / "mrstudio/video.py").read_text(encoding="utf-8")
 
 
 # ----------------------------------------------------------------------------- scripts / CI / docs
@@ -172,7 +181,8 @@ def test_build_macos_script():
 
 def test_build_windows_script():
     text = (PKG / "build_windows.ps1").read_text(encoding="utf-8")
-    for needle in ("mrstudio.spec", "--self-test", "Compress-Archive", "mrstudio.iss", "-Wait", "$LASTEXITCODE"):
+    for needle in ("mrstudio.spec", "--self-test", "Compress-Archive", "7z", "-tzip", "mrstudio.iss", "-Wait",
+                   "$LASTEXITCODE"):
         assert needle in text, needle
     assert text.count("{") == text.count("}") and text.count("(") == text.count(")")
     if shutil.which("pwsh"):  # real parser when PowerShell is available
@@ -188,6 +198,8 @@ def test_inno_setup_script_matches_build():
     assert "PrivilegesRequired=lowest" in iss
     out = re.search(r"OutputBaseFilename=(.+)", iss).group(1).replace("{#MyAppVersion}", cfg.VERSION)
     assert out == f"MR-Studio-{cfg.VERSION}-Windows-x64-setup"
+    assert "Compression=lzma2/{#LzmaLevel}" in iss and '#define LzmaLevel "max"' in iss
+    assert "SolidCompression=yes" in iss and "LZMANumBlockThreads={#LzmaThreads}" in iss
 
 
 def test_workflow_yaml():
@@ -214,10 +226,20 @@ def test_workflow_yaml():
     assert "--validate" in runs and "--screenshot" in runs and "validate-" in runs
     up = [s for s in steps if s.get("uses", "").startswith("actions/upload-artifact")]
     assert up and "packaging/dist/*.dmg" in up[0]["with"]["path"] and "validate-*.txt" in up[0]["with"]["path"]
+    assert "packaging/dist/BUILD-INFO-*.txt" in up[0]["with"]["path"]
+    info = [s for s in steps if s.get("name", "").startswith("Build record (BUILD-INFO)")]
+    assert info and info[0]["shell"] == "bash" and steps.index(info[0]) < steps.index(up[0])
+    assert "BUILD-INFO-${RUNNER_OS}.txt" in info[0]["run"] and "shasum -a 256" in info[0]["run"]
+    assert "actions/runs/${{ github.run_id }}" in info[0]["env"]["RUN_URL"]
+    # the build job skips only the source-tree runs of the cross-validation suite (the frozen --validate repeats
+    # them); the Linux test job runs everything
+    build_tests = [s for s in steps if s.get("name") == "Run tests"][0]["run"]
+    assert "--deselect tests/test_validation.py::test_all_checks_pass" in build_tests
+    assert "--deselect" not in test_runs and "-k " not in test_runs
     release = wf["jobs"]["release"]
     rel = [s for s in release["steps"] if s.get("uses", "").startswith("softprops/action-gh-release")][0]
     assert rel["with"]["generate_release_notes"] is True and rel["with"]["fail_on_unmatched_files"] is True
-    assert "SHA256SUMS.txt" in rel["with"]["files"]
+    assert "SHA256SUMS.txt" in rel["with"]["files"] and "installers/BUILD-INFO-*.txt" in rel["with"]["files"]
     # every action is pinned to a full commit SHA (a tag can be moved; the "# vX.Y.Z" comment says which release)
     for j in wf["jobs"].values():
         for st in j["steps"]:
@@ -230,6 +252,58 @@ def test_dependabot_covers_actions_and_pip():
     yaml = pytest.importorskip("yaml")
     cfg_ = yaml.safe_load((ROOT / ".github/dependabot.yml").read_text(encoding="utf-8"))
     assert {u["package-ecosystem"] for u in cfg_["updates"]} == {"github-actions", "pip"}
+    # ONE pip entry and ONE group for requirements.txt (/) and the lock (/packaging): a bump changes both files in
+    # the same pull request (separate entries gave separate pull requests that each failed the lock test)
+    pip = [u for u in cfg_["updates"] if u["package-ecosystem"] == "pip"]
+    assert len(pip) == 1 and "directory" not in pip[0]
+    assert set(pip[0]["directories"]) == {"/", "/packaging"} and len(pip[0]["groups"]) == 1
+    ignored = {i["dependency-name"] for i in pip[0]["ignore"]}
+    assert {"*", "toppra", "mpmath", "numpy", "scipy", "contourpy"} <= ignored
+
+
+def test_dependabot_sync_workflow_is_safe():
+    yaml = pytest.importorskip("yaml")
+    wf = yaml.safe_load((ROOT / ".github/workflows/dependabot-sync.yml").read_text(encoding="utf-8"))
+    on = wf.get("on", wf.get(True))
+    assert set(on) == {"pull_request"}            # never pull_request_target (it would run with a write token)
+    assert wf["permissions"] == {}
+    check, push = wf["jobs"]["check"], wf["jobs"]["push"]
+    assert "github.actor == 'dependabot[bot]'" in check["if"]
+    assert "github.event.pull_request.head.repo.full_name == github.repository" in check["if"]
+    assert check["permissions"] == {"contents": "read"}
+    assert push["needs"] == "check" and push["permissions"] == {"contents": "write", "actions": "write"}
+    check_runs = " ".join(s.get("run", "") for s in check["steps"])
+    assert "sync_pins.py" in check_runs and "tests/test_packaging.py" in check_runs
+    assert all(s.get("with", {}).get("persist-credentials") is False
+               for s in check["steps"] if s.get("uses", "").startswith("actions/checkout"))
+    push_runs = " ".join(s.get("run", "") for s in push["steps"])
+    assert "pip" not in push_runs and "pytest" not in push_runs   # the job with write access runs nothing from the PR
+    assert "gh workflow run build.yml" in push_runs and "git apply" in push_runs
+    for j in wf["jobs"].values():
+        for st in j["steps"]:
+            if "uses" in st:
+                assert re.fullmatch(r"[0-9a-f]{40}", st["uses"].split("@", 1)[1]), st["uses"]
+
+
+def test_sync_pins_check_passes():
+    """requirements.txt, the lock and THIRD_PARTY_NOTICES.md agree (`python packaging/sync_pins.py` fixes them)."""
+    r = subprocess.run([sys.executable, str(PKG / "sync_pins.py"), "--check"], capture_output=True, text=True)
+    assert r.returncode == 0, r.stdout + r.stderr
+
+
+def test_sync_pins_rewrites_and_is_idempotent():
+    import sync_pins as sp
+    lock = "# comment\nnumpy==2.4.6\r\nPySide6==6.12.0\nshiboken6==6.12.0\nPySide6_Addons==6.12.0\nsix==1.17.0\n"
+    wanted = {"numpy": "2.4.7", "pyside6": "6.12.1", "shiboken6": "6.12.1", "pyside6-addons": "6.12.1"}
+    new, changes = sp.sync_lock(lock, wanted)
+    assert new == ("# comment\nnumpy==2.4.7\r\nPySide6==6.12.1\nshiboken6==6.12.1\nPySide6_Addons==6.12.1\n"
+                   "six==1.17.0\n") and len(changes) == 4
+    assert sp.sync_lock(new, wanted) == (new, [])
+    notices = "| NumPy | 2.4.6 | BSD-3-Clause | https://numpy.org |\n| other | 1.0 | MIT | x |\n"
+    out, ch = sp.sync_notices(notices, {"numpy": "2.4.7"})
+    assert out == notices.replace("2.4.6", "2.4.7") and len(ch) == 1
+    assert sp.sync_notices(out, {"numpy": "2.4.7"}) == (out, [])
+    assert set(sp.NOTICE_ROWS.values()) <= set(sp.exact_pins(sp.read(sp.LOCK)))
 
 
 def test_build_inputs_are_pinned():

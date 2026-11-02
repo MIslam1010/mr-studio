@@ -1,0 +1,117 @@
+# Dependabot pin sync: on a Dependabot pull request, bring packaging/requirements-lock.txt and the version column of
+# THIRD_PARTY_NOTICES.md in line with requirements.txt (packaging/sync_pins.py), commit that to the pull request's
+# branch and start the full CI (build.yml) on it.
+#
+# Why a commit is needed: tests/test_packaging.py requires requirements.txt == lock == notices, and Dependabot does
+# not always bump the lock (a `pip freeze`, bumped package by package) the way it bumps requirements.txt.
+#
+# Security (public repository):
+#   * `pull_request`, never `pull_request_target`; it runs only for Dependabot's own branches in this repository
+#     (not forks). GitHub gives Dependabot-triggered runs a read-only GITHUB_TOKEN unless `permissions:` asks for
+#     more ("Troubleshooting Dependabot on GitHub Actions", docs.github.com) -- only the `push` job does.
+#   * The job that installs packages and runs code from the pull request (`check`) has a read-only token and no
+#     stored git credentials. The job with write access (`push`) installs and runs nothing from the pull request:
+#     it applies the patch `check` produced (only the two synced files may change) and pushes it.
+#   * No secrets or personal tokens. A push made with GITHUB_TOKEN starts no `push` workflow and leaves the
+#     pull request's own CI waiting for approval; `workflow_dispatch` events always create a run, so the job
+#     dispatches build.yml on the branch itself (needs `actions: write`).
+name: dependabot pin sync
+
+on:
+  pull_request:
+
+permissions: {}
+
+concurrency:
+  group: dependabot-sync-${{ github.event.pull_request.number }}
+  cancel-in-progress: true
+
+jobs:
+  check:
+    name: sync pins and test them
+    if: github.actor == 'dependabot[bot]' && github.event.pull_request.head.repo.full_name == github.repository
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    permissions:
+      contents: read
+    outputs:
+      changed: ${{ steps.sync.outputs.changed }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+        with:
+          ref: ${{ github.event.pull_request.head.sha }}
+          persist-credentials: false
+
+      - uses: actions/setup-python@6d4fd22b20465ccc0f7354476588e8df7c9ca0e0  # v7.1.0
+        with:
+          python-version: "3.11"
+
+      - name: Sync the lock and the notices to requirements.txt
+        id: sync
+        run: |
+          python packaging/sync_pins.py
+          git diff > "$RUNNER_TEMP/pins.patch"
+          if [ -s "$RUNNER_TEMP/pins.patch" ]; then
+            echo "changed=true" >> "$GITHUB_OUTPUT"
+            git diff --stat
+          else
+            echo "changed=false" >> "$GITHUB_OUTPUT"
+          fi
+          python packaging/sync_pins.py --check
+
+      # Only the pin agreements: the full suite needs the scientific stack, Qt and Xvfb, and runs in build.yml
+      # (dispatched by the next job, or triggered by the pull request itself when nothing had to change).
+      - name: Pin tests (tests/test_packaging.py)
+        run: |
+          python -m pip install "$(grep -E '^pytest==' requirements-dev.txt)" "PyYAML>=6.0"
+          python -m pytest tests/test_packaging.py -q -p no:cacheprovider \
+            -k "lock or notice or dependabot or sync_pins or workflow_yaml"
+
+      - name: Upload the patch
+        if: steps.sync.outputs.changed == 'true'
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9  # v7.0.2
+        with:
+          name: pins-patch
+          path: ${{ runner.temp }}/pins.patch
+          if-no-files-found: error
+          retention-days: 3
+
+  push:
+    name: commit the synced pins and start CI
+    needs: check
+    if: needs.check.outputs.changed == 'true'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    permissions:
+      contents: write     # push the commit to the Dependabot branch
+      actions: write      # gh workflow run build.yml
+    env:
+      HEAD_REF: ${{ github.event.pull_request.head.ref }}
+    steps:
+      # the commit Dependabot pushed; if the branch has moved on since, the push below is rejected (not a fast-forward)
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+        with:
+          ref: ${{ github.event.pull_request.head.sha }}
+
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333  # v8.0.2
+        with:
+          name: pins-patch
+          path: ${{ runner.temp }}/pins
+
+      - name: Apply, commit and push
+        run: |
+          patch="$RUNNER_TEMP/pins/pins.patch"
+          bad="$(git apply --numstat "$patch" | cut -f3 | grep -vxE 'packaging/requirements-lock.txt|THIRD_PARTY_NOTICES.md' || true)"
+          if [ -n "$bad" ]; then echo "patch touches unexpected files: $bad"; exit 1; fi
+          git apply "$patch"
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git commit -am "Sync requirements-lock.txt and THIRD_PARTY_NOTICES.md with requirements.txt
+
+          packaging/sync_pins.py, run by the dependabot pin sync workflow."
+          git push origin "HEAD:refs/heads/$HEAD_REF"
+
+      - name: Start the full CI on the branch
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: gh workflow run build.yml --repo "$GITHUB_REPOSITORY" --ref "$HEAD_REF"

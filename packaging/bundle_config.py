@@ -131,7 +131,7 @@ EXCLUDES = [
 SELF_TEST_IMPORTS = [
     "modern_robotics", "pinocchio", "roboticstoolbox", "toppra", "scipy.integrate", "sympy",
     "matplotlib.mathtext", "PySide6.QtWidgets", "PySide6.QtOpenGLWidgets", "pyqtgraph.opengl",
-    "OpenGL.GL", "imageio_ffmpeg", "PIL.Image",
+    "OpenGL.GL", "imageio_ffmpeg", "PIL.Image", "mrstudio.video",
 ]
 
 

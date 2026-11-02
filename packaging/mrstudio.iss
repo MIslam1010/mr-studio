@@ -12,6 +12,14 @@
 #define MyAppName "MR Studio"
 #define MyAppExe "MRStudio.exe"
 
+; compression level and LZMA2 block threads (override: iscc /DLzmaLevel=normal /DLzmaThreads=1 ...)
+#ifndef LzmaLevel
+  #define LzmaLevel "max"
+#endif
+#ifndef LzmaThreads
+  #define LzmaThreads "2"
+#endif
+
 [Setup]
 AppId={{6C1E2F4A-3B7D-4C59-9A0E-5D2B8F1C7A31}
 AppName={#MyAppName}
@@ -33,8 +41,10 @@ OutputBaseFilename=MR-Studio-{#MyAppVersion}-Windows-x64-setup
 SetupIconFile=build\icon.ico
 #endif
 UninstallDisplayIcon={app}\{#MyAppExe}
-Compression=lzma2/max
+Compression=lzma2/{#LzmaLevel}
 SolidCompression=yes
+; two LZMA2 blocks compressed in parallel (each block thread uses two cores; the CI runner has four)
+LZMANumBlockThreads={#LzmaThreads}
 WizardStyle=modern
 
 [Languages]

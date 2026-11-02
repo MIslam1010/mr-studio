@@ -17,6 +17,12 @@ Ctrl+Alt+Left/Right go to the previous/next tab. The tab titles carry circled nu
 Tests: `pip install -r requirements.txt -r requirements-dev.txt`, then `QT_QPA_PLATFORM=offscreen python -m pytest -q`.
 `MRSTUDIO_NO_GUI_TESTS=1` skips the GUI tests; `MRSTUDIO_PYTEST_HARD_EXIT=1` ends the run with `os._exit` (old teardown workaround, off by default). On Linux, PySide6 6.12.0's wheel aborts Python 3.11 (`none_dealloc`); use PySide6 6.11.3 there, as CI does (see `tests/conftest.py`).
 Tests that compare with the course materials look for them at `MRSTUDIO_COURSE_SHARED` (course_robots.py) and `MRSTUDIO_COURSE_SRC`.
+Pins: `requirements.txt` is the source of the validated versions; `packaging/requirements-lock.txt` and the version column of
+`THIRD_PARTY_NOTICES.md` must agree with it (tests/test_packaging.py). After changing a pin, run `python packaging/sync_pins.py`
+(`--check` only reports). Dependabot bumps `/` and `/packaging` in one grouped pull request; the `dependabot pin sync` workflow
+(.github/workflows/dependabot-sync.yml) runs the same script on it, commits the result to the pull request and starts the full
+CI (build.yml) on its branch. Dependabot no longer rebases a pull request that has such a commit: comment `@dependabot recreate`
+to start over, or run the script yourself and push.
 Course robots (SBEG 361/461) live in `mrstudio/course_models.py`; hardware drivers in `mrstudio/hardware/`; installers in `packaging/`.
 Look at the PNG with the Read tool. A broken tab shows its traceback inside the tab (see `gui/app.py`).
 
@@ -55,6 +61,8 @@ mrstudio/
                            Ftip=None, with_energy=True, damping=None) -> SimResult(t, theta, dtheta, tau, ke, pe)
                   to_pinocchio(robot) builds a pinocchio.Model from the PoE data.
   checks.py       Check(name, chapter, error, tol, detail, category).passed
+  video.py        WRITER_KWARGS, open_writer(path, fps): H.264 MP4 settings of the Record button (Qt-free; also
+                  used by packaging/launcher.py --self-test)
   featherstone.py pure-NumPy Featherstone RNEA/CRBA/ABA (Tables 5.1/6.2/7.1) from SerialRobot; validation_checks()
   references.py   REFERENCES bibliography (+ local PDF paths), cite(key, where), further_reading(items) for
                   the theory panels' "Further reading" (printed page numbers, verified); Help -> References…
