@@ -58,6 +58,14 @@ Source: "dist\MRStudio\*"; DestDir: "{app}"; Flags: ignoreversion recursesubdirs
 Source: "..\LICENSE"; DestDir: "{app}"; Flags: ignoreversion
 Source: "..\THIRD_PARTY_NOTICES.md"; DestDir: "{app}"; Flags: ignoreversion
 
+[Registry]
+; mrstudio://open?tab=...&robot=...&preset=... links (Knowledge Map "Open in MR Studio"): Windows starts
+; MRStudio.exe with the URL as its argument (launcher.py -> gui/app.py main). HKA = per-user with PrivilegesRequired=lowest.
+Root: HKA; Subkey: "Software\Classes\mrstudio"; ValueType: string; ValueName: ""; ValueData: "URL:MR Studio link"; Flags: uninsdeletekey
+Root: HKA; Subkey: "Software\Classes\mrstudio"; ValueType: string; ValueName: "URL Protocol"; ValueData: ""
+Root: HKA; Subkey: "Software\Classes\mrstudio\DefaultIcon"; ValueType: string; ValueName: ""; ValueData: "{app}\{#MyAppExe},0"
+Root: HKA; Subkey: "Software\Classes\mrstudio\shell\open\command"; ValueType: string; ValueName: ""; ValueData: """{app}\{#MyAppExe}"" ""%1"""
+
 [Icons]
 Name: "{group}\{#MyAppName}"; Filename: "{app}\{#MyAppExe}"
 Name: "{group}\{#MyAppName} (projector mode)"; Filename: "{app}\{#MyAppExe}"; Parameters: "--projector"

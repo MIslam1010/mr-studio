@@ -60,6 +60,8 @@ OPTIONAL_MODULES = [
     ("mrstudio.course_models", "Course robots"),
     ("mrstudio.planning", "Motion planning"),
     ("mrstudio.haptics", "Haptics & impedance"),
+    ("mrstudio.grasping", "Grasping"),
+    ("mrstudio.mobile", "Mobile robots"),
     ("mrstudio.hardware.metrics", "Hardware bridge"),
     ("mrstudio.problems", "Practice problems"),
 ]

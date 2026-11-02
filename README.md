@@ -12,7 +12,7 @@ covers task-space, force, hybrid and impedance control, closed chains (four-bar,
 robots (Stewart–Gough with dynamics, 3×RPR, Delta), and imports any serial robot from a URDF file. Every tab shows the textbook
 section it implements and the equations it uses.
 
-Every number is **cross-validated**. The ⑭ Validation tab re-computes everything with independent
+Every number is **cross-validated**. The ⑯ Validation tab re-computes everything with independent
 libraries (Lynch & Park's own code, Pinocchio, Peter Corke's Robotics Toolbox, a symbolic
 Lagrangian in SymPy) and checks it against laws of physics: 500+ checks in about 30 seconds,
 all passing.
@@ -83,7 +83,8 @@ Useful command-line options:
 | option | meaning |
 |---|---|
 | `--robot "PUMA 560 (from Corke DH)"` | robot selected at start-up |
-| `--tab 13` | tab opened at start-up (0–13: 0 = ① FK, …, 13 = ⑭ Validation; default: last used) |
+| `--tab 15` | tab opened at start-up (0–15: 0 = ① FK, …, 15 = ⑯ Validation; default: last used) |
+| `--open "mrstudio://open?tab=MobileTab&robot=…&preset=…"` | open a Knowledge Map link: tab (class name or 0-based index), robot and preset |
 | `--projector` / `--no-projector` | start in projector (large-font) mode or not |
 | `--screenshot DIR [--only] [--delay ms]` | render every tab (or only `--tab`) to PNG files and exit |
 | `--software-gl` | force software OpenGL (see Troubleshooting); same as `MRSTUDIO_SOFTWARE_GL=1` |
@@ -103,11 +104,11 @@ The **top bar** has the robot selector, the dynamics engine selector and the The
 The engine selector switches between **Pinocchio** (C++, fast) and **Modern Robotics** (the textbook's
 reference Python code); both give identical results. The top bar also opens the **Robot Builder**,
 where you define your own robot (revolute **and prismatic** joints) by entering $\omega_i$ (or the slide direction $v_i$), $q_i$ and $M$. Its inertias are
-generated automatically, and a robot you build is then validated by the ⑭ Validation suite like the built-in ones.
+generated automatically, and a robot you build is then validated by the ⑯ Validation suite like the built-in ones.
 **File → Import URDF…** (⌘O) loads any serial robot from a URDF file (MR Sec. 8.8) and converts it to screw axes, CoM frames and spatial inertias; 7 example URDFs work offline.
 
 **Presenting:** **Projector** mode (F5 or ⌘⇧P) enlarges all fonts, equations and lines. **● Record** (⌘R) records the 3-D view or the whole window to MP4 or GIF for slides; ⌘⇧S saves a PNG screenshot (⌘⌥S: 3-D view only, with labels). The app remembers the last robot, tab and settings.
-**Switching tabs:** ⌘1…⌘9 (Ctrl+1…9) jump to tabs ①–⑨, and Ctrl+Alt+← / Ctrl+Alt+→ (⌥⌘← / ⌥⌘→ on a Mac) go to the previous / next tab, which reaches ⑩–⑭.
+**Switching tabs:** ⌘1…⌘9 (Ctrl+1…9) jump to tabs ①–⑨, and Ctrl+Alt+← / Ctrl+Alt+→ (⌥⌘← / ⌥⌘→ on a Mac) go to the previous / next tab, which reaches ⑩–⑯.
 
 | Tab | What you can do | *Modern Robotics* |
 |---|---|---|
@@ -122,11 +123,13 @@ generated automatically, and a robot you build is then validated by the ⑭ Vali
 | **⑨ Parallel** | 3×RPR planar parallel robot: closed-form IK, all (up to 6) forward-kinematics solutions as ghosts, workspace and actuator-singularity locus. Delta robot: closed-form IK and FK (trilateration), Jacobian, motor holding torques, workspace, pick-and-place animation. | Secs. 7.1.1, 7.2, 7.3; Ex. 2.7 |
 | **⑩ Planning** | Motion planning for the planar 2R / 3R arms: configuration-space obstacles, grid search (Dijkstra, A*), sampling planners (PRM, RRT, RRT*), shortcut smoothing, and time scaling of the planned path. | Ch. 10, 9 |
 | **⑪ Haptics** | A Hapkit-type 1-DOF haptic paddle rendering sampled-data virtual walls and springs (impedance and admittance rendering) with a user-hand model, passivity / stability indicators and the energy-leak plot. | Sec. 11.7 |
-| **⑫ Hardware** | Hardware bridge for the course arm (or its simulation): streams a joint trajectory at 50 Hz, logs commanded vs measured joints in the SBEG 361 / 461 CSV formats, enforces the safety checklist and computes the hardware acceptance tests HW-2 … HW-6. See *Hardware bridge* below. | — |
-| **⑬ Practice** | Randomised exercises with worked solutions and quiz export: 11 topics, including Ch. 8 rigid-body inertia, forward dynamics with an Euler step, the task-space mass matrix (felt mass, reflected rotor inertia) and constrained dynamics with a Lagrange multiplier. | Ch. 3–11 |
-| **⑭ Validation** | One-click cross-validation of everything above (500+ checks), with a colour-coded table, a details pane per check, a theory panel and an HTML report export. | Ch. 4–9, 11 |
+| **⑫ Grasping** | Planar grasps with point contacts: roll / slide / break labels for a test twist and the feasible centres of rotation, the form-closure LP, friction cones and the force-closure test, the minimum friction coefficient, a grasp metric and quasistatic balance. Presets from the book's examples (two fingers in a hole, square, triangle, block on two fingers). | Ch. 12 |
+| **⑬ Mobile robots** | Wheeled chassis seen from above: three omniwheels, four mecanum wheels, unicycle, diff-drive and car. Wheel speeds $u = H(\phi)\dot q$, closed-loop trajectory tracking and stabilisation with the book's control laws, and odometry with an optional wheel-radius error. | Ch. 13 |
+| **⑭ Hardware** | Hardware bridge for the course arm (or its simulation): streams a joint trajectory at 50 Hz, logs commanded vs measured joints in the SBEG 361 / 461 CSV formats, enforces the safety checklist and computes the hardware acceptance tests HW-2 … HW-6. See *Hardware bridge* below. | — |
+| **⑮ Practice** | Randomised exercises with worked solutions and quiz export (left column: **Problems**), guided step-by-step **Lessons** with answer checks, and per-student **Assignment** problems saved as a submission file. Problems: 11 topics, including Ch. 8 rigid-body inertia, forward dynamics with an Euler step, the task-space mass matrix (felt mass, reflected rotor inertia) and constrained dynamics with a Lagrange multiplier. | Ch. 3–11 |
+| **⑯ Validation** | One-click cross-validation of everything above (500+ checks), with a colour-coded table, a details pane per check, a theory panel and an HTML report export. | Ch. 4–9, 11 |
 
-### Hardware bridge (tab ⑫)
+### Hardware bridge (tab ⑭)
 
 The tab drives the course arm (myCobot-280 class) over a serial port, or a built-in simulation of it.
 
@@ -188,7 +191,7 @@ screw axes in {s} unless stated, radians internally and degrees on screen.
 
 ## How correctness is validated
 
-`mrstudio/validation.py` (⑭ Validation tab, `python -m mrstudio.validation`, and `pytest`) runs
+`mrstudio/validation.py` (⑯ Validation tab, `python -m mrstudio.validation`, and `pytest`) runs
 500+ quantitative checks. All of them use a **fixed random seed**, so every run gives the same
 numbers. Each row reports the largest discrepancy found and the tolerance it must stay under.
 

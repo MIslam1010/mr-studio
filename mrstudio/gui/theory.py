@@ -87,6 +87,30 @@ def render_math(tex: str, size: float = 14, color: str = theme.TEXT) -> QtGui.QI
     return _cache[key]
 
 
+_fit_cache: dict[tuple, QtGui.QImage] = {}
+
+
+def fit_image(img: QtGui.QImage, width: float, height: float, dpr: float) -> QtGui.QImage:
+    """``img`` shown at ``width`` x ``height`` logical px on a screen with device-pixel ratio ``dpr``.
+
+    The equations are rendered at 2x. Left to QTextDocument, a 2x image on a 1x screen (or a shrunk equation) is
+    down-sampled without filtering, which drops every other pixel row: the 1-px horizontal stroke of a "+" can
+    vanish and leave a thin vertical bar. Scaling here with smooth (area) filtering keeps thin strokes."""
+    dpr = max(float(dpr), 1.0)
+    pw, ph = max(1, round(width * dpr)), max(1, round(height * dpr))
+    if (pw, ph) == (img.width(), img.height()):
+        return img
+    key = (img.cacheKey(), pw, ph, dpr)
+    out = _fit_cache.get(key)
+    if out is None:
+        out = img.scaled(pw, ph, QtCore.Qt.IgnoreAspectRatio, QtCore.Qt.SmoothTransformation)
+        out.setDevicePixelRatio(dpr)
+        if len(_fit_cache) > 2000:
+            _fit_cache.clear()
+        _fit_cache[key] = out
+    return out
+
+
 class TheoryPanel(QtWidgets.QTextBrowser):
     def __init__(self, parent=None):
         super().__init__(parent)
@@ -149,15 +173,18 @@ class TheoryPanel(QtWidgets.QTextBrowser):
         img = render_math(tex, size, theme.text_color())
         self._n += 1
         url = QtCore.QUrl(f"eq://{self._n}")
-        self.document().addResource(QtGui.QTextDocument.ImageResource, url, img)
         dpr = max(img.devicePixelRatio(), 1.0)
         w, h = img.width() / dpr, img.height() / dpr
         self._widest = max(self._widest, int(w))
         maxw = self._max_eq_width()
+        screen = self.devicePixelRatioF() or 1.0
         if w > maxw:  # too wide for the panel (projector mode / narrow panel): shrink instead of clipping
             self._shrunk = True
-            return (f'<img src="{url.toString()}" width="{maxw}" height="{max(1, int(h * maxw / w))}" '
+            sh = max(1, int(h * maxw / w))
+            self.document().addResource(QtGui.QTextDocument.ImageResource, url, fit_image(img, maxw, sh, screen))
+            return (f'<img src="{url.toString()}" width="{maxw}" height="{sh}" '
                     f'style="vertical-align:middle">')
+        self.document().addResource(QtGui.QTextDocument.ImageResource, url, fit_image(img, w, h, screen))
         return f'<img src="{url.toString()}" style="vertical-align:middle">'
 
     def set_content(self, text: str):

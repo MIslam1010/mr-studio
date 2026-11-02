@@ -93,7 +93,7 @@ def _suite_job(progress, cancelled):
 
 
 class ValidationTab(BaseTab):
-    title = "⑭ Validation"
+    title = "⑯ Validation"
     uses_serial_robot = False
 
     def __init__(self, ctx):

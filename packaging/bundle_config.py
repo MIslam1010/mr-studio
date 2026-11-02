@@ -83,7 +83,7 @@ CONDA_ON_WINDOWS = {"pin": "pinocchio=4.1.0", "PySide6": "pyside6=6.11.*"}   # c
 
 # Package data. (package, include-globs relative to the package dir). Python sources are never listed.
 DATA_PACKAGES = [
-    ("mrstudio", ["data/**/*"]),                       # bundled URDF (KUKA iiwa 7)
+    ("mrstudio", ["data/**/*"]),                       # bundled URDF (KUKA iiwa 7), data/kmap/*.json (map links)
     # rtb-data is 146 MB; bundle only what MR Studio touches:
     #  * the 9 example URDFs of File -> Import URDF (~64 kB);
     #  * the STL folders of the DH models we instantiate. rtb.models.DH.Puma560() / .Panda() look their

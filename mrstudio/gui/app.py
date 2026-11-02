@@ -32,6 +32,8 @@ TABS = [
     ("mrstudio.gui.tabs.parallel_tab", "ParallelRobotsTab"),
     ("mrstudio.gui.tabs.planning_tab", "PlanningTab"),
     ("mrstudio.gui.tabs.haptics_tab", "HapticsTab"),
+    ("mrstudio.gui.tabs.grasping_tab", "GraspingTab"),
+    ("mrstudio.gui.tabs.mobile_tab", "MobileTab"),
     ("mrstudio.gui.tabs.hardware_tab", "HardwareTab"),
     ("mrstudio.gui.tabs.practice_tab", "PracticeTab"),
     ("mrstudio.gui.tabs.validation_tab", "ValidationTab"),
@@ -50,6 +52,8 @@ TAB_LONG_NAMES = {
     "ParallelRobotsTab": "3×RPR & Delta",
     "PlanningTab": "Motion planning",
     "HapticsTab": "Haptics & impedance",
+    "GraspingTab": "Grasping & manipulation",
+    "MobileTab": "Wheeled mobile robots",
     "HardwareTab": "Hardware bridge",
     "PracticeTab": "Practice problems",
     "ValidationTab": "Validation",
@@ -347,6 +351,64 @@ def load_tab(mod: str, cls: str, ctx):
     return ErrorTab(mod, err), "⚠ " + mod.split(".")[-1]
 
 
+def apply_page_preset(page, key: str) -> bool:
+    """Select preset ``key`` on a tab (launch URLs): ``page.apply_preset(key)`` if the tab has it, else the tab's
+    ``preset_box`` (exact name, 0-based index, or a case-insensitive part of the name). False if not found."""
+    fn = getattr(page, "apply_preset", None)
+    if callable(fn):
+        return bool(fn(key))
+    box = getattr(page, "preset_box", None)
+    if not isinstance(box, QtWidgets.QComboBox) or not key:
+        return False
+    names = [box.itemText(i) for i in range(box.count())]
+    k = str(key).strip()
+    if k in names:
+        i = names.index(k)
+    elif k.isdigit() and int(k) < len(names):
+        i = int(k)
+    else:
+        i = next((j for j, n in enumerate(names) if k.lower() in n.lower()), -1)
+    if i < 0:
+        return False
+    if i == box.currentIndex():           # same entry: no signal, load it again explicitly
+        load = getattr(page, "load_preset", None) or getattr(page, "_preset", None)
+        if callable(load):
+            load(names[i])
+    else:
+        box.setCurrentIndex(i)            # currentTextChanged -> the tab's own preset slot
+    return True
+
+
+class UrlOpenFilter(QtCore.QObject):
+    """Receives ``mrstudio://`` URLs that macOS delivers as ``QFileOpenEvent`` (the app is opened by a link).
+
+    URLs that arrive before the main window exists are kept and handed over by ``set_window``."""
+
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        self.window = None
+        self.pending: list[str] = []
+
+    def set_window(self, win):
+        self.window = win
+        pending, self.pending = self.pending, []
+        for u in pending:
+            win.open_url(u)
+
+    def eventFilter(self, obj, ev):
+        if ev.type() == QtCore.QEvent.FileOpen:
+            url = ev.url().toString() or ev.file()
+            if url.lower().startswith("mrstudio:"):
+                if self.window is not None:
+                    self.window.open_url(url)
+                    self.window.raise_()
+                    self.window.activateWindow()
+                else:
+                    self.pending.append(url)
+                return True
+        return super().eventFilter(obj, ev)
+
+
 class _ModelWarmer(QtCore.QObject):
     done = QtCore.Signal(object)  # list of robot names that failed to load
 
@@ -504,6 +566,47 @@ class MainWindow(QtWidgets.QMainWindow):
             self.view_menu.addSeparator()
             self.view_menu.addAction(self.act_next_tab)
             self.view_menu.addAction(self.act_prev_tab)
+
+    def page_index(self, cls_name: str) -> int:
+        """Index of the tab whose class is ``cls_name`` (-1 if it is not loaded)."""
+        return next((i for i, p in enumerate(self.pages) if type(p).__name__ == cls_name), -1)
+
+    def open_target(self, tab: str | int | None = None, robot: str | None = None, preset: str | None = None) -> bool:
+        """Switch to ``tab`` (class name or index), select ``robot`` (a name in ROBOTS) and the tab's ``preset``.
+        Used by launch URLs and the Lessons panel's "Go to tab". Returns False if the tab is unknown."""
+        if robot:
+            if robot in ROBOTS:
+                self.robot_box.setCurrentText(robot)
+            else:
+                self.statusBar().showMessage(f"Unknown robot {robot!r}: keeping {self.ctx.robot.name}", 10000)
+        if tab is None:
+            return True
+        i = tab if isinstance(tab, int) else self.page_index(tab)
+        if not 0 <= i < self.tabs.count():
+            self.statusBar().showMessage(f"No tab {tab!r} in this version of MR Studio", 10000)
+            return False
+        self.tabs.setCurrentIndex(i)
+        if preset:
+            try:
+                ok = apply_page_preset(self.pages[i], preset)
+            except Exception:
+                traceback.print_exc()
+                ok = False
+            if not ok:
+                self.statusBar().showMessage(f"Preset {preset!r} not found on this tab", 10000)
+        return True
+
+    def open_url(self, url: str) -> bool:
+        """Handle ``mrstudio://open?tab=…&robot=…&preset=…`` (Knowledge Map links); False if it is not valid."""
+        from ..kmap_links import parse_launch_url
+        try:
+            q = parse_launch_url(url)
+        except ValueError as e:
+            self.statusBar().showMessage(str(e), 10000)
+            log_text(f"launch URL ignored: {e}")
+            return False
+        ok = self.open_target(q["tab"], q["robot"], q["preset"])
+        return ok and (q["tab"] is not None or q["robot"] is not None)
 
     def step_tab(self, d: int):
         n = self.tabs.count()
@@ -1017,7 +1120,23 @@ def main(argv=None):
     parser.add_argument("--software-gl", action="store_true",
                         help="use Qt's software OpenGL renderer (no/broken graphics driver, remote desktop, VM); "
                              "same as MRSTUDIO_SOFTWARE_GL=1")
+    parser.add_argument("--open", dest="open_url", default=None, metavar="URL",
+                        help="open a link such as mrstudio://open?tab=MobileTab&robot=…&preset=… "
+                             "(tab = class name or 0-based index); overrides --tab")
+    parser.add_argument("url", nargs="?", default=None,
+                        help="an mrstudio:// link (passed by the operating system when a link is clicked)")
     args = parser.parse_args(argv)
+    launch = args.open_url or (args.url if args.url and args.url.lower().startswith("mrstudio:") else None)
+    if args.url and not launch:
+        parser.error(f"unexpected argument {args.url!r} (only mrstudio:// links are accepted)")
+    launch_tab = None
+    if launch:
+        from ..kmap_links import parse_launch_url
+        try:
+            launch_tab = parse_launch_url(launch)["index"]
+        except ValueError as e:
+            print(f"ignoring launch URL: {e}", file=sys.stderr)
+            launch = None
 
     shot_mode = bool(args.screenshot)
     try:
@@ -1031,6 +1150,8 @@ def main(argv=None):
     app = QtWidgets.QApplication.instance() or QtWidgets.QApplication(sys.argv[:1])
     app.setApplicationName("MR Studio")
     app.setOrganizationName("MRStudio")
+    url_filter = UrlOpenFilter(app)          # macOS: links clicked while (or before) the app runs
+    app.installEventFilter(url_filter)
     s = app_settings()
     if args.projector:
         projector = True
@@ -1060,16 +1181,19 @@ def main(argv=None):
     win = MainWindow(ctx)
     win.persist = not shot_mode
     if not shot_mode:
-        win.restore_settings(restore_tab=args.tab is None)
+        win.restore_settings(restore_tab=args.tab is None and launch_tab is None)
     win.show()
     if args.tab is not None:
         win.tabs.setCurrentIndex(args.tab)
+    if launch:
+        win.open_url(launch)
+    url_filter.set_window(win)
     if not shot_mode:
         QtCore.QTimer.singleShot(400, win.warm_robot_models)  # after the window has painted
 
     if args.screenshot:
         os.makedirs(args.screenshot, exist_ok=True)
-        tab0 = args.tab or 0
+        tab0 = launch_tab if launch_tab is not None else (args.tab or 0)
         order = [tab0] if args.only else list(range(win.tabs.count()))
         state = {"k": 0}
 

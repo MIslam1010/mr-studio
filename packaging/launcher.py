@@ -1,6 +1,9 @@
 """Entry point of the frozen MR Studio app (PyInstaller) -- also works from source.
 
     MRStudio                      start the app (same options as run_app.py: --robot, --tab, --screenshot ...)
+    MRStudio "mrstudio://open?tab=MobileTab&robot=..."
+                                  open a Knowledge Map link (Windows passes the clicked URL as the argument;
+                                  macOS sends it as an open-URL event instead); same as --open URL
     MRStudio --self-test [--report FILE]
                                   headless smoke test of the *bundle*: every library imports, Pinocchio and
                                   Modern Robotics agree on the UR5 dynamics, the Corke DH models and the
@@ -332,6 +335,7 @@ def _cli_exit(fn, report: str | None) -> None:
 def run(argv: list[str] | None = None) -> int:
     argv = list(sys.argv[1:] if argv is None else argv)
     argv = [a for a in argv if not a.startswith("-psn_")]   # old macOS Finder launch argument
+    # an mrstudio:// link (Windows URL handler "%1") goes through unchanged: gui.app.main takes it as `url`
     _ensure_streams()
     report = _pop_option(argv, "--report", has_value=True)
     report = report if isinstance(report, str) else None

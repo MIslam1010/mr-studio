@@ -11,9 +11,12 @@ Screenshot (renders the window, saves PNGs, exits — use it to visually check y
 ```
 .venv/bin/python run_app.py --screenshot <dir> --tab <index> --only [--robot "Planar 3R arm"] [--delay 2500]
 ```
-Tab indices (`--tab`, 0-13): 0 FK, 1 Velocity, 2 IK, 3 Dynamics, 4 Control, 5 Closed chains, 6 Stewart, 7 Task-space,
-8 Parallel, 9 Planning, 10 Haptics, 11 Hardware, 12 Practice, 13 Validation. Keyboard: Ctrl+1...9 jump to tabs 1-9,
-Ctrl+Alt+Left/Right go to the previous/next tab. The tab titles carry circled numbers (1-14), so tab N has title number N+1.
+Tab indices (`--tab`, 0-15): 0 FK, 1 Velocity, 2 IK, 3 Dynamics, 4 Control, 5 Closed chains, 6 Stewart, 7 Task-space,
+8 Parallel, 9 Planning, 10 Haptics, 11 Grasping, 12 Mobile robots, 13 Hardware, 14 Practice, 15 Validation. Keyboard:
+Ctrl+1...9 jump to tabs 1-9, Ctrl+Alt+Left/Right go to the previous/next tab. The tab titles carry circled numbers (1-16),
+so tab N has title number N+1. `mrstudio.kmap_links.TAB_ORDER` must list the same classes in the same order (test).
+Launch links: `run_app.py --open "mrstudio://open?tab=<class or index>&robot=<name>&preset=<key>"` (or the URL as the
+only positional argument, as Windows passes it; macOS delivers it as a QFileOpenEvent) -> `MainWindow.open_url`.
 Tests: `pip install -r requirements.txt -r requirements-dev.txt`, then `QT_QPA_PLATFORM=offscreen python -m pytest -q`.
 `MRSTUDIO_NO_GUI_TESTS=1` skips the GUI tests; `MRSTUDIO_PYTEST_HARD_EXIT=1` ends the run with `os._exit` (old teardown workaround, off by default). On Linux, PySide6 6.12.0's wheel aborts Python 3.11 (`none_dealloc`); use PySide6 6.11.3 there, as CI does (see `tests/conftest.py`).
 Tests that compare with the course materials look for them at `MRSTUDIO_COURSE_SHARED` (course_robots.py) and `MRSTUDIO_COURSE_SRC`.
@@ -70,7 +73,7 @@ mrstudio/
   references.py   REFERENCES bibliography (+ local PDF paths), cite(key, where), further_reading(items) for
                   the theory panels' "Further reading" (printed page numbers, verified); Help -> References…
   gui/
-    app.py        MainWindow; TABS list (module, class) — lists all 14 tabs.
+    app.py        MainWindow; TABS list (module, class) — lists all 16 tabs; open_url / open_target (mrstudio:// links).
     base.py       AppContext (ctx.robot, ctx.backend, ctx.engine(robot=None, backend=None) cached engines,
                   signals robot_changed / backend_changed) and BaseTab.
     viewer.py     SceneView(gl.GLViewWidget) keyed scene graph; RobotGraphic; GhostRobot

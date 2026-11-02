@@ -1,4 +1,10 @@
-"""Practice problems -- randomised exercises with worked solutions (MR Ch. 3-11), quiz export."""
+"""Practice problems -- randomised exercises with worked solutions (MR Ch. 3-11), quiz export, guided lessons
+and graded assignments.
+
+The left column is a ``QTabWidget``: Problems (the generator + export) | Lessons (``LessonsPanel``) |
+Assignment (``AssignmentPanel``). The two panels talk to this tab only through ``PracticeHost``
+(``practice_host.py``), which ``PracticeTab`` implements; they are built the first time their page is opened.
+"""
 from __future__ import annotations
 
 import os
@@ -65,10 +71,13 @@ THEORY += further_reading([
 
 PLACEHOLDER = ("<h2>Worked solution</h2><p style='color:gray'>Try the problem first, then press "
                "<b>Reveal solution</b>.</p>")
+NO_REVEAL = ("<h2>Worked solution</h2><p style='color:gray'>Assignment problem: worked solutions are not shown. "
+             "Type your answers in the Assignment panel and save the submission; your instructor grades it.</p>")
+SUBTABS = ("Problems", "Lessons", "Assignment")
 
 
 class PracticeTab(BaseTab):
-    title = "⑬ Practice"
+    title = "⑮ Practice"
     uses_serial_robot = False
 
     def __init__(self, ctx):
@@ -77,6 +86,9 @@ class PracticeTab(BaseTab):
         self._graphic = None
         self._ghost = None
         self._worker = None
+        self._reveal_allowed = True
+        self.lessons_panel = None
+        self.assignment_panel = None
 
         # ---------------------------------------------------------------- controls
         self.topic = combo(["Mixed (topic from seed)"] + [P.TOPICS[k]["title"] for k in P.TOPIC_KEYS])
@@ -136,6 +148,18 @@ class PracticeTab(BaseTab):
                            self.exp_lbl))
         cl.addStretch(1)
 
+        # Problems | Lessons | Assignment (the two panels are built when first opened: lessons take ~0.5 s)
+        self.side = QtWidgets.QTabWidget()
+        self.side.setDocumentMode(True)
+        self.side.addTab(controls, SUBTABS[0])
+        for name in SUBTABS[1:]:
+            self.side.addTab(QtWidgets.QWidget(), name)
+        self.side.setTabToolTip(0, "Randomised problems with worked solutions; quiz export")
+        self.side.setTabToolTip(1, "Guided step-by-step lessons (SBEG 361 / 461) with answer checks")
+        self.side.setTabToolTip(2, "Your assignment from the instructor's code: per-student problems, "
+                                   "answers saved as a submission file")
+        self.side.currentChanged.connect(self._side_changed)
+
         # ---------------------------------------------------------------- centre
         self.statement = TheoryPanel()
         self.statement.setMinimumWidth(360)
@@ -152,7 +176,7 @@ class PracticeTab(BaseTab):
         center.setStretchFactor(1, 2)
         self.solution = TheoryPanel()
         self.solution.set_content(PLACEHOLDER)
-        self.assemble(controls, center, self.solution, THEORY, bottom_ratio=(3, 2))
+        self.assemble(self.side, center, self.solution, THEORY, bottom_ratio=(3, 2))
 
         self.topic.currentIndexChanged.connect(lambda _i: self.generate())
         self.diff.currentIndexChanged.connect(lambda _i: self.generate())
@@ -182,19 +206,106 @@ class PracticeTab(BaseTab):
 
     def generate(self, *_):
         p = P.generate(self.topic_key(), self.seed.value(), self.difficulty())
-        self.problem = p
-        self.statement.set_content(p.statement_html())
+        self.show_problem(p)
+        self.info_lbl.setText(f"{P.TOPICS[p.topic]['title']}\nkey: {p.key}")
+        return p
+
+    def _reset_reveal(self, allowed: bool):
+        self._reveal_allowed = bool(allowed)
         self.reveal_btn.blockSignals(True)
         self.reveal_btn.setChecked(False)
         self.reveal_btn.setText("Reveal solution")
         self.reveal_btn.blockSignals(False)
-        self.solution.set_content(PLACEHOLDER)
+        self.reveal_btn.setEnabled(self._reveal_allowed)
+        self.reveal_btn.setToolTip("" if self._reveal_allowed else "Not available for this problem")
         self.verify_lbl.setText("")
-        self.info_lbl.setText(f"{P.TOPICS[p.topic]['title']}\nkey: {p.key}")
+
+    # ------------------------------------------------------------------ PracticeHost
+    def show_problem(self, p: P.Problem, reveal_allowed: bool = True) -> None:
+        """Show ``p``; with ``reveal_allowed=False`` (assignments) the worked solution cannot be revealed."""
+        self.problem = p
+        self._reset_reveal(reveal_allowed)
+        self.statement.set_content(p.statement_html())
+        self.solution.set_content(PLACEHOLDER if reveal_allowed else NO_REVEAL)
         self._draw_visual(p)
-        return p
+
+    def show_html(self, statement_html: str, solution_html: str | None = None) -> None:
+        """Free HTML in the statement / solution panes (lessons); no problem is active, nothing to reveal."""
+        self.problem = None
+        self._reset_reveal(False)
+        self.statement.set_content(statement_html)
+        self.solution.set_content(solution_html if solution_html is not None else "")
+        self._clear_scene()
+        self.visual.setCurrentWidget(self.view)
+
+    def set_status(self, text: str) -> None:
+        win = self.window()
+        bar = win.statusBar() if isinstance(win, QtWidgets.QMainWindow) else None
+        if bar is not None:
+            bar.showMessage(text, 15000)
+
+    # ------------------------------------------------------------------ side panels
+    def ensure_panel(self, k: int):
+        """Build the Lessons (k = 1) or Assignment (k = 2) panel if needed and return it."""
+        if k == 1 and self.lessons_panel is None:
+            from .lessons_panel import LessonsPanel
+            self.lessons_panel = LessonsPanel(self)
+            self.lessons_panel.request_tab.connect(self._request_tab)
+            self._install_panel(1, self.lessons_panel)
+        elif k == 2 and self.assignment_panel is None:
+            from .assignment_panel import AssignmentPanel
+            self.assignment_panel = AssignmentPanel(self)
+            self._install_panel(2, self.assignment_panel)
+        return {1: self.lessons_panel, 2: self.assignment_panel}.get(k)
+
+    def _install_panel(self, k: int, panel: QtWidgets.QWidget):
+        if panel.layout() is not None:      # like the Problems page: room for the first group's title
+            panel.layout().setContentsMargins(6, 8, 6, 6)
+        scroll = QtWidgets.QScrollArea()
+        scroll.setWidget(panel)
+        scroll.setWidgetResizable(True)
+        scroll.setFrameShape(QtWidgets.QFrame.NoFrame)
+        self.side.blockSignals(True)
+        cur = self.side.currentIndex()
+        old = self.side.widget(k)
+        tip = self.side.tabToolTip(k)
+        self.side.removeTab(k)
+        self.side.insertTab(k, scroll, SUBTABS[k])
+        self.side.setTabToolTip(k, tip)
+        self.side.setCurrentIndex(cur)
+        self.side.blockSignals(False)
+        old.deleteLater()
+
+    def _side_changed(self, k: int):
+        if k == 0:                          # back to the generator: its problem, Reveal allowed again
+            self.generate()
+            return
+        QtWidgets.QApplication.setOverrideCursor(QtCore.Qt.WaitCursor)
+        try:
+            built = (self.lessons_panel, self.assignment_panel)[k - 1] is None
+            panel = self.ensure_panel(k)
+        finally:
+            QtWidgets.QApplication.restoreOverrideCursor()
+        if k == 1 and not built:
+            panel.refresh()                 # the lesson step back in the statement pane
+        elif k == 2:
+            if panel.problems and 0 <= panel.current < len(panel.problems):
+                panel.select(panel.current)
+            else:
+                self.show_html("<h2>Assignment</h2><p>Paste the assignment code from your instructor and your "
+                               "student ID, then press <b>Load assignment</b>.  Your answers are saved as a "
+                               "submission file that you upload to the LMS.</p>", "")
+
+    def _request_tab(self, cls_name: str, robot: str):
+        """``LessonsPanel.request_tab``: switch the main window to that tab (and robot)."""
+        win = self.window()
+        if hasattr(win, "open_target"):
+            win.open_target(cls_name, robot or None)
 
     def toggle_reveal(self, on):
+        if on and not self._reveal_allowed:
+            self._reset_reveal(False)
+            return
         self.reveal_btn.setText("Hide solution" if on else "Reveal solution")
         if self.problem is None:
             return

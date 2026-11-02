@@ -157,7 +157,7 @@ class _StreamWorker(QtCore.QThread):
 
 
 class HardwareTab(BaseTab):
-    title = "⑫ Hardware"
+    title = "⑭ Hardware"
     uses_serial_robot = False
 
     def __init__(self, ctx):

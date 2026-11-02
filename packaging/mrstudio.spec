@@ -121,5 +121,8 @@ if IS_MAC:
             "NSRequiresAquaSystemAppearance": False,
             "LSApplicationCategoryType": "public.app-category.education",
             "LSMinimumSystemVersion": "14.0",   # PySide6 6.12 / NumPy 2.4 wheels need macOS 14
+            # mrstudio://open?tab=…&robot=…&preset=… links (Knowledge Map "Open in MR Studio"); macOS delivers
+            # them as a QFileOpenEvent (gui/app.py UrlOpenFilter), see docs/KMAP-LINKING.md
+            "CFBundleURLTypes": [{"CFBundleURLName": "MR Studio", "CFBundleURLSchemes": ["mrstudio"]}],
         },
     )
