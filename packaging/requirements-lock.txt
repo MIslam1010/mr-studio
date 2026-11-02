@@ -37,7 +37,7 @@ libpinocchio==4.1.0
 matplotlib==3.11.2
 modern-robotics==1.1.1
 mpmath==1.3.0
-nodeenv==1.11.0
+nodeenv==1.11.1
 numpy==2.4.6
 packaging==26.3
 pgraph-python==1.0.0
