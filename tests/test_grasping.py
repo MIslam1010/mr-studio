@@ -135,6 +135,26 @@ def test_grasp_quality_continuous_at_mu_zero():
                             friction=False) == 0.0
 
 
+def test_grasp_quality_edges_carry_f_max_normal_force():
+    """Each contact's two cone edges are (f_max/2)(n +/- mu t): their normal parts sum to f_max, so Qual does not dip
+    as mu grows (it did with f_max/2 per *unit* edge: the normal capacity shrank as 1/sqrt(1 + mu^2))."""
+    cs = gr.PRESETS["Square — four frictionless fingers (form closure)"]["contacts"]
+    mus = [0.0, 1e-6, 0.1, 0.25, 0.5, 0.75, 1.0, 1.5, 2.0]
+    q = [gr.grasp_quality(gr.with_mu(cs, m)) for m in mus]
+    assert np.all(np.diff(q) >= -1e-9), q
+    assert q[1] == pytest.approx(q[0], rel=1e-4) and q[-1] > q[0]
+    # a single contact: the wrench-set vertices are 0, (f/2)(n + mu t), (f/2)(n - mu t) and f n
+    c = gr.Contact((0.0, 0.0), (0.0, 1.0), 0.8)
+    F = gr.wrench_matrix([c]) * (math.sqrt(1 + c.mu ** 2) / 2) * 3.0                  # the scaling, f_max = 3
+    np.testing.assert_allclose(F[2].sum(), 3.0)                                       # normal parts sum to f_max
+    np.testing.assert_allclose(np.abs(F[1]), 0.8 * 3.0 / 2)
+    rng = np.random.default_rng(5)
+    for _ in range(10):
+        cs = [gr.Contact.at_angle(*rng.uniform(-1, 1, 2), rng.uniform(-math.pi, math.pi)) for _ in range(3)]
+        q = [gr.grasp_quality(gr.with_mu(cs, m)) for m in (0.1, 0.3, 0.6, 1.2)]
+        assert np.all(np.diff(q) >= -1e-9), q
+
+
 def test_planar_exp_matches_rotation_about_cor():
     V = gr.twist_from_cor((1.0, 2.0), 0.5)
     T = gr.planar_exp(V, 1.3)

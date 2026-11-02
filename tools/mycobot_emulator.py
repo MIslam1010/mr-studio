@@ -26,6 +26,12 @@ set-point at ``deg_s_at_100 * speed% / 100`` deg/s (rate limited, no overshoot);
 with torque released nothing moves (the real arm would sag or fall).  Angles are reported with the firmware's
 0.01° resolution.
 
+Serial latency: ``latency_ms`` (``--latency MS``) delays every reply by that much, plus a uniform random
+``jitter_ms`` (``--jitter MS``: the delay is drawn from [latency - jitter, latency + jitter], never below 0) -- a
+stand-in for a slow USB-serial bridge and firmware loop (a real myCobot 280 answers in tens of ms).  The command
+takes effect when it arrives; only its reply is late.  Replies go out in order, one at a time (pymycobot waits
+for each before it sends the next command).  ``reply_delays`` records the delays applied.
+
 Fault injection (for the cable-pull and firmware-hang tests):
 
 * ``hangup()`` closes the master side: the slave port then fails on the next read, like a USB cable pulled
@@ -37,7 +43,7 @@ Fault injection (for the cable-pull and firmware-hang tests):
 
 Command line (prints the pty path, runs until Ctrl-C)::
 
-    .venv/bin/python tools/mycobot_emulator.py [--angles 0 0 0 0 0 0] [--deg-s-at-100 500]
+    .venv/bin/python tools/mycobot_emulator.py [--angles 0 0 0 0 0 0] [--deg-s-at-100 500] [--latency 50 --jitter 10]
 
 then choose "myCobot 280 (USB serial)" in the Hardware tab and type the printed path into *Port*.
 """
@@ -45,6 +51,7 @@ from __future__ import annotations
 
 import argparse
 import os
+import random
 import select
 import struct
 import sys
@@ -100,7 +107,8 @@ def split_frames(buf: bytearray) -> list[tuple[int, bytes]]:
 class MyCobotEmulator:
     """Firmware emulator on a pty.  ``start()`` launches the I/O thread; ``port`` is the slave path."""
 
-    def __init__(self, angles=(0.0,) * 6, deg_s_at_100: float = 500.0, powered: bool = False, verbose: bool = False):
+    def __init__(self, angles=(0.0,) * 6, deg_s_at_100: float = 500.0, powered: bool = False, verbose: bool = False,
+                 latency_ms: float = 0.0, jitter_ms: float = 0.0, seed: int | None = None):
         self.angles = [float(a) for a in angles]          # servo degrees, what GET_ANGLES reports
         self.target = list(self.angles)
         self.speed_pct = 0
@@ -113,6 +121,12 @@ class MyCobotEmulator:
         self.fresh_mode_supported = True
         self.errored: Counter = Counter()                  # commands answered with a corrupted frame
         self.verbose = verbose
+        if latency_ms < 0 or jitter_ms < 0:
+            raise ValueError("latency_ms and jitter_ms must be >= 0")
+        self.latency_ms = float(latency_ms)                # reply delay per command [ms] (see the module docstring)
+        self.jitter_ms = float(jitter_ms)                  # +- uniform jitter on that delay [ms]
+        self._rng = random.Random(seed)
+        self.reply_delays: list[float] = []                # delays applied [s], capped like ``log``
         self.counts: Counter = Counter()                   # handled frames per command name
         self.unknown: Counter = Counter()                  # unhandled command codes
         self.log: list[tuple[float, str, tuple]] = []      # (t, command, decoded args), capped
@@ -175,6 +189,13 @@ class MyCobotEmulator:
         with self.lock:
             self._advance()
             return [round(a, 2) for a in self.angles]
+
+    def reply_delay(self) -> float:
+        """Delay [s] before the next reply: latency +- uniform jitter, never negative."""
+        ms = self.latency_ms
+        if self.jitter_ms > 0:
+            ms += self._rng.uniform(-self.jitter_ms, self.jitter_ms)
+        return max(0.0, ms) / 1000.0
 
     # -- protocol --------------------------------------------------------------------------------
     def handle(self, cmd: int, data: bytes) -> bytes | None:
@@ -280,7 +301,22 @@ class MyCobotEmulator:
             buf.extend(chunk)
             for cmd, data in split_frames(buf):
                 reply = self.handle(cmd, data)
-                if reply is not None and not self.silent:
+                if reply is None:
+                    continue
+                delay = self.reply_delay()
+                if delay > 0:
+                    if len(self.reply_delays) < 100000:
+                        self.reply_delays.append(delay)
+                    try:                                   # wait, but wake at once for hangup() / close()
+                        r, _, _ = select.select([self._stop_r], [], [], delay)
+                    except (OSError, ValueError):
+                        return
+                    if r:
+                        return
+                    master = self._master
+                    if master is None:
+                        return
+                if not self.silent:
                     try:
                         os.write(master, reply)
                     except OSError:
@@ -293,11 +329,19 @@ def main(argv=None) -> int:
                     help="initial servo angles [deg] (default: all 0)")
     ap.add_argument("--deg-s-at-100", type=float, default=500.0,
                     help="servo speed at firmware speed 100%% [deg/s] (illustrative; default 500)")
+    ap.add_argument("--latency", type=float, default=0.0, metavar="MS",
+                    help="delay every reply by MS milliseconds (a slow serial link; default 0)")
+    ap.add_argument("--jitter", type=float, default=0.0, metavar="MS",
+                    help="uniform random +-MS on that delay (default 0)")
     ap.add_argument("--powered", action="store_true", help="start with the servos powered")
     ap.add_argument("-q", "--quiet", action="store_true", help="do not print every command")
     a = ap.parse_args(argv)
-    emu = MyCobotEmulator(a.angles, a.deg_s_at_100, powered=a.powered, verbose=not a.quiet).start()
-    print(f"myCobot emulator (pymycobot protocol) on {emu.port}", flush=True)
+    if a.latency < 0 or a.jitter < 0:
+        ap.error("--latency and --jitter must be >= 0")
+    emu = MyCobotEmulator(a.angles, a.deg_s_at_100, powered=a.powered, verbose=not a.quiet,
+                          latency_ms=a.latency, jitter_ms=a.jitter).start()
+    print(f"myCobot emulator (pymycobot protocol) on {emu.port}"
+          + (f", reply latency {a.latency:g} ms +- {a.jitter:g} ms" if a.latency or a.jitter else ""), flush=True)
     print("Use this path as the Port of the myCobot back-end; Ctrl-C to quit.", flush=True)
     try:
         while True:

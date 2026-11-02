@@ -247,9 +247,13 @@ def print_safety():
     sl = np.degrees(SafetySupervisor().soft_limits)
     print("  software limits (model, rule 1): " + ", ".join(f"J{j + 1} ±{sl[j, 1]:.0f}°" for j in range(len(sl))))
     print(f"  run-time guards: step clamp cap·{1e3 * HardwareRun.STEP_DT_MAX:.0f} ms per tick, stall freeze after "
-          f"{1e3 * HardwareRun.STALL_GAP:.0f} ms gap, tracking watchdog {np.degrees(HardwareRun.TRACK_ERR):.0f}° for "
+          f"{1e3 * HardwareRun.STALL_GAP:.0f} ms gap (stop after {HardwareRun.STALL_STOP_S:.0f} s of them), "
+          f"write/read on alternate ticks when both take > {1e3 * HardwareRun.SPLIT_IO_S:.0f} ms, tracking watchdog {np.degrees(HardwareRun.TRACK_ERR):.0f}° for "
           f"{1e3 * HardwareRun.TRACK_TIME:.0f} ms, {drv_mod.MAX_READ_FAILURES} failed reads in a row -> latched stop")
     print(f"  firmware streaming speed {drv_mod.DEFAULT_STREAM_SPEED_PCT} % (measure its deg/s at commissioning)")
+
+
+SLOW_LINK_MAX_MS = 80.0     # probe: median round trip above this is too slow to stream (stall gap 100 ms)
 
 
 def probe(rep: Report, cls, port: str, baud: int, n: int = 20) -> None:
@@ -281,10 +285,17 @@ def probe(rep: Report, cls, port: str, baud: int, n: int = 20) -> None:
             print("        servo angles [deg]: " + ", ".join(f"{x:.1f}" for x in last))
         if bad == n:
             rep.fail("no joint reading: check power, Transponder mode, cable and baud rate")
-        elif bad or np.median(dts) > 20.0:
-            rep.warn("slow or failed reads: the 50 Hz stream needs a read + a write within 20 ms")
-        else:
+        elif bad:
+            rep.warn("failed reads: do not stream until every read succeeds")
+        elif np.median(dts) <= 20.0:
             rep.ok("reads are fast enough for the 50 Hz stream")
+        elif np.median(dts) <= SLOW_LINK_MAX_MS and dts.max() < 1e3 * HardwareRun.STALL_GAP:
+            rep.warn(f"slow reads (median {np.median(dts):.0f} ms): the stream will alternate set-point and read "
+                     f"ticks, about {1e3 / (2 * np.median(dts)):.0f} set-points/s instead of 50 (tested with the "
+                     f"emulator up to 60 ms round trips); fine for slow H1 moves")
+        else:
+            rep.warn(f"reads too slow to stream (median {np.median(dts):.0f} ms, max {dts.max():.0f} ms; a tick "
+                     f"needs one round trip below {1e3 * HardwareRun.STALL_GAP:.0f} ms): do not stream")
     except Exception as e:
         rep.fail(f"probe failed: {e}")
     finally:

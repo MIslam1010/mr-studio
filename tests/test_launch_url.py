@@ -88,6 +88,24 @@ def test_launch_url_bad_input_is_harmless(win, qapp):
     assert win.ctx.robot.name in __import__("mrstudio.robots", fromlist=["ROBOTS"]).ROBOTS
 
 
+def test_rejected_url_is_logged_truncated(win, qapp, monkeypatch):
+    import mrstudio.gui.app as app_mod
+    logged = []
+    monkeypatch.setattr(app_mod, "log_text", logged.append)
+    long_url = "mrstudio://delete?tab=1&x=" + "A" * 500 + "\n[forged] line"
+    assert not win.open_url(long_url)
+    assert len(logged) == 1 and "launch URL ignored" in logged[0]
+    assert repr(long_url[:200]) in logged[0] and "A" * 300 not in logged[0] and "\n" not in logged[0]
+    assert "more chars" in logged[0]
+    logged.clear()
+    f = app_mod.UrlOpenFilter()                       # the macOS link path ends in the same open_url
+    f.set_window(win)
+    from PySide6 import QtCore, QtGui
+    assert f.eventFilter(None, QtGui.QFileOpenEvent(QtCore.QUrl("mrstudio://evil?tab=1"))) is True
+    assert len(logged) == 1 and "'mrstudio://evil?tab=1'" in logged[0]
+    assert app_mod.url_for_log("mrstudio://open?tab=0") == "'mrstudio://open?tab=0'"
+
+
 def test_file_open_event_is_queued_then_delivered(win, qapp):
     from PySide6 import QtCore, QtGui
     from mrstudio.gui.app import UrlOpenFilter

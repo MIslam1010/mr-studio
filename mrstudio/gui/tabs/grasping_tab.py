@@ -61,8 +61,11 @@ contacts prevent spinning (p. 481).</p>
 $$CF=\left\{\sum_{i=1}^{j}f_{i}\mathcal{F}_{i}\ |\ f_{i}\in[0,f_{i,max}]\right\}\quad(12.15)$$<span class="ref">p. 484</span>
 <p>and Qual is the radius of the largest wrench ball about the origin inside CF, moments divided by a
 characteristic length $r$, origin near the centre of the body (p. 485).  Here $f_{i,max}=1$, $r$ = largest
-centroid-to-vertex distance.  With friction the tab applies (12.15) to the two cone-edge wrenches of each
-contact, each limited to $f_{max}/2$ (an extension: the book states it for the normals).</p>
+centroid-to-vertex distance.  With friction the tab applies (12.15) to the two cone-edge forces of each
+contact, $\frac{f_{max}}{2}(\hat{n}\pm\mu\hat{t})$, so that their normal components add up to $f_{max}$: a contact
+pushes with at most $f_{max}$ along its normal, and a larger $\mu$ only adds tangential force, so Qual never
+decreases as $\mu$ grows and equals the frictionless value at $\mu=0$ (an extension: the book states (12.15)
+for the normals).</p>
 <h3>Friction and force closure (Sec. 12.2)</h3>
 <p>Coulomb friction (p. 486), normal along $\hat{z}$:</p>
 $$\sqrt{f_{x}^{2}+f_{y}^{2}}\leq\mu f_{z},\quad f_{z}\geq 0\quad(12.16)$$<span class="ref">p. 486</span>
@@ -349,7 +352,7 @@ class GraspingTab(BaseTab):
         ctr, r = self.centroid(), self.char_length()
         self.qual = gr.grasp_quality(cs, ctr, r, 1.0, friction=True) if 0 < 2 * len(cs) <= 12 else float("nan")
         self.qual_lbl.setText(f"Grasp metric (12.15): Qual = {self.qual:.4f} "
-                              f"<i>(moments about the centroid / r, r = {r:.2f}; f_max = 1 per contact, split over its cone edges)</i>")
+                              f"<i>(moments about the centroid / r, r = {r:.2f}; normal force ≤ f_max = 1 per contact, split over its two cone edges)</i>")
         if self.gravity:
             Fm = gr.wrench_matrix(cs, friction=True)
             g = 9.81

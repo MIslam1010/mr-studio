@@ -338,3 +338,111 @@ def test_hardware_tab_session_over_emulator(qapp, emu, monkeypatch, tmp_path):
     tab.shutdown()
     assert drv.latched and not drv.connected and tab.driver is None
     assert emu.counts["STOP"] >= 1                                # closing halts the arm
+
+
+# ------------------------------------------------------------------------------------------- slow serial link
+def _worker_stream(run: HardwareRun, q_now, timeout: float = 15.0) -> list[float]:
+    """The Hardware tab's ``_StreamWorker`` timing: 50 Hz, re-phased after an overrun.  Returns the tick gaps."""
+    run.start(q_now)
+    gaps, t_prev = [], time.monotonic()
+    next_t, t_end = t_prev, t_prev + timeout
+    while not run.finished and time.monotonic() < t_end:
+        next_t += 1.0 / RATE
+        delay = next_t - time.monotonic()
+        if delay < 0:
+            next_t, delay = time.monotonic(), 0.0
+        time.sleep(delay)
+        now = time.monotonic()
+        gaps.append(now - t_prev)
+        t_prev = now
+        run.safe_step()
+    assert run.finished, "run did not finish in time"
+    return gaps
+
+
+def test_emulator_latency_delays_every_reply():
+    from pymycobot import MyCobot280
+    with MyCobotEmulator(angles=START_DEG, latency_ms=50, jitter_ms=10, seed=3) as e:
+        mc = MyCobot280(e.port, 115200)
+        try:
+            t0 = time.monotonic()
+            for _ in range(5):
+                assert mc.get_angles() == START_DEG
+            per_call = (time.monotonic() - t0) / 5
+        finally:
+            mc._serial_port.close()
+    assert len(e.reply_delays) == 5 and all(0.04 <= d <= 0.06 for d in e.reply_delays)
+    assert 0.04 <= per_call < 0.2
+    import mycobot_emulator as me
+    assert me.MyCobotEmulator(latency_ms=0).reply_delay() == 0.0
+    with pytest.raises(ValueError):
+        me.MyCobotEmulator(latency_ms=-1)
+
+
+def test_probe_flags_a_slow_link(tmp_path, monkeypatch, capsys):
+    from pymycobot import MyCobot280
+    monkeypatch.setenv("MRSTUDIO_MYCOBOT_CALIBRATION", str(tmp_path / "none.json"))
+    with MyCobotEmulator(angles=START_DEG, latency_ms=50) as e:
+        rep = dry.Report()
+        dry.probe(rep, MyCobot280, e.port, 115200, n=5)
+    assert not rep.fails and any("alternate set-point and read ticks" in w for w in rep.warns), rep.warns
+
+
+@pytest.mark.parametrize("latency_ms, jitter_ms", [(40, 0), (60, 0), (50, 10)])
+def test_stream_over_slow_link_completes_without_stall(latency_ms, jitter_ms):
+    """40-60 ms per round trip (get_angles and send_angles): a tick that wrote and read would take 80-120 ms+, i.e.
+    every tick a > 100 ms stall (trajectory time frozen for good at 60 ms).  The run alternates write and read
+    ticks on a slow link, so the 2 s move completes, unlatched, without a stall and with the driver's deadlines
+    untouched."""
+    try:
+        e = MyCobotEmulator(angles=START_DEG, latency_ms=latency_ms, jitter_ms=jitter_ms, seed=7).start()
+    except PermissionError as err:
+        pytest.fail(f"cannot open a pseudo-terminal for the emulator ({err}); run the tests outside the sandbox")
+    try:
+        d = _connected(e)
+        try:
+            assert d.io_round_trip_s >= latency_ms / 1000.0 - jitter_ms / 1000.0
+            sup = SafetySupervisor(session="H1")
+            q0 = d.read_joints()
+            q1 = q0 + np.radians([20, -15, 10, 0, 10, 0])
+            t, q = quintic_move(q0, q1, sup.speed_cap, dt=1 / RATE, T=2.0)
+            run = HardwareRun(d, sup, t, q)
+            t_start = time.monotonic()
+            gaps = _worker_stream(run, q0)
+            wall = time.monotonic() - t_start
+            assert run.reason == "trajectory complete" and run.error is None, (run.reason, run.error)
+            assert not d.latched and run.stalls == 0 and run.split_ticks > 0
+            assert d.read_failures == 0 and d.deadline_misses == 0
+            assert max(gaps[1:]) < HardwareRun.STALL_GAP                    # one round trip per tick
+            assert wall < 2.0 + HardwareRun.HOLD_AFTER + 1.0                 # no long catch-up
+            lg = run.log
+            assert np.all(lg.fresh == 1)
+            err = np.degrees(np.abs(lg.cmd - lg.meas)).max()
+            assert err < 2.0
+            np.testing.assert_allclose(e.reported_angles(), CAL.to_servo_deg(q1), atol=0.02)
+            assert all(latency_ms - jitter_ms - 1e-6 <= 1e3 * x <= latency_ms + jitter_ms + 1e-6 for x in e.reply_delays)
+            print(f"\n  latency {latency_ms}±{jitter_ms} ms: ticks {len(gaps)} in {wall:.2f} s "
+                  f"({len(gaps) / wall:.1f} Hz), set-points {e.counts['SEND_ANGLES'] / wall:.1f} Hz, "
+                  f"reads {len(lg) / wall:.1f} Hz, worst tick gap {1e3 * max(gaps[1:]):.0f} ms, "
+                  f"max |cmd - meas| {err:.3f}°")
+        finally:
+            d.disconnect()
+    finally:
+        e.close()
+
+
+def test_hung_controller_still_latches_within_one_second_on_slow_link():
+    """The per-call deadline (not the tick timing) catches a hung controller: unchanged on a 50 ms link."""
+    e = MyCobotEmulator(angles=START_DEG, latency_ms=50).start()
+    try:
+        d = _connected(e)
+        try:
+            run, delay = _fault_mid_run(e, d, lambda em: setattr(em, "silent", True))
+            # a write tick misses its deadline ("no answer") or a read tick fails with no good read for > 0.3 s
+            assert run.error and ("no answer" in run.error or "did not report" in run.error) and d.latched
+            assert delay <= 1.0, delay
+            assert run.stop_confirmed is False and d.halt_confirmed is False and d.deadline_misses >= 1
+        finally:
+            d.disconnect()
+    finally:
+        e.close()

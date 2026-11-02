@@ -784,6 +784,67 @@ def test_stall_freezes_trajectory_time():
     assert any(e["kind"] == "stall" for e in run.log.events)
 
 
+def _slow_link(arm, clock, call_s):
+    """Every set-point write and joint read of ``arm`` takes ``call_s`` on ``clock`` (a slow serial link)."""
+    send, read = arm.send_joints, arm.read_joints
+
+    def slow_send(*a, **k):
+        clock.advance(call_s)
+        return send(*a, **k)
+
+    def slow_read():
+        clock.advance(call_s)
+        return read()
+
+    arm.send_joints, arm.read_joints = slow_send, slow_read
+    arm.io_round_trip_s = call_s            # as MyCobotDriver reports it (seeds the run's first tick)
+
+
+def _stream_worker(run, clock, q0, period=0.02, limit=30.0):
+    """The streaming worker's timing on a ManualClock: 20 ms period, re-phased (no burst) after an overrun."""
+    run.io_clock = clock
+    run.start(q0)
+    while not run.finished and clock() < limit:
+        t0 = clock()
+        run.safe_step()
+        clock.advance(max(0.0, period - (clock() - t0)))
+
+
+@pytest.mark.parametrize("call_ms", [40, 60])
+def test_slow_link_alternates_write_and_read_ticks(call_ms):
+    """40-60 ms per serial call: a write plus a read (80-120 ms) would make every tick a stall.  The run splits
+    them over alternate ticks: no stall, the step clamp still holds per set-point and the run completes."""
+    arm, clock = _arm(noise_deg=0, quantise=False)
+    sup = SafetySupervisor(session="H1")
+    q0 = arm.read_joints()
+    q1 = q0 + np.radians([20, -15, 10, 0, 10, 0])
+    t, q = quintic_move(q0, q1, sup.speed_cap, dt=0.02, T=2.0)
+    _slow_link(arm, clock, call_ms / 1000.0)
+    run = HardwareRun(arm, sup, t, q, clock=clock)
+    _stream_worker(run, clock, q0)
+    assert run.reason == "trajectory complete" and run.error is None and not arm.latched
+    assert run.stalls == 0 and run.split_ticks > 0
+    lg = run.log
+    assert np.all(lg.fresh == 1) and np.diff(lg.t).max() <= 2 * call_ms / 1000.0 + 1e-9   # one row per read tick
+    dcmd = np.abs(np.diff(lg.cmd, axis=0))                       # consecutive set-points (one write per row)
+    lim = sup.speed_cap * np.minimum(np.diff(lg.t), HardwareRun.STEP_DT_MAX)[:, None]
+    assert np.all(dcmd <= lim + 1e-12)
+    np.testing.assert_allclose(lg.cmd[-1], q1, atol=1e-9)         # completes only once the command got there
+
+
+def test_link_too_slow_stops_instead_of_freezing():
+    """120 ms per call: even one call per tick is a stall.  The run must not hold a frozen trajectory forever."""
+    arm, clock = _arm(noise_deg=0, quantise=False)
+    sup = SafetySupervisor(session="H1")
+    q0 = arm.read_joints()
+    t, q = quintic_move(q0, q0 + np.radians([10, 0, 0, 0, 0, 0]), sup.speed_cap, dt=0.02, T=2.0)
+    _slow_link(arm, clock, 0.12)
+    run = HardwareRun(arm, sup, t, q, clock=clock)
+    _stream_worker(run, clock, q0)
+    assert run.finished and run.reason.startswith("streaming stalled") and arm.latched
+    assert run.t_stop <= HardwareRun.STALL_STOP_S + 0.5 and run.stop_confirmed
+
+
 def test_tracking_watchdog_stops_run():
     arm, _ = _arm(noise_deg=0, quantise=False, lag_tau=3.0)  # a servo that cannot keep up
     sup = SafetySupervisor(session="H2", first_run=False)

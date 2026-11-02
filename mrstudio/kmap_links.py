@@ -4,8 +4,9 @@ Two directions:
 
 * **MR Studio -> map.** Every tab's theory panel ends with a "Knowledge Map" footer (``theory_footer``) that links
   up to eight map nodes about the tab's topic. ``map_url(node_id)`` builds the deep link
-  ``<map>#map/<node id>/<map tab>``; the map itself is the local student edition if it is installed, else the
-  published artifact (environment variable ``MRSTUDIO_KMAP_URL`` overrides both).
+  ``<map>#map/<node id>/<map tab>``; the map itself is the local student edition in the folder named by the
+  environment variable ``MRSTUDIO_KMAP_DIR`` if that is set and holds one, else the published artifact
+  (``MRSTUDIO_KMAP_URL`` overrides both).  There is no built-in local path.
 * **Map -> MR Studio.** The map can open MR Studio on the right tab with
   ``mrstudio://open?tab=<class or 0-based index>&robot=<name>&preset=<key>``; ``parse_launch_url`` reads such a
   URL and ``launch_url`` writes one.
@@ -92,7 +93,7 @@ SECTION_TABS: dict[str, tuple[str, str | None, str | None]] = {
 #: the map's own tab opened by a deep link (Learn | Practise | Context | Sources)
 MAP_TAB = "learn"
 ARTIFACT_URL = "https://claude.ai/artifact/Qd3y25kCzuRo4ChtS8gsW5"
-KMAP_DIR_DEFAULT = Path.home() / "Documents/Edu/Lectures/Robotics/Knowledge Map"
+KMAP_DIR_ENV = "MRSTUDIO_KMAP_DIR"     # folder of a local Knowledge Map copy (no default: unset = artifact)
 TARGETS_JSON = Path(__file__).resolve().parent / "data" / "kmap" / "mrstudio_targets.json"
 SCHEME = "mrstudio"
 SCHEME_TEMPLATE = "mrstudio://open?tab={tab}&robot={robot}&preset={preset}"
@@ -130,8 +131,10 @@ def mr_section(where: str) -> str | None:
 
 
 # ----------------------------------------------------------------------------- map URLs
-def kmap_dir() -> Path:
-    return Path(os.environ.get("MRSTUDIO_KMAP_DIR") or KMAP_DIR_DEFAULT)
+def kmap_dir() -> Path | None:
+    """Folder of the local Knowledge Map (``MRSTUDIO_KMAP_DIR``); None when the variable is unset or empty."""
+    env = os.environ.get(KMAP_DIR_ENV, "").strip()
+    return Path(env).expanduser() if env else None
 
 
 def map_base_url() -> str:
@@ -139,8 +142,9 @@ def map_base_url() -> str:
     env = os.environ.get("MRSTUDIO_KMAP_URL", "").strip()
     if env:
         return env.split("#", 1)[0]
-    local = kmap_dir() / "Robotics Knowledge Map - Student Edition" / "index.html"
-    if local.is_file():
+    d = kmap_dir()
+    local = None if d is None else d / "Robotics Knowledge Map - Student Edition" / "index.html"
+    if local is not None and local.is_file():
         return local.resolve().as_uri()
     return ARTIFACT_URL
 

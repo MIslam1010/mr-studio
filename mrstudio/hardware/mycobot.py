@@ -291,6 +291,7 @@ class MyCobotDriver(ArmDriver):
         self.slow_call_deadline_s = SLOW_CALL_DEADLINE_S
         self.stale_read_limit_s = STALE_READ_LIMIT_S
         self.deadline_misses = 0              # SDK calls that did not return within their deadline
+        self.io_round_trip_s = 0.0            # duration of the last answered SDK call [s] (seeds HardwareRun)
         self.fresh_mode: int | None = None    # firmware fresh mode read back on connect (None = not verified)
 
     # -- calibration -------------------------------------------------------------------------
@@ -320,7 +321,7 @@ class MyCobotDriver(ArmDriver):
                     read_failures=self.read_failures, clamp_count=self.clamp_count,
                     fresh_mode=self.fresh_mode, call_deadline_s=self.call_deadline_s,
                     stop_deadline_s=self.stop_deadline_s, stale_read_limit_s=self.stale_read_limit_s,
-                    deadline_misses=self.deadline_misses)
+                    deadline_misses=self.deadline_misses, io_round_trip_s=round(self.io_round_trip_s, 4))
 
     # -- SDK access ----------------------------------------------------------------------------
     def _call(self, what: str, *args, deadline: float | None = None, ack: bool = True):
@@ -332,6 +333,7 @@ class MyCobotDriver(ArmDriver):
             mc, io = self.mc, self._io
             if mc is None or io is None:
                 raise HardwareError("not connected")
+            t_call = time.monotonic()
             fut = io.submit(getattr(mc, what), *args)
             done, _ = _wait_futures([fut], timeout=deadline)
             if not done:
@@ -344,6 +346,7 @@ class MyCobotDriver(ArmDriver):
                 r = fut.result()
             except Exception as e:
                 raise HardwareError(f"{what} failed on {self.port}: {e}") from e
+            self.io_round_trip_s = time.monotonic() - t_call
             if ack and _not_acknowledged(r):
                 raise HardwareError(f"{what}: the arm on {self.port} did not acknowledge the command "
                                     f"(pymycobot returned {r!r})")

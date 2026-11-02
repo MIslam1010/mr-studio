@@ -75,7 +75,9 @@ The software enforces 1, 3 and 4 and blocks <b>Run</b> until the people at the b
 <b>Stop</b> is always active and latches the arm until <i>Reset latch</i>.</p>
 <h3>Run-time guards</h3>
 <p>While streaming, each set-point may move at most $\dot{\theta}_{cap}\,\min(\Delta t, 40\ \mathrm{ms})$
-from the previous one; a tick gap above 100 ms holds the trajectory time (no jump ahead after a stall);
+from the previous one; a tick gap above 100 ms holds the trajectory time (no jump ahead after a stall),
+and such gaps for a whole second stop the run; on a slow serial link (write + read > 50 ms) the ticks
+alternate between writing a set-point and reading the joints, so each tick waits for one round trip;
 $|\theta_{cmd}-\theta_{meas}|>10^{\circ}$ on any joint for more than 150 ms, three failed joint reads in a
 row or any communication error stop and latch the arm.  On the myCobot every set-point is mapped with
 the commissioned sign and offset, $\theta_{servo}=s\,\theta+o$, and clamped 10° inside the servo travel.</p>

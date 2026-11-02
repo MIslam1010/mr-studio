@@ -2,6 +2,7 @@
 import importlib
 import json
 import os
+from pathlib import Path
 
 import pytest
 
@@ -131,6 +132,41 @@ def test_map_url_env_and_fallback(monkeypatch, tmp_path):
     (se / "index.html").write_text("<html></html>")
     u = kl.map_url("04.01.1", "practise")
     assert u.startswith("file://") and u.endswith("/index.html#map/04.01.1/practise") and " " not in u
+
+
+def test_no_built_in_local_map_path(monkeypatch, tmp_path):
+    """The local map comes only from MRSTUDIO_KMAP_DIR: unset (or empty) -> the published artifact, whatever is in
+    the home folder; and no user's home path is baked into the module."""
+    monkeypatch.delenv("MRSTUDIO_KMAP_URL", raising=False)
+    monkeypatch.setenv("HOME", str(tmp_path))
+    se = tmp_path / "Documents/Edu/Lectures/Robotics/Knowledge Map/Robotics Knowledge Map - Student Edition"
+    se.mkdir(parents=True)
+    (se / "index.html").write_text("<html></html>")              # a map at the old hard-coded place is ignored
+    for value in (None, "", "  "):
+        if value is None:
+            monkeypatch.delenv("MRSTUDIO_KMAP_DIR", raising=False)
+        else:
+            monkeypatch.setenv("MRSTUDIO_KMAP_DIR", value)
+        assert kl.kmap_dir() is None and kl.map_base_url() == kl.ARTIFACT_URL
+    assert not hasattr(kl, "KMAP_DIR_DEFAULT")
+    src = Path(kl.__file__).read_text(encoding="utf-8")
+    assert "Documents/Edu" not in src and "Path.home()" not in src
+
+
+def test_make_kmap_links_needs_a_map_folder(monkeypatch, tmp_path, capsys):
+    import sys
+    tools = Path(kl.__file__).resolve().parents[1] / "tools"
+    monkeypatch.syspath_prepend(str(tools))
+    mk = importlib.import_module("make_kmap_links")
+    monkeypatch.delenv("MRSTUDIO_KMAP_DIR", raising=False)
+    out, doc = tmp_path / "t.json", tmp_path / "k.md"
+    with pytest.raises(SystemExit) as e:
+        mk.main(["--out", str(out), "--doc", str(doc)])
+    assert e.value.code == 2 and "--kmap DIR or set MRSTUDIO_KMAP_DIR" in capsys.readouterr().err
+    monkeypatch.setenv("MRSTUDIO_KMAP_DIR", str(tmp_path))             # set, but not a map folder
+    with pytest.raises(SystemExit):
+        mk.main(["--out", str(out), "--doc", str(doc)])
+    assert not out.exists() and not doc.exists() and "make_kmap_links" in sys.modules
 
 
 # ----------------------------------------------------------------------------- footer

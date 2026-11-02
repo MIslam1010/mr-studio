@@ -97,8 +97,20 @@ class HardwareRun:
       or the timing does (the first reference is the measured pose at start);
     * **stall freeze** -- a tick gap > 100 ms (GUI or USB stall) does not advance the trajectory time, so
       the set-point never jumps ahead to catch up with the wall clock;
+    * **stall stop** -- tick gaps > 100 ms for ``STALL_STOP_S`` in a row (a link too slow to stream at all) stop
+      and latch the arm instead of holding a frozen run forever;
     * **tracking watchdog** -- |cmd − meas| > 10° on any joint for > 150 ms stops and latches the arm;
     * **communication errors** -- ``safe_step`` turns any exception into a latched stop and ends the run.
+
+    **Slow serial link** (tick-rate adaptation): a tick normally writes one set-point and reads the joints back
+    (two blocking round trips).  When the last write plus the last read took longer than ``SPLIT_IO_S``, the
+    following ticks do ONE of them each, alternately (write, read, write, ...), so a tick gap stays near one
+    round trip (well under ``STALL_GAP`` for round trips up to ~90 ms) instead of two.  The streaming worker
+    re-phases on overrun, so the tick rate simply follows the link (≈ 1 / round trip).  Only read ticks add a
+    log row (its ``cmd`` is the set-point in force); the step clamp counts the time since the previous
+    *write*, so it still limits every set-point step to ``speed_cap · min(dt, 40 ms)``.  As that clamp can make
+    the command lag the trajectory on a slow link, a run only completes once the command has reached the
+    trajectory's end point.  The per-call deadlines of the driver (hung controller) are unaffected.
 
     ``step()`` is called by one thread at a time (the streaming worker, or the GUI timer / a test loop);
     ``request_stop()`` may come from any thread.
@@ -107,6 +119,8 @@ class HardwareRun:
     LOG_AFTER_STOP = 1.0      # s of logging after a stop (deceleration for HW-6)
     STEP_DT_MAX = 0.04        # s: the per-tick step clamp allows at most speed_cap * 40 ms
     STALL_GAP = 0.10          # s: a longer tick gap freezes the trajectory time
+    STALL_STOP_S = 1.0        # s of consecutive stalled ticks (>= 3 of them) -> latched stop
+    SPLIT_IO_S = 0.05         # s: write + read slower than this -> alternate write ticks and read ticks
     TRACK_ERR = np.radians(10.0)
     TRACK_TIME = 0.15         # s the tracking error may exceed TRACK_ERR
 
@@ -127,6 +141,14 @@ class HardwareRun:
         self.stop_confirmed: bool | None = None   # outcome of the last halt request
         self.tau = 0.0                            # trajectory time (frozen during stalls)
         self.stalls = 0
+        self._stall_run = (0, 0.0)                # (consecutive stalled ticks, their total gap [s])
+        self._io_w = 0.0                          # duration of the last set-point write [s]
+        self._io_r = 0.0                          # duration of the last joint read [s]
+        self.io_clock = time.monotonic            # times the driver calls (tests: a ManualClock)
+        self.split_ticks = 0                      # ticks that did only a write or only a read (slow link)
+        self._read_next = False                   # split mode: the next tick reads (the last one wrote)
+        self._t_write = None                      # run time of the last set-point write
+        self._t_row = None                        # run time of the last log row
         self._t_prev = 0.0
         self._cmd_prev = None
         self._err_since = np.full(driver.spec.n, np.nan)
@@ -145,6 +167,9 @@ class HardwareRun:
         """Start the clock and send the first set-point.  ``q_now`` (measured pose) seeds the step clamp."""
         self.t0 = self.clock()
         self._t_prev = 0.0
+        self._t_write = self._t_row = None
+        rt = getattr(self.driver, "io_round_trip_s", 0.0)       # last round trip seen by the driver (if it says)
+        self._io_w = self._io_r = float(rt) if isinstance(rt, (int, float)) and np.isfinite(rt) else 0.0
         self._cmd_prev = None if q_now is None else np.asarray(q_now, float).copy()
         self.event("start", f"duration {self.duration:.2f} s, speed cap {100 * self.sup.speed_fraction:.0f} %")
         self.safe_step()
@@ -194,11 +219,24 @@ class HardwareRun:
         if gap > self.STALL_GAP:
             self.stalls += 1
             self.event("stall", f"tick gap {1e3 * gap:.0f} ms: trajectory time held at {self.tau:.3f} s")
-        elif gap > 0:
-            self.tau += gap
+            n, total = self._stall_run
+            self._stall_run = (n + 1, total + gap)
+            if (self.t_stop is None and self._stall_run[0] >= 3 and self._stall_run[1] >= self.STALL_STOP_S):
+                self.request_stop(f"streaming stalled: {self._stall_run[0]} tick gaps > "
+                                  f"{1e3 * self.STALL_GAP:.0f} ms in a row ({self._stall_run[1]:.1f} s; "
+                                  f"serial link too slow?)")
+        else:
+            self._stall_run = (0, 0.0)
+            if gap > 0:
+                self.tau += gap
         if self.auto_stop_at is not None and self.t_stop is None and self.tau >= self.auto_stop_at:
             self.request_stop(f"automatic stop test at t = {self.auto_stop_at:.2f} s")
         stopped = self.t_stop is not None
+        split = (self._io_w + self._io_r) > self.SPLIT_IO_S
+        do_write = not stopped and not (split and self._read_next and self._cmd_prev is not None)
+        do_read = stopped or not split or not do_write
+        if split:
+            self.split_ticks += 1
         if stopped:
             if self.driver.ensure_halted() and self.stop_confirmed is False:   # halt before any further read
                 self.stop_confirmed = True                                        # (a failed one is retried)
@@ -207,16 +245,29 @@ class HardwareRun:
                 cmd = self._cmd_prev
             else:
                 cmd = self.log.cmd[-1] if len(self.log) else sample(self.t_traj, self.q_traj, self.tau)
-        else:
+        elif do_write:
             cmd = self.sup.clamp(sample(self.t_traj, self.q_traj, self.tau))
             if self._cmd_prev is not None:
-                lim = self.sup.speed_cap * min(max(gap, 0.0), self.STEP_DT_MAX)
+                dt_w = gap if self._t_write is None else t - self._t_write      # since the previous set-point
+                lim = self.sup.speed_cap * min(max(dt_w, 0.0), self.STEP_DT_MAX)
                 cmd = self._cmd_prev + np.clip(cmd - self._cmd_prev, -lim, lim)
+            t_io = self.io_clock()
             self.driver.send_joints(cmd, self.sup.speed_fraction)
+            self._io_w = self.io_clock() - t_io
             self._cmd_prev = cmd
+            self._t_write = t
+        else:
+            cmd = self._cmd_prev                    # read tick of a slow link: the set-point in force
+        self._read_next = do_write
+        if not do_read:
+            return None                             # write tick of a slow link: no reading, no log row
+        t_io = self.io_clock()
         meas = self.driver.read_joints()
+        self._io_r = self.io_clock() - t_io
         fresh = bool(getattr(self.driver, "last_read_fresh", True))
-        self.log.append(t, cmd, meas, stop=stopped, fresh=fresh, dt=gap,
+        dt_row = gap if self._t_row is None else t - self._t_row
+        self._t_row = t
+        self.log.append(t, cmd, meas, stop=stopped, fresh=fresh, dt=dt_row,
                         servo_cmd=getattr(self.driver, "last_cmd_servo_deg", None),
                         servo_meas=getattr(self.driver, "last_meas_servo_deg", None) if fresh else None)
         if not stopped:
@@ -224,7 +275,8 @@ class HardwareRun:
             stopped = self.t_stop is not None
         if stopped and t - self.t_stop >= self.LOG_AFTER_STOP:
             self.finished = True
-        elif not stopped and self.tau >= self.duration + self.HOLD_AFTER:
+        elif (not stopped and self.tau >= self.duration + self.HOLD_AFTER
+              and np.allclose(cmd, self.sup.clamp(self.q_traj[-1]), rtol=0.0, atol=1e-9)):
             self.finished = True
             self.reason = "trajectory complete"
             self.event("complete")

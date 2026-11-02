@@ -291,14 +291,19 @@ def grasp_quality(contacts: list[Contact], center=(0.0, 0.0), r: float = 1.0, f_
     """Grasp metric of MR Sec. 12.1.7.3: the signed radius of the largest origin-centred ball inside
     ``CF = {sum f_i F_i | f_i in [0, f_max]}`` (12.15), with moments taken about ``center`` and divided by the
     characteristic length ``r``.  CF always contains the origin (all f_i = 0); without closure the origin lies on
-    its boundary and the metric is 0 (no closure).  With ``friction`` the F_i are the unit friction-cone edge
-    wrenches, each limited to ``f_max / 2`` so that a contact's force budget does not jump at mu = 0+ (MR states
-    (12.15) for the contact normals; this split is the tab's extension to friction cones)."""
+    its boundary and the metric is 0 (no closure).  With ``friction`` the F_i are the friction-cone edge wrenches
+    of each contact, scaled so that the *normal* components of its two edges sum to ``f_max``: each edge force is
+    ``(f_max / 2)(n +/- mu t)`` (normal part f_max / 2, tangential part mu f_max / 2).  A contact can then push
+    with any normal force up to ``f_max`` and, at normal force a, any tangential force up to
+    ``mu min(a, f_max - a)``; that set only grows with mu, so Qual never decreases as mu grows, and at mu = 0 the
+    two edges add up to the single normal of length ``f_max`` (continuous at mu = 0+).  MR states (12.15) for the
+    contact normals; the split over the cone edges is the tab's extension to friction cones."""
     from scipy.spatial import ConvexHull, QhullError
     cs = [Contact(c.p - np.asarray(center, float), c.n, c.mu) for c in contacts]
     F = wrench_matrix(cs, friction=friction) * f_max
-    if friction:
-        F = F / np.concatenate([[len(cone_edges(c))] * len(cone_edges(c)) for c in cs])
+    if friction:      # unit edges (n +/- mu t)/sqrt(1 + mu^2) -> (n +/- mu t)/2: normal parts sum to f_max
+        F = F * np.concatenate([[math.sqrt(1.0 + c.mu ** 2) / 2.0] * 2 if len(cone_edges(c)) == 2 else [1.0]
+                                for c in cs])
     F[0] /= r
     j = F.shape[1]
     if j == 0:
@@ -575,6 +580,18 @@ def validation_checks() -> list[Check]:
     checks.append(Check("Grasp metric (12.15): Qual > 0 exactly for form-closure grasps (80 random sets)",
                         "MR 12.1.7", float(mism), 0.0,
                         "radius of the largest origin-centred ball in the convex hull of the 2^j vertex sums",
+                        CATEGORY))
+    # 11b. with friction: each contact's cone edges carry normal parts summing to f_max -> Qual continuous at
+    # mu = 0+ and non-decreasing in mu (the contact force sets are nested)
+    worst = 0.0
+    for _ in range(20):
+        cs = _random_contacts(rng, 3)
+        qs = [grasp_quality(with_mu(cs, m)) if m > 0 else grasp_quality(cs, friction=False)
+              for m in (0.0, 1e-6, 0.1, 0.25, 0.5, 1.0, 2.0)]
+        worst = max(worst, abs(qs[1] - qs[0]), max(0.0, -min(np.diff(qs[1:]))))
+    checks.append(Check("Grasp metric with friction: continuous at μ = 0+ and non-decreasing in μ (20 random 3-finger grasps)",
+                        "MR 12.1.7, 12.2", worst, 1e-6,
+                        "edge forces (f_max/2)(n ± μt): normal parts of a contact's two edges sum to f_max",
                         CATEGORY))
 
     # 12. Example 12.9: dynamic grasp k1..k3 vs the book's closed form; feasible range -5g <= a_x <= -g

@@ -161,6 +161,17 @@ def log_text(text: str) -> None:
         pass
 
 
+URL_LOG_MAX = 200
+
+
+def url_for_log(url) -> str:
+    """A received URL as it goes into the log: the raw text cut to ``URL_LOG_MAX`` characters, then ``repr``-quoted
+    (control characters and newlines cannot forge log lines)."""
+    text = str(url)
+    cut = text[:URL_LOG_MAX]
+    return repr(cut) + (f" (+{len(text) - URL_LOG_MAX} more chars)" if len(text) > URL_LOG_MAX else "")
+
+
 def _log_exception(et, ev, tb, where: str = "") -> None:
     log_text(f"Uncaught exception{where}:\n" + "".join(traceback.format_exception(et, ev, tb)))
     now = time.monotonic()
@@ -603,7 +614,7 @@ class MainWindow(QtWidgets.QMainWindow):
             q = parse_launch_url(url)
         except ValueError as e:
             self.statusBar().showMessage(str(e), 10000)
-            log_text(f"launch URL ignored: {e}")
+            log_text(f"launch URL ignored: {e}; URL received: {url_for_log(url)}")
             return False
         ok = self.open_target(q["tab"], q["robot"], q["preset"])
         return ok and (q["tab"] is not None or q["robot"] is not None)
@@ -1135,7 +1146,7 @@ def main(argv=None):
         try:
             launch_tab = parse_launch_url(launch)["index"]
         except ValueError as e:
-            print(f"ignoring launch URL: {e}", file=sys.stderr)
+            print(f"ignoring launch URL {url_for_log(launch)}: {e}", file=sys.stderr)
             launch = None
 
     shot_mode = bool(args.screenshot)
