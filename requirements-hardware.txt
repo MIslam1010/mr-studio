@@ -1,0 +1,10 @@
+# Optional: the myCobot 280 back-end of the Hardware tab. Nothing else in MR Studio needs it.
+# Install into the MR Studio venv (from the project folder):
+#     .venv/bin/python -m pip install -r requirements-hardware.txt
+# Then check it without moving the arm:  .venv/bin/python tools/mycobot_dryrun.py
+# Deliberately NOT in requirements.txt / packaging/requirements-lock.txt: the CI installers do not bundle it.
+# Tested with tools/mycobot_emulator.py + tests/test_mycobot_emulator.py on macOS arm64, Python 3.11 (2026-11-02).
+pymycobot==4.0.7        # Elephant Robotics SDK (MIT); pulls in pyserial, numpy and bleak
+# pip also installed these dependencies of pymycobot 4.0.7 (macOS; bleak is for Bluetooth models, unused here):
+#   bleak==3.0.2  pyobjc-core==13.0  pyobjc-framework-Cocoa==13.0
+#   pyobjc-framework-CoreBluetooth==13.0  pyobjc-framework-libdispatch==13.0

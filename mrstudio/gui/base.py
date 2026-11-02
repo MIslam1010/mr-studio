@@ -9,6 +9,15 @@ from . import theme
 from .theory import TheoryPanel
 
 
+def _kmap_footer(tab_cls: str) -> str:
+    """"Knowledge Map" links for the end of a tab's theory panel ('' with MRSTUDIO_NO_KMAP_LINKS or on error)."""
+    try:
+        from ..kmap_links import theory_footer
+        return theory_footer(tab_cls)
+    except Exception:  # noqa: BLE001 - optional extra: a broken link table must never break a tab
+        return ""
+
+
 class AppContext(QtCore.QObject):
     """Shared state: the currently selected serial robot and the dynamics back-end."""
     robot_changed = QtCore.Signal(object)
@@ -130,7 +139,7 @@ class BaseTab(QtWidgets.QWidget):
         lay = QtWidgets.QVBoxLayout(self)
         lay.setContentsMargins(4, 4, 4, 4)
         lay.addWidget(hs)
-        self.theory.set_content(theory_html)
+        self.theory.set_content(theory_html + _kmap_footer(type(self).__name__))
         self.theory.setVisible(self.ctx.theory_visible)
 
     # ------------------------------------------------------------------ lazy robot / engine updates

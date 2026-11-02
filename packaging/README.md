@@ -134,6 +134,7 @@ What gets bundled:
   Pinocchio's version, because conda-forge's Pinocchio is not a pip distribution called `pin`.
 * **Hardware.** pyserial is bundled; the myCobot SDK (`pymycobot`) only if it was installed when the app was built.
   The installed app cannot `pip install` anything afterwards.
+  To include it in a local build, run `.venv/bin/python -m pip install -r requirements-hardware.txt` (pinned, tested; not part of `requirements.txt`, the lock or the CI builds) before `build_macos.sh`.
 * **Apple Silicon only.** `macos-latest` is an arm64 machine. For Intel Macs, add an Intel runner label (for
   example `macos-15-intel`) to the matrix in `build.yml`. The pinned wheels must exist for x86_64.
 * **First launch is slower** (10–20 s) while matplotlib builds its font cache. Later launches take a few seconds.
