@@ -23,13 +23,40 @@ Speed: MR Studio limits the joint speed itself (trajectory time scaling + a per-
 % -> deg/s is firmware-dependent and not documented reliably: measure it at commissioning (time a 30°
 step at the chosen %) and check that it is above the session's speed cap, or the arm lags the
 set-points and the tracking watchdog stops the run.
+
+Liveness (pymycobot 4.x, checked against the installed 4.0.7 source): ``MyCobot280._res`` writes a command and
+waits for a reply after EVERY command (has_reply or not), up to 3 attempts of 0.5 s each on macOS/Linux
+(0.15 s on Windows), and then *returns* -1 instead of raising.  The driver therefore
+
+* treats a -1 / None return of any SDK call as a failure (``send_angles`` -> ``HardwareError`` -> latched stop;
+  ``stop`` -> halt NOT confirmed; ``get_angles`` -> failed read; ``power_on`` / ``set_fresh_mode`` -> connect
+  fails).  An SDK that does not acknowledge commands (pymycobot < 4) is not supported;
+* runs every SDK call on one I/O thread per connection (in order) and waits at most a **deadline** for it
+  (``CALL_DEADLINE_S`` for set-points and reads, ``STOP_DEADLINE_S`` for the halt), so a hung controller
+  (port open, no replies) latches the run within about ``CALL_DEADLINE_S`` + one tick, whatever the SDK's own
+  retry timing.  A call that missed its deadline before it started is dropped (never sent late), except
+  ``stop``, which still goes out when the port frees up;
+* raises from ``read_joints`` as soon as a read fails and the last good one is older than
+  ``STALE_READ_LIMIT_S`` (wall-clock), besides the ``MAX_READ_FAILURES`` count;
+* sets the firmware's **fresh mode** (``set_fresh_mode(1)``: execute the latest command, no queue) on connect
+  and verifies it with ``get_fresh_mode``, so the arm never works through a backlog of set-points after a
+  stall or a cable pull.  ``connect()`` fails if it cannot be set.
+
+``send_angles`` stays synchronous (not ``_async=True``): the 4.x firmware acknowledges every command, and an
+unread acknowledgement would be taken by ``read()`` as the reply to the next ``get_angles`` (it returns the
+first complete frame), so every read would need a retry.  The acknowledgement is also the per-tick proof
+that the set-point arrived.
 """
 from __future__ import annotations
 
 import json
 import os
+import queue
 import sys
+import threading
 import time
+from concurrent.futures import Future
+from concurrent.futures import wait as _wait_futures
 from dataclasses import dataclass, field
 from pathlib import Path
 
@@ -51,6 +78,11 @@ SERVO_LIMIT_MARGIN_DEG = 10.0          # set-points stay this far inside the ser
 BAUD_RATES = (115200, 1000000)         # 115200: M5 / Pi editions; 1000000: some boards (check the manual)
 DEFAULT_STREAM_SPEED_PCT = 20          # firmware speed % while streaming (see the module docstring)
 MAX_READ_FAILURES = 3                  # consecutive failed reads -> HardwareError (stops the run)
+STALE_READ_LIMIT_S = 0.3               # a failed read with no good one for this long -> HardwareError
+CALL_DEADLINE_S = 0.4                  # get_angles / send_angles: no answer within this -> failure
+STOP_DEADLINE_S = 0.5                  # stop: not acknowledged within this -> halt not confirmed
+SLOW_CALL_DEADLINE_S = 3.0             # connect and torque commands (fits pymycobot's 3 x 0.5 s retries)
+FRESH_MODE = 1                         # firmware "fresh" mode: always execute the latest command first
 #: USB-serial bridges used on myCobot boards: CP210x (M5 Basic), CH340/CH9102 (M5 Atom / Pi adapters)
 USB_SERIAL_IDS = {(0x10C4, 0xEA60): "CP210x", (0x1A86, 0x7523): "CH340", (0x1A86, 0x55D4): "CH9102"}
 CALIBRATION_ENV = "MRSTUDIO_MYCOBOT_CALIBRATION"
@@ -121,6 +153,56 @@ def _sdk_class():
         except ImportError as e:
             raise HardwareError("pymycobot is installed but provides neither MyCobot280 nor MyCobot") from e
     return cls
+
+
+def _not_acknowledged(r) -> bool:
+    """pymycobot 4.x returns -1 when a command got no (valid) reply after its retries; None means nothing was
+    read at all (an ``_async`` call, or an SDK that does not wait for replies)."""
+    if r is None:
+        return True
+    if isinstance(r, (bool, np.bool_)):
+        return False
+    return isinstance(r, (int, float, np.integer, np.floating)) and r == -1
+
+
+class _IOWorker:
+    """Runs the SDK calls of one connection in order on a daemon thread, so a caller can stop waiting after a
+    deadline while the SDK is still inside its own read retries.  Calls queued after ``close()``, and calls
+    cancelled by their caller before they started, are never executed."""
+
+    def __init__(self, name: str):
+        self._q: queue.SimpleQueue = queue.SimpleQueue()
+        self.closed = False
+        self._thread = threading.Thread(target=self._loop, name=name, daemon=True)
+        self._thread.start()
+
+    def submit(self, fn, *args) -> Future:
+        fut: Future = Future()
+        if self.closed:
+            fut.set_exception(HardwareError("not connected"))
+        else:
+            self._q.put((fut, fn, args))
+        return fut
+
+    def close(self) -> None:
+        self.closed = True
+        self._q.put(None)
+
+    def _loop(self) -> None:
+        while True:
+            item = self._q.get()
+            if item is None:
+                return
+            fut, fn, args = item
+            if not fut.set_running_or_notify_cancel():
+                continue                                  # missed its deadline before it started: never sent
+            if self.closed:
+                fut.set_exception(HardwareError("not connected"))
+                continue
+            try:
+                fut.set_result(fn(*args))
+            except BaseException as e:  # noqa: BLE001 - handed to the waiting caller
+                fut.set_exception(e)
 
 
 def sdk_available() -> bool:
@@ -202,7 +284,14 @@ class MyCobotDriver(ArmDriver):
             self.clock = clock
         self._factory = sdk_factory           # tests may inject a fake SDK class
         self.mc = None
+        self._io: _IOWorker | None = None     # runs the SDK calls of the current connection
         self._last = None
+        self.call_deadline_s = CALL_DEADLINE_S
+        self.stop_deadline_s = STOP_DEADLINE_S
+        self.slow_call_deadline_s = SLOW_CALL_DEADLINE_S
+        self.stale_read_limit_s = STALE_READ_LIMIT_S
+        self.deadline_misses = 0              # SDK calls that did not return within their deadline
+        self.fresh_mode: int | None = None    # firmware fresh mode read back on connect (None = not verified)
 
     # -- calibration -------------------------------------------------------------------------
     @property
@@ -228,21 +317,42 @@ class MyCobotDriver(ArmDriver):
                     calibrated=bool(self.offset_calibrated), calibration_file=self.calibration_path,
                     stream_speed_pct=self.stream_speed_pct,
                     servo_limits_deg=self.servo_limits_deg.tolist(),
-                    read_failures=self.read_failures, clamp_count=self.clamp_count)
+                    read_failures=self.read_failures, clamp_count=self.clamp_count,
+                    fresh_mode=self.fresh_mode, call_deadline_s=self.call_deadline_s,
+                    stop_deadline_s=self.stop_deadline_s, stale_read_limit_s=self.stale_read_limit_s,
+                    deadline_misses=self.deadline_misses)
 
     # -- SDK access ----------------------------------------------------------------------------
-    def _call(self, what: str, *args):
-        """One SDK call under the I/O lock; any exception becomes a HardwareError."""
+    def _call(self, what: str, *args, deadline: float | None = None, ack: bool = True):
+        """One SDK call under the I/O lock, run on the connection's I/O thread and waited for at most
+        ``deadline`` seconds.  Any exception, a missed deadline and (with ``ack``) a -1 / None return become a
+        ``HardwareError``."""
+        deadline = self.call_deadline_s if deadline is None else deadline
         with self.io_lock:
-            mc = self.mc
-            if mc is None:
+            mc, io = self.mc, self._io
+            if mc is None or io is None:
                 raise HardwareError("not connected")
+            fut = io.submit(getattr(mc, what), *args)
+            done, _ = _wait_futures([fut], timeout=deadline)
+            if not done:
+                self.deadline_misses += 1
+                if what != "stop":         # a late halt is still wanted; a late set-point or read is not
+                    fut.cancel()
+                raise HardwareError(f"{what}: no answer from the arm on {self.port} within "
+                                    f"{1e3 * deadline:.0f} ms (controller hung or cable out?)")
             try:
-                return getattr(mc, what)(*args)
+                r = fut.result()
             except Exception as e:
                 raise HardwareError(f"{what} failed on {self.port}: {e}") from e
+            if ack and _not_acknowledged(r):
+                raise HardwareError(f"{what}: the arm on {self.port} did not acknowledge the command "
+                                    f"(pymycobot returned {r!r})")
+            return r
 
     def _close_port(self) -> None:
+        io, self._io = self._io, None
+        if io is not None:
+            io.close()                     # queued calls are dropped, never sent on a closing port
         mc, self.mc = self.mc, None
         if mc is None:
             return
@@ -258,20 +368,28 @@ class MyCobotDriver(ArmDriver):
     def connect(self) -> None:
         cls = self._factory or _sdk_class()
         with self.io_lock:
+            self.fresh_mode = None
             try:
                 self.mc = cls(self.port, self.baud)
-                if hasattr(self.mc, "power_on"):
-                    self.mc.power_on()
             except Exception as e:  # serial errors come in many flavours
                 self._close_port()
                 raise HardwareError(f"could not open {self.port} at {self.baud} baud: {e}") from e
+            self._io = _IOWorker(f"mycobot-io {self.port}")
+            try:
+                if hasattr(self.mc, "power_on"):
+                    self._call("power_on", deadline=self.slow_call_deadline_s)
+                self._set_fresh_mode()
+            except HardwareError as e:
+                self._close_port()
+                raise HardwareError(f"the arm on {self.port} at {self.baud} baud did not answer as expected "
+                                    f"(check power, cable, baud rate and firmware): {e}") from e
             self.connected = True
             self._last = None
             self.consecutive_read_failures = 0
             err = None
             for k in range(MAX_READ_FAILURES):      # the first reads after opening may time out
                 try:
-                    self._last = self.read_joints()
+                    self._last = self._read_joints(self.slow_call_deadline_s)
                     return
                 except HardwareError as e:
                     err = e
@@ -283,6 +401,24 @@ class MyCobotDriver(ArmDriver):
             raise HardwareError(f"the arm on {self.port} did not report its joint angles "
                                 f"(check power, cable and baud rate): {err}") from err
 
+    def _set_fresh_mode(self) -> None:
+        """Fresh mode on (the firmware executes the newest command, no queue); verified when the SDK can read
+        it back.  Raises HardwareError when it cannot be set or does not read back as set."""
+        if getattr(self.mc, "set_fresh_mode", None) is None:      # required (not a hasattr guard: see dry run)
+            raise HardwareError("this pymycobot has no set_fresh_mode(); install the tested version "
+                                "(pip install -r requirements-hardware.txt)")
+        self._call("set_fresh_mode", FRESH_MODE, deadline=self.slow_call_deadline_s)
+        if hasattr(self.mc, "get_fresh_mode"):
+            mode = self._call("get_fresh_mode", deadline=self.slow_call_deadline_s)
+            try:
+                mode = int(mode)
+            except (TypeError, ValueError):
+                mode = None
+            if mode != FRESH_MODE:
+                raise HardwareError(f"fresh mode did not stick (get_fresh_mode returned {mode!r}, "
+                                    f"expected {FRESH_MODE}); the firmware may queue set-points")
+            self.fresh_mode = mode
+
     def disconnect(self) -> None:
         with self.io_lock:
             self.connected = False
@@ -290,13 +426,16 @@ class MyCobotDriver(ArmDriver):
 
     # -- motion --------------------------------------------------------------------------------
     def read_joints(self) -> np.ndarray:
+        return self._read_joints(self.call_deadline_s)
+
+    def _read_joints(self, deadline: float) -> np.ndarray:
         err = None
         with self.io_lock:
             if self.mc is None:
                 raise HardwareError("not connected")
             try:
-                ang = self.mc.get_angles()
-            except Exception as e:
+                ang = self._call("get_angles", deadline=deadline, ack=False)
+            except HardwareError as e:
                 ang, err = None, e
         # pymycobot returns -1, None or [] when a read times out
         ok = isinstance(ang, (list, tuple)) and len(ang) == self.spec.n
@@ -308,9 +447,12 @@ class MyCobotDriver(ArmDriver):
                 ok = False
         if not ok:
             self._mark_read(False)
-            if self._last is None or self.consecutive_read_failures >= MAX_READ_FAILURES:
+            age = self.fresh_age()
+            if (self._last is None or self.consecutive_read_failures >= MAX_READ_FAILURES
+                    or age > self.stale_read_limit_s):
+                since = f"none for {1e3 * age:.0f} ms" if np.isfinite(age) else "none yet"
                 raise HardwareError(f"the arm did not report its joint angles ({self.consecutive_read_failures} "
-                                    "failed reads in a row; check power and cable)") from err
+                                    f"failed reads in a row, {since}; check power and cable)") from err
             return self._last.copy()          # flagged stale: last_read_fresh is False
         self.last_meas_servo_deg = deg
         q = self.calibration.to_model(deg)
@@ -326,14 +468,17 @@ class MyCobotDriver(ArmDriver):
             self.clamp_count += 1
         self.last_cmd_servo_deg = sent
         # ``speed`` (fraction of rated) is enforced by the run loop; the firmware gets a fixed low %
-        self._call("send_angles", [float(x) for x in sent], self.stream_speed_pct)
+        # synchronous: -1 (no acknowledgement) or a missed deadline raises HardwareError -> latched stop
+        self._call("send_angles", [float(x) for x in sent], self.stream_speed_pct, deadline=self.call_deadline_s)
 
     def _halt(self) -> bool:
-        self._call("stop")
+        # raises (-> halt NOT confirmed) when the firmware does not acknowledge STOP within the deadline
+        self._call("stop", deadline=self.stop_deadline_s)
         return True
 
     def _set_torque(self, on: bool) -> None:
         if on:
-            self._call("focus_all_servos" if hasattr(self.mc, "focus_all_servos") else "power_on")
+            self._call("focus_all_servos" if hasattr(self.mc, "focus_all_servos") else "power_on",
+                       deadline=self.slow_call_deadline_s)
         else:
-            self._call("release_all_servos")
+            self._call("release_all_servos", deadline=self.slow_call_deadline_s)

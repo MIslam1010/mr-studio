@@ -283,15 +283,23 @@ def test_mycobot_missing_sdk_message():
 
 
 class _FakeSDK:
-    """pymycobot stand-in.  Failure modes (class attributes, set per test with ``_fake(...)``):
+    """pymycobot 4.x stand-in: every command returns its acknowledgement (1), or -1 when the firmware did not
+    answer.  Failure modes (class attributes, set per test with ``_fake(...)``):
     raise_on_send, fail_n_reads (the next n reads return -1), disconnect_after_k (every SDK call after
-    the k-th raises OSError), stop_raises, release_raises.  ``follow``: the servos reach each set-point
-    at once (so a streamed run tracks perfectly)."""
+    the k-th raises OSError), stop_raises, release_raises, stop_returns (what ``stop`` returns),
+    fresh_ack / fresh_readback (what ``set_fresh_mode`` / ``get_fresh_mode`` return), hang_after_k (every call
+    after the k-th blocks ``hang_s`` seconds and returns -1, like pymycobot 4.0.7 with a hung controller).
+    ``follow``: the servos reach each set-point at once (so a streamed run tracks perfectly)."""
     raise_on_send = False
     fail_n_reads = 0
     disconnect_after_k = None
+    hang_after_k = None
+    hang_s = 1.5                              # pymycobot 4.0.7 on macOS/Linux: 3 attempts x 0.5 s
     stop_raises = False
+    stop_returns = 1
     release_raises = False
+    fresh_ack = 1
+    fresh_readback = None                     # None: report the mode that was set
     follow = False
     instances: list = []
 
@@ -304,49 +312,80 @@ class _FakeSDK:
         self.stop_calls = 0
         self.fail = False
         self.calls = 0
+        self.log = []                         # names of the SDK calls, in order
+        self.fresh_mode = 0
         self.fail_n_reads = type(self).fail_n_reads
         _FakeSDK.instances.append(self)
 
-    def _io(self):
+    def _io(self, name):
+        """Count the call; True when the (hung) firmware did not answer."""
         self.calls += 1
+        self.log.append(name)
         if self.disconnect_after_k is not None and self.calls > self.disconnect_after_k:
             raise OSError("[Errno 6] Device not configured")
+        if self.hang_after_k is not None and self.calls > self.hang_after_k:
+            import time
+            time.sleep(self.hang_s)
+            return True
+        return False
 
     def power_on(self):
-        self._io()
+        return -1 if self._io("power_on") else 1
+
+    def set_fresh_mode(self, mode):
+        if self._io("set_fresh_mode"):
+            return -1
+        if self.fresh_ack == 1:
+            self.fresh_mode = mode
+        return self.fresh_ack
+
+    def get_fresh_mode(self):
+        if self._io("get_fresh_mode"):
+            return -1
+        return self.fresh_mode if self.fresh_readback is None else self.fresh_readback
 
     def get_angles(self):
-        self._io()
+        if self._io("get_angles"):
+            return -1
         if self.fail_n_reads > 0:
             self.fail_n_reads -= 1
             return -1
         return -1 if self.fail else list(self.angles)
 
     def send_angles(self, a, s):
-        self._io()
+        if self._io("send_angles"):
+            return -1
         if self.raise_on_send:
             raise OSError("write timeout")
         self.sent = (a, s)
         self.sent_log.append(list(a))
         if self.follow:
             self.angles = list(a)
+        return 1
 
     def stop(self):
         self.stop_calls += 1
         if self.stop_raises:
             raise OSError("write timeout")
-        self._io()
-        self.stopped = True
+        if self._io("stop"):
+            return -1
+        if self.stop_returns == 1:
+            self.stopped = True
+        return self.stop_returns
 
     def release_all_servos(self):
-        self._io()
+        if self._io("release_all_servos"):
+            return -1
         if self.release_raises:
             raise OSError("write timeout")
         self.released = True
+        return 1
 
     def focus_all_servos(self):
-        self._io()
+        if self._io("focus_all_servos"):
+            return -1
         self.released = False
+        return 1
 
     def close(self):
         self.closed = True
@@ -571,6 +610,118 @@ def test_failed_halt_is_reported():
     assert d.stop() is True and d.halt_confirmed                                 # STOP again retries
 
 
+def test_stop_returning_minus_one_is_not_confirmed():
+    """pymycobot 4.x returns -1 (no exception) when STOP is not acknowledged: that is NOT a confirmed halt."""
+    d = MyCobotDriver("fake", sdk_factory=_fake(follow=True, stop_returns=-1), calibration=_CAL)
+    d.connect()
+    sup = SafetySupervisor(session="H2", first_run=False)
+    q0 = d.read_joints()
+    t, q = quintic_move(q0, q0 + np.radians([10, 0, 0, 0, 0, 0]), sup.speed_cap)
+    run = HardwareRun(d, sup, t, q)
+    run.start(q0)
+    assert run.request_stop() is False and run.stop_confirmed is False
+    assert d.latched and d.halt_confirmed is False and d.mc.stop_calls == 2 and not d.mc.stopped
+    assert any("NOT CONFIRMED" in e["msg"] for e in run.log.events)
+    d.mc.stop_returns = None                                     # None (nothing read back) is no confirmation either
+    assert d.stop() is False and d.mc.stop_calls == 4
+    d.mc.stop_returns = 1
+    assert d.stop() is True and d.halt_confirmed
+
+
+def test_unacknowledged_commands_are_failures():
+    d = MyCobotDriver("fake", sdk_factory=_FakeSDK, calibration=_CAL)
+    d.connect()
+    d.mc.hang_after_k, d.mc.hang_s = d.mc.calls, 0.0            # every call now returns -1 at once
+    with pytest.raises(HardwareError, match="send_angles.*did not acknowledge.*-1"):
+        d.send_joints(np.zeros(6), 0.25)
+    d.read_joints()                                              # one failed read: stale value, not an error
+    assert not d.last_read_fresh and d.read_failures == 1
+    assert d.stop() is False
+    _FakeSDK.instances.clear()
+    d2 = MyCobotDriver("fake", sdk_factory=_fake(hang_after_k=0, hang_s=0.0), calibration=_CAL)
+    with pytest.raises(HardwareError, match="power_on"):        # power_on -1: the connect fails, port closed
+        d2.connect()
+    assert not d2.connected and _FakeSDK.instances[-1].closed
+
+
+def test_connect_sets_and_verifies_fresh_mode():
+    _FakeSDK.instances.clear()
+    d = MyCobotDriver("fake", sdk_factory=_FakeSDK, calibration=_CAL)
+    d.connect()
+    log = d.mc.log
+    assert d.mc.fresh_mode == 1 and d.fresh_mode == 1 and d.describe()["fresh_mode"] == 1
+    assert log.index("set_fresh_mode") < log.index("get_fresh_mode") < log.index("get_angles")
+    d.disconnect()
+    for modes, msg in [(dict(fresh_ack=-1), "set_fresh_mode"), (dict(fresh_ack=None), "set_fresh_mode"),
+                       (dict(fresh_readback=0), "did not stick"), (dict(fresh_readback=-1), "get_fresh_mode")]:
+        d = MyCobotDriver("fake", sdk_factory=_fake(**modes), calibration=_CAL)
+        with pytest.raises(HardwareError, match=msg):
+            d.connect()
+        assert not d.connected and d.mc is None and _FakeSDK.instances[-1].closed, modes
+        assert "get_angles" not in _FakeSDK.instances[-1].log                 # never streams without it
+
+    def missing(self):
+        raise AttributeError("set_fresh_mode")
+    d = MyCobotDriver("fake", sdk_factory=_fake(set_fresh_mode=property(missing)), calibration=_CAL)
+    with pytest.raises(HardwareError, match="no set_fresh_mode"):
+        d.connect()
+    nover = MyCobotDriver("fake", sdk_factory=_fake(get_fresh_mode=property(lambda s: (_ for _ in ()).throw(
+        AttributeError("get_fresh_mode")))), calibration=_CAL)
+    nover.connect()                                              # set and acknowledged, read-back not available
+    assert nover.connected and nover.fresh_mode is None and nover.mc.fresh_mode == 1
+
+
+def test_stale_reads_raise_on_wall_clock_age():
+    """A failed read raises once the last good one is older than STALE_READ_LIMIT_S, whatever the count."""
+    from mrstudio.hardware.mycobot import STALE_READ_LIMIT_S
+    clock = ManualClock()
+    d = MyCobotDriver("fake", sdk_factory=_FakeSDK, calibration=_CAL, clock=clock)
+    d.connect()
+    d.mc.fail = True
+    clock.advance(0.1)
+    d.read_joints()                                              # 1 failure, 100 ms old: stale value
+    assert not d.last_read_fresh
+    clock.advance(STALE_READ_LIMIT_S)
+    with pytest.raises(HardwareError, match=r"2 failed reads in a row, none for \d+ ms"):
+        d.read_joints()
+
+
+def test_hung_controller_latches_within_deadline():
+    """pymycobot 4.0.7 with a hung controller: every call blocks 1.5 s and returns -1.  Before the fix the run
+    latched only after 3 such reads (~9 s); now the per-call deadline latches it in ~CALL_DEADLINE_S."""
+    import time
+    from mrstudio.hardware.mycobot import CALL_DEADLINE_S
+    _FakeSDK.instances.clear()
+    d = MyCobotDriver("fake", sdk_factory=_fake(follow=True), calibration=_CAL)     # real monotonic clock
+    d.connect()
+    sup = SafetySupervisor(session="H2", first_run=False)
+    q0 = d.read_joints()
+    t, q = quintic_move(q0, q0 + np.radians([20, 0, 0, 0, 0, 0]), sup.speed_cap, dt=0.02, T=2.0)
+    run = HardwareRun(d, sup, t, q)
+    run.start(q0)
+    hung = None
+    t_next = time.monotonic()
+    while not run.finished and time.monotonic() - t_next < 10.0:
+        t_next += 0.02
+        time.sleep(max(0.0, t_next - time.monotonic()))
+        if hung is None and time.monotonic() - run.t0 > 0.3:
+            hung = time.monotonic() - run.t0
+            k_hang = d.mc.calls
+            d.mc.hang_after_k = k_hang                           # the controller stops answering
+        run.safe_step()
+    try:
+        assert run.finished and d.latched and "no answer" in run.error
+        delay = run.t_stop - hung
+        assert delay <= 1.5 and delay < CALL_DEADLINE_S + 0.25, delay
+        assert run.stop_confirmed is False and d.halt_confirmed is False
+        time.sleep(1.6)                                          # let the hung call and the late halts run out
+        after = d.mc.log[k_hang:]
+        assert after.count("send_angles") <= 1                   # set-points that missed their deadline never go out
+        assert "stop" in after and "send_angles" not in after[after.index("stop"):]
+    finally:
+        d.disconnect()
+
+
 def test_torque_state_only_after_success():
     d = MyCobotDriver("fake", sdk_factory=_fake(release_raises=True), calibration=_CAL)
     d.connect()
@@ -748,9 +899,12 @@ def test_tab_comm_error_latches_and_finishes(qapp, monkeypatch, tmp_path):
 def test_tab_stale_reads_block_run(qapp, monkeypatch, tmp_path):
     tab, clock = _mycobot_tab(monkeypatch, tmp_path)
     tab.driver.mc.fail = True
-    clock.advance(0.5)
+    clock.advance(0.25)                  # older than the tab's 0.2 s, younger than the driver's stale limit
     assert not tab.start_run()
     assert "stale" in tab.status_lbl.text() and "failed reads" in tab.health_lbl.text()
+    clock.advance(0.25)                  # past STALE_READ_LIMIT_S: the read itself fails
+    assert not tab.start_run()
+    assert "read failed" in tab.status_lbl.text() and "none for 500 ms" in tab.status_lbl.text()
     tab.driver.mc.fail = False
     assert tab.start_run()
     tab.shutdown()
