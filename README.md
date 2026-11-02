@@ -129,6 +129,20 @@ generated automatically, and a robot you build is then validated by the ⑯ Vali
 | **⑮ Practice** | Randomised exercises with worked solutions and quiz export (left column: **Problems**), guided step-by-step **Lessons** with answer checks, and per-student **Assignment** problems saved as a submission file. Problems: 11 topics, including Ch. 8 rigid-body inertia, forward dynamics with an Euler step, the task-space mass matrix (felt mass, reflected rotor inertia) and constrained dynamics with a Lagrange multiplier. | Ch. 3–11 |
 | **⑯ Validation** | One-click cross-validation of everything above (500+ checks), with a colour-coded table, a details pane per check, a theory panel and an HTML report export. | Ch. 4–9, 11 |
 
+**Also in the app (beyond the tab table):**
+
+* **Knowledge Map links.** Every theory panel ends with a *Knowledge Map* heading that links to the matching
+  nodes of the companion Robotics Knowledge Map (`mrstudio://` links open the right tab from the map, and the
+  footer opens the map in your browser). See [docs/KMAP-LINKING.md](docs/KMAP-LINKING.md).
+* **Lessons (tab ⑮).** Guided, step-by-step lessons with an answer check at each step, next to the randomised Problems.
+* **Assignments (tab ⑮).** An instructor makes per-student problem sets from an assignment code; students solve
+  them in the app and save a submission file, which the instructor grades in bulk. See
+  [docs/ASSIGNMENTS.md](docs/ASSIGNMENTS.md), including what this does and does not protect.
+* **Optional myCobot extra.** The pinned `pymycobot` SDK is not needed for the app or the simulated arm; install
+  it from `requirements-hardware.txt` only for a real arm. See [docs/MYCOBOT-FIRST-SESSION.md](docs/MYCOBOT-FIRST-SESSION.md).
+
+New tab screenshots: [Grasping (⑫)](docs/screenshots/12_grasping.png), [Mobile robots (⑬)](docs/screenshots/13_mobile_robots.png).
+
 ### Hardware bridge (tab ⑭)
 
 The tab drives the course arm (myCobot-280 class) over a serial port, or a built-in simulation of it.

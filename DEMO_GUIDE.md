@@ -117,7 +117,7 @@ $T(\theta) = e^{[\mathcal{S}_1]\theta_1}\cdots e^{[\mathcal{S}_n]\theta_n}M$ in 
   > Featherstone's algorithms), Peter Corke's DH-based toolbox, and a Lagrangian derived
   > symbolically with SymPy. We also check laws of physics: energy conservation, the power
   > balance, and the skew-symmetry of Ṁ − 2C."
-* Point at the green banner: **"all checks passed" (500+ of them, e.g. "504 / 504")** (the exact numbers may differ).
+* Point at the green banner: **"all checks passed" (500+ of them, e.g. "543 / 543")** (the exact numbers may differ).
   > "Across all the machine-precision comparisons the worst error is about 1e-12, and most agree
   > to 1e-15. Double precision itself is 2e-16."
 * Click the row **Newton–Euler = symbolic Euler–Lagrange — Planar 2R**, and read the details pane:
@@ -146,6 +146,23 @@ $T(\theta) = e^{[\mathcal{S}_1]\theta_1}\cdots e^{[\mathcal{S}_n]\theta_n}M$ in 
   standard ROS format — is converted automatically to screw axes and validated against Pinocchio."
   If the professor has a URDF of a lab robot, load it live.
 * Robots with **prismatic joints**: choose **Stanford arm (RRPRRR)** or **SCARA Cobra 600** in the top bar.
+
+* **⑫ Grasping** — pick the "two fingers in a hole" scenario and drag the test twist sliders.
+  > "Each contact is labelled roll, slide or break for that motion, and the shaded region shows the feasible
+  > centres of rotation. The closure tests below say whether the grasp holds by form or by friction."
+  Raise **μ all** and watch the grasp metric curve and the friction cones change (Ch. 12).
+* **⑬ Mobile robots** — choose a scenario such as the diff-drive circle and let it run.
+  > "Wheel speeds come from H(φ) times the body twist. The controller from chapter 13 drives the error to
+  > zero while the odometry estimate slowly drifts from the true path."
+  Switch to the mecanum or three-omniwheel chassis to show sideways motion.
+* **⑭ Hardware** — use the built-in simulation, not a real arm, in front of an audience.
+  > "This streams a joint trajectory at 50 Hz, logs commanded against measured joints, and refuses to run
+  > until the safety checklist and calibration are done."
+* **⑮ Practice** — open **Problems** for a randomised exercise with its worked solution, **Lessons** for a
+  guided step-by-step walk-through with answer checks, and **Assignment** to show how an instructor gives each
+  student their own numbers and collects a submission file.
+* **Knowledge Map links** — at the end of any theory panel (F1) the *Knowledge Map* links lead to the
+  matching nodes of the companion map.
 
 ### The SBEG 361/461 course robots (top-bar robot box)
 
