@@ -153,6 +153,7 @@ class BaseTab(QtWidgets.QWidget):
             return
         self._stale_robot = False
         self.on_robot_changed(robot)
+        self._apply_controls_width()
         if theme.is_projector():
             QtCore.QTimer.singleShot(0, self.restyle_plots)
 
@@ -181,14 +182,29 @@ class BaseTab(QtWidgets.QWidget):
         super().showEvent(e)
         if self.is_stale():
             self.refresh_if_stale()
+        self._apply_controls_width()   # the content may have grown (robot with more joints, new rows)
+
+    #: how much wider than ``controls_width`` (x font scale) the control column may grow to fit its content
+    CONTROLS_GROW = 160
 
     def _apply_controls_width(self):
+        """Width of the left control column: ``controls_width`` (x font scale), widened -- up to CONTROLS_GROW
+        more -- when the content's minimum width needs it, so the widgets are not cut off at the right edge
+        behind a horizontal scroll bar (e.g. 6- or 7-joint robots, projector mode)."""
         sc = getattr(self, "_controls_scroll", None)
         if sc is None:
             return
-        w = int(self._controls_width * theme.font_scale())
-        sc.setMinimumWidth(w)
-        sc.setMaximumWidth(w + int(120 * theme.font_scale()))
+        sc_ = theme.font_scale()
+        w = int(self._controls_width * sc_)
+        cap = w + int(self.CONTROLS_GROW * sc_)
+        inner = sc.widget()
+        need = 0
+        if inner is not None:
+            need = (inner.minimumSizeHint().width() + sc.verticalScrollBar().sizeHint().width()
+                    + 2 * sc.frameWidth())
+        lo = min(max(w, need), cap)
+        sc.setMinimumWidth(lo)
+        sc.setMaximumWidth(max(lo, w + int(120 * sc_)))
 
     def _projector_changed(self, on):
         self._apply_controls_width()

@@ -13,7 +13,7 @@ import pytest
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 
 from mrstudio import planning as P  # noqa: E402
-from mrstudio.robots import get_robot  # noqa: E402
+from mrstudio.robots import ROBOTS, get_robot  # noqa: E402
 
 MR_SCENE = "MR Fig. 10.2-style (three obstacles)"
 
@@ -334,3 +334,14 @@ def test_planning_tab_rejects_stale_plans(qapp):
     if tab._grid_cache is not None:
         assert tab._grid_cache[0][0] == tab._world_now().fingerprint()
     tab.shutdown()
+
+
+def test_skipped_builtins_are_really_not_planar_arms():
+    """planning_robot_names() skips NOT_PLANAR_BUILTINS without building them (fast Planning tab start-up)."""
+    assert P.NOT_PLANAR_BUILTINS <= set(ROBOTS)
+    for name in P.NOT_PLANAR_BUILTINS:
+        try:
+            r = get_robot(name)
+        except Exception:   # noqa: BLE001 -- e.g. Robotics Toolbox not installed
+            continue
+        assert not (2 <= r.n <= 3 and P.is_planar_revolute(r)), name

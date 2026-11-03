@@ -391,6 +391,30 @@ def form(*rows) -> QtWidgets.QFormLayout:
     return f
 
 
+def error_box(parent, title: str, text: str, details: str = "", hint: str = "",
+              icon=QtWidgets.QMessageBox.Warning) -> QtWidgets.QMessageBox:
+    """Friendly error message: a one-line ``text``, an optional ``hint`` (what to try next) and the technical
+    ``details`` (exception, traceback) folded away under "Show Details…" instead of a raw traceback.
+
+    The box is window-modal but does not block the caller (``open()``) and deletes itself when closed."""
+    box = QtWidgets.QMessageBox(icon, title, text, QtWidgets.QMessageBox.Ok, parent)
+    if hint:
+        box.setInformativeText(hint)
+    if details:
+        box.setDetailedText(details.rstrip())
+    box.setAttribute(QtCore.Qt.WA_DeleteOnClose)
+    box.open()
+    return box
+
+
+def exception_details(exc: BaseException | None = None) -> str:
+    """``Type: message`` plus the traceback of ``exc`` (default: the exception being handled), for ``error_box``."""
+    import traceback
+    if exc is None:
+        return traceback.format_exc()
+    return "".join(traceback.format_exception(type(exc), exc, exc.__traceback__))
+
+
 def compact(w, chars: int = 16):
     """Keep long combo boxes from widening the control column."""
     w.setSizeAdjustPolicy(QtWidgets.QComboBox.AdjustToMinimumContentsLengthWithIcon)
