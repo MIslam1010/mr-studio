@@ -1,4 +1,4 @@
-"""Practice problems -- randomised exercises with worked solutions (MR Ch. 3-11), quiz export, guided lessons
+"""Practice problems -- randomised exercises with worked solutions (MR Ch. 3-13), quiz export, guided lessons
 and graded assignments.
 
 The left column is a ``QTabWidget``: Problems (the generator + export) | Lessons (``LessonsPanel``) |
@@ -24,7 +24,7 @@ from ..widgets import button, checkbox, combo, group, hbox, pen, plot, value_lab
 
 THEORY = r"""
 <h2>Practice problems</h2>
-<span class="ref">Modern Robotics, Ch. 3–11 · printed pages of the updated first edition (2019)</span>
+<span class="ref">Modern Robotics, Ch. 3–13 · printed pages of the updated first edition (2019)</span>
 <p>Each problem is generated from a <b>seed</b>: the same topic, difficulty and seed always give the same
 numbers, so a seed is all a student needs to report.  Robots are drawn from small families (planar 2R/3R,
 RRP SCARA-type, spatial 3R elbow, 6R UR-type) with round link lengths and angles in multiples of 15° or
@@ -37,7 +37,11 @@ $$e^{[\hat{\omega}]\theta} = I + \sin\theta[\hat{\omega}] + (1-\cos\theta)[\hat{
 <p><b>Ch. 4</b> PoE, space (4.14) p. 140 and body (4.16) p. 147:</p>
 $$T(\theta) = e^{[\mathcal{S}_1]\theta_1}\cdots e^{[\mathcal{S}_n]\theta_n}M = Me^{[\mathcal{B}_1]\theta_1}\cdots e^{[\mathcal{B}_n]\theta_n}$$
 <p><b>Ch. 5</b> $J_s$ (5.11) p. 178, $J_b$ (5.18) p. 183, $J_b = [\mathrm{Ad}_{T_{bs}}]J_s$ (5.22) p. 185;
-singularities Sec. 5.3 p. 189.</p>
+singularities Sec. 5.3 p. 189.  Statics (Sec. 5.2): equal power at the joints and at the tip gives the joint
+torques that hold a tip wrench, in either frame, and with a square non-singular $J$ the wrench produced by given
+torques; manipulability and force ellipses of $A = J_vJ_v^{T}$, semi-axes $\sqrt{\lambda_i}$ and
+$1/\sqrt{\lambda_i}$, isotropy $\mu_1 = \sqrt{\lambda_{max}/\lambda_{min}}$ (Sec. 5.4):</p>
+$$\tau = J_s^{T}(\theta)\mathcal{F}_s = J_b^{T}(\theta)\mathcal{F}_b,\quad \mathcal{F}_b = J_b^{-T}\tau$$
 <p><b>Ch. 6</b> Newton–Raphson with the body Jacobian, Sec. 6.2.2 p. 228 (Example 6.1, pp. 229–230):</p>
 $$[\mathcal{V}_b] = \log\left(T_{sb}^{-1}(\theta^{i})T_{sd}\right),\quad \theta^{i+1} = \theta^{i} + J_b^{\dagger}(\theta^{i})\mathcal{V}_b$$
 <p><b>Ch. 8</b> rigid-body inertia (Sec. 8.2): principal moments of a block or cylinder, the rotated inertia
@@ -53,6 +57,21 @@ $$M\ddot{\theta} + h = \tau + A^{T}\lambda,\quad A\ddot{\theta} + \dot{A}\dot{\t
 <p><b>Ch. 11</b> second-order error dynamics (11.8) p. 412, overshoot and settling time pp. 414–415,
 PD control (11.26) p. 425, computed torque (11.33)–(11.35) p. 431:</p>
 $$\ddot{\theta}_e + 2\zeta\omega_n\dot{\theta}_e + \omega_n^{2}\theta_e = 0$$
+<p>Impedance control (Sec. 11.7): the end-effector renders a virtual mass–spring–damper, so a steady push
+$f_{ext}$ deflects it by $f_{ext}/K$ with $\omega_n = \sqrt{K/M}$, $\zeta = B/(2\sqrt{KM})$; force control
+(Sec. 11.5) with PI action on the force error $f_e = f_d - f_{tip}$ removes a constant disturbance, and against a
+spring-like surface $k_e$ the Routh–Hurwitz test caps the integral gain:</p>
+$$M\ddot{x} + B\dot{x} + Kx = f_{ext},\qquad \mathfrak{m}s^{3} + k_{damp}s^{2} + (1+k_{fp})k_es + k_{fi}k_e = 0$$
+<p><b>Ch. 12</b> a frictionless contact pushes along its inward normal, $\mathcal{F}_i = ([p_i]\hat{n}_i, \hat{n}_i)$;
+the planar friction cone is spanned by $(\hat{n}_i \pm \mu\hat{t}_i)/\sqrt{1+\mu^{2}}$.  First-order form
+closure (Sec. 12.1.7) and force closure (Sec. 12.2.3) hold iff the columns of the wrench matrix $F$ positively
+span $\mathbb{R}^{3}$ (rank 3 and $Fk = 0$ for some $k_i \geq 1$, a linear program); the minimum friction
+coefficient follows by bisection, or for two fingers from the angle between each normal and the line joining
+the contacts.</p>
+<p><b>Ch. 13</b> differential drive (Sec. 13.3): $u_{L,R} = (v \mp \omega d)/r$; omnidirectional robots
+(Sec. 13.2): $u = H(0)\mathcal{V}_b$ with the three-omniwheel and four-mecanum matrices (13.9)–(13.10);
+odometry (Sec. 13.4) with the pseudoinverse $F = H^{\dagger}(0)$:</p>
+$$h_i(0) = \frac{1}{r_i\cos\gamma_i}\left(x_i\sin(\beta_i+\gamma_i) - y_i\cos(\beta_i+\gamma_i),\ \cos(\beta_i+\gamma_i),\ \sin(\beta_i+\gamma_i)\right)$$
 <p>Settling-time answers give both MR's rule of thumb $t_s\approx 4/(\zeta\omega_n)$ (from the envelope
 $e^{-\zeta\omega_n t}$) and the exact 2 % settling time; gain-design problems meet the exact value.</p>
 <h3>Quizzes</h3>
@@ -336,12 +355,30 @@ class PracticeTab(BaseTab):
     def _draw_visual(self, p: P.Problem):
         vis = p.visual or {}
         self._clear_scene()
-        if vis.get("kind") == "plot":
+        if vis.get("kind") == "xy":                  # planar sketch: grasped body, wheeled chassis
             self.visual.setCurrentWidget(self.plotw)
             w = self.plotw
             w.clear()
             w.setTitle(vis["title"], color=theme.TEXT, size="10pt")
+            w.setLabel("left", "y")
+            w.setLabel("bottom", "x")
+            w.getViewBox().setAspectLocked(True)
+            for ax in ("left", "bottom"):
+                w.getAxis(ax).enableAutoSIPrefix(False)     # plain metres, not "×0.001"
+            for ln in vis["lines"]:
+                w.plot(ln["x"], ln["y"], name=ln.get("name"),
+                       pen=pen(ln.get("color", 0), ln.get("width", 2.0), "dash" if ln.get("dash") else None))
+            return
+        if vis.get("kind") == "plot":
+            self.visual.setCurrentWidget(self.plotw)
+            w = self.plotw
+            w.clear()
+            w.getViewBox().setAspectLocked(False)
+            for ax in ("left", "bottom"):
+                w.getAxis(ax).enableAutoSIPrefix(True)
+            w.setTitle(vis["title"], color=theme.TEXT, size="10pt")
             w.setLabel("left", vis["ylabel"])
+            w.setLabel("bottom", "t [s]")
             for i, (name, y) in enumerate(vis["series"]):
                 w.plot(vis["t"], y, pen=pen(i), name=name)
             if "marker" in vis:
