@@ -161,8 +161,8 @@ def test_practice_subtabs_lessons_and_assignment(win, qapp):
 
 def test_run_app_open_screenshot(tmp_path):
     """``run_app.py --open URL --screenshot DIR --only`` saves the requested tab."""
-    env = dict(os.environ, QT_QPA_PLATFORM="offscreen", MRSTUDIO_SETTINGS=str(tmp_path / "s.ini"),
-               MRSTUDIO_NO_EQ_CACHE="1")
+    env = dict(os.environ, MRSTUDIO_SETTINGS=str(tmp_path / "s.ini"), MRSTUDIO_NO_EQ_CACHE="1")
+    env.setdefault("QT_QPA_PLATFORM", "offscreen")    # keep CI's xvfb/xcb on Linux: offscreen has no OpenGL there
     r = subprocess.run([sys.executable, str(ROOT / "run_app.py"), "--open",
                         "mrstudio://open?tab=MobileTab&robot=UR5%20(6R%20industrial)",
                         "--screenshot", str(tmp_path), "--only", "--delay", "300"],
