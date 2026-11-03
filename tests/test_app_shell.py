@@ -458,10 +458,10 @@ def test_screenshot_mode_ignores_saved_settings(tmp_path, monkeypatch):
     monkeypatch.delenv("MRSTUDIO_SETTINGS", raising=False)
     monkeypatch.setitem(A._SETTINGS, "ephemeral", None)
     path = A.use_ephemeral_settings()
-    assert A.use_ephemeral_settings() == path and A.app_settings().fileName() == path
+    assert A.use_ephemeral_settings() == path and Path(A.app_settings().fileName()) == Path(path)  # Qt: '/' on Windows
     assert A.app_settings().value("robot") is None
     monkeypatch.setenv("MRSTUDIO_SETTINGS", str(tmp_path / "s.ini"))   # an explicit file still wins
-    assert A.app_settings().fileName() == str(tmp_path / "s.ini")
+    assert Path(A.app_settings().fileName()) == tmp_path / "s.ini"
 
 
 def test_settings_restore_tab_robot_engine(qapp, tmp_path, monkeypatch):
