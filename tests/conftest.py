@@ -19,6 +19,12 @@ import sys
 
 import pytest
 
+# Deterministic tests: never read or write the user's real MR Studio settings (last tab / robot, projector mode,
+# lesson progress, ...). A test that needs its own file still sets MRSTUDIO_SETTINGS itself.
+if not os.environ.get("MRSTUDIO_SETTINGS"):
+    import tempfile
+    os.environ["MRSTUDIO_SETTINGS"] = os.path.join(tempfile.mkdtemp(prefix="mrstudio_test_settings_"), "s.ini")
+
 _STATUS = {"code": 1}   # fail closed: 1 until pytest reports otherwise
 _SESSION = {}
 

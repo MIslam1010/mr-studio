@@ -13,7 +13,11 @@ Screenshot (renders the window, saves PNGs, exits — use it to visually check y
 ```
 Tab indices (`--tab`, 0-15): 0 FK, 1 Velocity, 2 IK, 3 Dynamics, 4 Control, 5 Closed chains, 6 Stewart, 7 Task-space,
 8 Parallel, 9 Planning, 10 Haptics, 11 Grasping, 12 Mobile robots, 13 Hardware, 14 Practice, 15 Validation. Keyboard:
-Ctrl+1...9 jump to tabs 1-9, Ctrl+Alt+Left/Right go to the previous/next tab. The tab titles carry circled numbers (1-16),
+Ctrl+1...9 jump to tabs 1-9, Ctrl+Alt+Left/Right go to the previous/next tab; Help -> Keyboard shortcuts (Ctrl+/)
+lists every shortcut, generated from the window's actions (`MainWindow.shortcut_rows`) -- give new actions a shortcut
+via `_act(..., shortcut=...)` and the tooltip and list update themselves. `--screenshot` uses a throw-away settings
+file (`use_ephemeral_settings`), and tests/conftest.py points `MRSTUDIO_SETTINGS` at a temp file, so neither reads
+nor changes the user's saved state. The tab titles carry circled numbers (1-16),
 so tab N has title number N+1. `mrstudio.kmap_links.TAB_ORDER` must list the same classes in the same order (test).
 Launch links: `run_app.py --open "mrstudio://open?tab=<class or index>&robot=<name>&preset=<key>"` (or the URL as the
 only positional argument, as Windows passes it; macOS delivers it as a QFileOpenEvent) -> `MainWindow.open_url`.

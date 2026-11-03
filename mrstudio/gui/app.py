@@ -84,12 +84,30 @@ LIBRARIES = [
 ]
 
 
+_SETTINGS = {"ephemeral": None}   # path of a throw-away settings file (--screenshot), see use_ephemeral_settings
+
+
 def app_settings() -> QtCore.QSettings:
-    """Persistent settings (``MRSTUDIO_SETTINGS=/path/file.ini`` overrides the location, e.g. for tests)."""
-    path = os.environ.get("MRSTUDIO_SETTINGS")
+    """Persistent settings (``MRSTUDIO_SETTINGS=/path/file.ini`` overrides the location, e.g. for tests).
+
+    After ``use_ephemeral_settings()`` (``--screenshot`` mode) every caller gets a fresh, empty file in the temp
+    directory instead, so screenshots never depend on -- or change -- what the user saved (last tab, robot,
+    lesson progress, ...)."""
+    path = os.environ.get("MRSTUDIO_SETTINGS") or _SETTINGS["ephemeral"]
     if path:
         return QtCore.QSettings(path, QtCore.QSettings.IniFormat)
     return QtCore.QSettings("MRStudio", "MR Studio")
+
+
+def use_ephemeral_settings() -> str:
+    """Point ``app_settings()`` at an empty temporary file for the rest of this process (removed at exit)."""
+    if _SETTINGS["ephemeral"] is None:
+        import atexit
+        import shutil
+        d = tempfile.mkdtemp(prefix="mrstudio_settings_")
+        atexit.register(shutil.rmtree, d, True)
+        _SETTINGS["ephemeral"] = os.path.join(d, "settings.ini")
+    return _SETTINGS["ephemeral"]
 
 
 def _bool(v, default=False) -> bool:
@@ -345,6 +363,62 @@ class ReferencesDialog(QtWidgets.QDialog):
         lay.addWidget(box)
 
 
+def shortcut_text(obj) -> str:
+    """The shortcut(s) of a QAction / button in the platform's notation (``⌘⇧S`` on macOS, ``Ctrl+Shift+S``
+    elsewhere), several joined by " or "; '' if it has none."""
+    seqs = obj.shortcuts() if hasattr(obj, "shortcuts") else [obj.shortcut()]
+    return " or ".join(q.toString(QtGui.QKeySequence.NativeText) for q in seqs if not q.isEmpty())
+
+
+def shortcut_label(action: QtGui.QAction) -> str:
+    """Name of an action in the shortcut list: its ``shortcut_label`` property, else its menu text without
+    mnemonics, leading symbols ("＋ ", "● ") and a trailing ellipsis."""
+    lab = action.property("shortcut_label")
+    return str(lab) if lab else clean_label(action.text())
+
+
+def clean_label(text: str) -> str:
+    """Menu / button text without mnemonics ("&"), leading symbols ("＋ ", "● ", "■ ") and an ellipsis."""
+    t = text.replace("&&", "\0").replace("&", "").replace("\0", "&").replace("…", "").strip()
+    while t and not t[0].isalnum():
+        t = t[1:].lstrip()
+    return t
+
+
+class ShortcutsDialog(QtWidgets.QDialog):
+    """Help → Keyboard shortcuts…: generated from the window's actions and the tabs' buttons (never stale)."""
+
+    def __init__(self, rows, parent=None):
+        super().__init__(parent)
+        self.setWindowTitle("Keyboard shortcuts")
+        self.resize(560, 600)
+        lay = QtWidgets.QVBoxLayout(self)
+        self.tree = QtWidgets.QTreeWidget()
+        self.tree.setColumnCount(2)
+        self.tree.setHeaderLabels(["Action", "Shortcut"])
+        self.tree.setRootIsDecorated(False)
+        self.tree.setAlternatingRowColors(True)
+        self.tree.setSelectionMode(QtWidgets.QAbstractItemView.NoSelection)
+        groups: dict[str, QtWidgets.QTreeWidgetItem] = {}
+        for group, label, keys in rows:
+            parent_item = groups.get(group)
+            if parent_item is None:
+                parent_item = groups[group] = QtWidgets.QTreeWidgetItem(self.tree, [group, ""])
+                f = parent_item.font(0)
+                f.setBold(True)
+                parent_item.setFont(0, f)
+                parent_item.setFirstColumnSpanned(True)
+                parent_item.setFlags(QtCore.Qt.ItemIsEnabled)
+            QtWidgets.QTreeWidgetItem(parent_item, [label, keys])
+        self.tree.expandAll()
+        self.tree.resizeColumnToContents(0)
+        self.tree.setColumnWidth(0, self.tree.columnWidth(0) + 24)
+        lay.addWidget(self.tree, 1)
+        box = QtWidgets.QDialogButtonBox(QtWidgets.QDialogButtonBox.Close)
+        box.rejected.connect(self.reject)
+        lay.addWidget(box)
+
+
 def load_tab(mod: str, cls: str, ctx):
     """Instantiate a tab. Returns (page, label); None if the module itself does not exist (yet)."""
     try:
@@ -495,15 +569,20 @@ class MainWindow(QtWidgets.QMainWindow):
         QtCore.QTimer.singleShot(0, lambda: self._tab_changed(self.tabs.currentIndex()))
 
     # ------------------------------------------------------------------ actions / menus / top bar
-    def _act(self, text, slot=None, shortcut=None, checkable=False, tip=None):
+    def _act(self, text, slot=None, shortcut=None, checkable=False, tip=None, label=None):
+        """A window action. Its tooltip gets the shortcut appended in the platform's notation (⌘O / Ctrl+O);
+        ``label`` names it in Help → Keyboard shortcuts (default: ``text`` without symbols / ellipsis)."""
         a = QtGui.QAction(text, self)
         if shortcut:
             seqs = shortcut if isinstance(shortcut, (list, tuple)) else [shortcut]
             a.setShortcuts([QtGui.QKeySequence(s) for s in seqs])
             a.setShortcutContext(QtCore.Qt.ApplicationShortcut)
         a.setCheckable(checkable)
+        if label:
+            a.setProperty("shortcut_label", label)
         if tip:
-            a.setToolTip(tip)
+            keys = shortcut_text(a)
+            a.setToolTip(f"{tip} ({keys})" if keys else tip)
             a.setStatusTip(tip)
         if slot is not None:
             (a.toggled if checkable else a.triggered).connect(slot)
@@ -514,22 +593,22 @@ class MainWindow(QtWidgets.QMainWindow):
         self.act_builder = self._act("＋ Robot Builder…", self._open_builder, "Ctrl+B",
                                      tip="Define your own robot by its screw axes (ω_i, q_i) and home pose M")
         self.act_urdf = self._act("Import URDF…", self._import_urdf, "Ctrl+O",
-                                  tip="Load a serial robot from a URDF file (⌘O)")
+                                  tip="Load a serial robot from a URDF file")
         self.act_shot = self._act("Save screenshot (PNG)…", self._save_screenshot, "Ctrl+Shift+S",
-                                  tip="Save the whole window as a PNG (⌘⇧S)")
+                                  tip="Save the whole window as a PNG")
         self.act_shot_view = self._act("Save 3-D view image (PNG)…", self._save_view_screenshot, "Ctrl+Alt+S",
-                                       tip="Save only the current tab's 3-D view (with labels) as a PNG (⌘⌥S)")
+                                       tip="Save only the current tab's 3-D view (with labels) as a PNG")
         self.act_record = self._act("● Record", self._toggle_record, "Ctrl+R", checkable=True,
-                                    tip="Start/stop recording a clip (⌘R); saved as MP4 or GIF. "
-                                        "Arrow: choose source / frame rate.")
+                                    tip="Start/stop recording a clip, saved as MP4 or GIF. "
+                                        "Arrow: choose source / frame rate.", label="Start / stop recording")
         self.act_quit = self._act("Quit", self.close, QtGui.QKeySequence.Quit)
         self.act_quit.setMenuRole(QtGui.QAction.QuitRole)
         self.act_theory = self._act("Theory panel", self._toggle_theory, "F1", checkable=True,
-                                    tip="Show/hide the equations panel (F1)")
+                                    tip="Show/hide the equations panel")
         self.act_theory.setChecked(self.ctx.theory_visible)
         self.act_projector = self._act("Projector mode", self.ctx.set_projector, ["Ctrl+Shift+P", "F5"],
                                        checkable=True,
-                                       tip="Large fonts, thick lines, high contrast for presenting (⌘⇧P or F5)")
+                                       tip="Large fonts, thick lines, high contrast for presenting")
         self.act_projector.setChecked(theme.is_projector())
         self.act_projector_light = self._act("Projector (light)", self._set_projector_light, checkable=True,
                                              tip="Light, high-contrast palette for projector mode "
@@ -541,6 +620,8 @@ class MainWindow(QtWidgets.QMainWindow):
         self.act_about.setMenuRole(QtGui.QAction.AboutRole)
         self.act_refs = self._act("References…", self._references,
                                   tip="Bibliography of the theory panels' “Further reading” (with local PDFs)")
+        self.act_keys = self._act("Keyboard shortcuts…", self._shortcuts, "Ctrl+/",
+                                  tip="List every keyboard shortcut of MR Studio")
 
         # recording options
         self.src_group = QtGui.QActionGroup(self)
@@ -564,6 +645,8 @@ class MainWindow(QtWidgets.QMainWindow):
         self.tab_acts = []
         for i in range(min(9, self.tabs.count())):
             a = QtGui.QAction(f"Tab {i + 1}", self)
+            name = TAB_LONG_NAMES.get(type(self.pages[i]).__name__, self.tabs.tabText(i))
+            a.setProperty("shortcut_label", f"Go to tab {i + 1}: {name}")
             a.setShortcut(QtGui.QKeySequence(f"Ctrl+{i + 1}"))
             a.triggered.connect(lambda _=False, k=i: self.tabs.setCurrentIndex(k))
             self.addAction(a)
@@ -661,6 +744,7 @@ class MainWindow(QtWidgets.QMainWindow):
         v.addAction(self.act_projector_light)
         h = mb.addMenu("&Help")
         h.addAction(self.act_refs)
+        h.addAction(self.act_keys)
         h.addAction(self.act_log)
         h.addAction(self.act_about)
 
@@ -726,18 +810,29 @@ class MainWindow(QtWidgets.QMainWindow):
         dlg.robot_created.connect(self._robot_created)
         dlg.exec()
 
+    def _error(self, title, text, hint="", details=""):
+        """Friendly error box (details folded away) + the same details in the log; returns the box."""
+        from .widgets import error_box
+        log_text(f"{title}: {text}\n{details}")
+        self._error_box = error_box(self, title, text, details=details, hint=hint)
+        return self._error_box
+
     def _import_urdf(self):
+        from .widgets import exception_details
         try:
             from mrstudio.gui.urdf_dialog import open_urdf_dialog
-        except Exception as e:
-            QtWidgets.QMessageBox.warning(self, "Import URDF",
-                                          f"URDF import is not available:\n{type(e).__name__}: {e}")
+        except Exception:
+            self._error("Import URDF", "URDF import is not available in this installation.",
+                        "A library it needs could not be loaded. The other features of MR Studio still work.",
+                        exception_details())
             return
         try:
             robot = open_urdf_dialog(self)
         except Exception as e:
             traceback.print_exc()
-            QtWidgets.QMessageBox.critical(self, "Import URDF", f"Import failed:\n{type(e).__name__}: {e}")
+            self._error("Import URDF", f"The robot could not be imported ({type(e).__name__}).",
+                        "Check that the file is a URDF of a serial chain (one path from the base link to the "
+                        "chosen tip link) with <inertial> data for every moving link.", exception_details(e))
             return
         if robot is not None:
             self._robot_created(robot)
@@ -837,6 +932,45 @@ class MainWindow(QtWidgets.QMainWindow):
                                    (OWN_MECHANISM_TIP if not uses_robot else
                                     "This tab does not use the dynamics engine"))
 
+    def shortcut_rows(self) -> list[tuple[str, str, str]]:
+        """(group, action, keys) for every keyboard shortcut: the menus' actions, the tab shortcuts, other window
+        actions and buttons inside the tabs that have a shortcut (e.g. the Hardware tab's Esc = Stop)."""
+        rows, seen = [], set()
+
+        def add(group, a):
+            keys = shortcut_text(a)
+            if keys and id(a) not in seen:
+                seen.add(id(a))
+                rows.append((group, shortcut_label(a), keys))
+
+        def walk(menu, group):
+            for a in menu.actions():
+                if a.menu() is not None:
+                    walk(a.menu(), group)
+                elif not a.isSeparator():
+                    add(group, a)
+
+        for top in self.menuBar().actions():
+            if top.menu() is not None:
+                walk(top.menu(), top.text().replace("&", ""))
+        for a in self.tab_acts + [self.act_next_tab, self.act_prev_tab]:
+            add("Tabs", a)
+        for a in self.actions():
+            add("Other", a)
+        for i, page in enumerate(self.pages):
+            group = TAB_LONG_NAMES.get(type(page).__name__, self.tabs.tabText(i)) + " tab"
+            for b in page.findChildren(QtWidgets.QAbstractButton):
+                if not b.shortcut().isEmpty() and id(b) not in seen:
+                    seen.add(id(b))
+                    rows.append((group, clean_label(b.text()) or b.toolTip(), shortcut_text(b)))
+        return rows
+
+    def _shortcuts(self):
+        dlg = ShortcutsDialog(self.shortcut_rows(), self)
+        dlg.show()
+        self._keys_dialog = dlg  # keep a reference (non-modal)
+        return dlg
+
     def about_html(self) -> str:
         from importlib import metadata
         rows = []
@@ -852,6 +986,13 @@ class MainWindow(QtWidgets.QMainWindow):
                     ver = "—"
             rows.append(f"<tr><td><b>{name}</b></td><td>&nbsp;{ver}&nbsp;</td><td>{what}</td></tr>")
         py = ".".join(map(str, sys.version_info[:3]))
+        main_rows = [(lab, k) for g, lab, k in self.shortcut_rows()
+                     if g in ("File", "View", "Help") and lab != shortcut_label(self.act_keys)]
+        first, last = self.tab_acts[:1], self.tab_acts[-1:]
+        tabs = (f"{shortcut_text(first[0])}…{shortcut_text(last[0])} tabs 1–{len(self.tab_acts)}"
+                if first else "")
+        keys = " · ".join([f"{k} {lab}" for lab, k in main_rows] + ([tabs] if tabs else []))
+        keys += f" — full list: Help → Keyboard shortcuts… ({shortcut_text(self.act_keys)})"
         return (
             "<h2>MR Studio</h2>"
             "<p>Interactive kinematics &amp; dynamics of open and closed robotic chains, following</p>"
@@ -862,9 +1003,7 @@ class MainWindow(QtWidgets.QMainWindow):
             "exponentials, Newton–Euler inverse dynamics.</p>"
             f"<h3>Libraries</h3><table>{''.join(rows)}</table>"
             f"<p>Python {py} · Qt {QtCore.qVersion()}</p>"
-            "<h3>Shortcuts</h3><p>⌘R record · ⌘⇧S screenshot · ⌘⌥S 3-D view PNG · ⌘⇧P / F5 projector mode · "
-            "F1 theory panel · ⌘B robot builder · ⌘O import URDF · ⌘1…⌘9 tabs 1–9 · "
-            "⌘⌥→ / ⌘⌥← next / previous tab</p>"
+            f"<h3>Shortcuts</h3><p>{keys}</p>"
             f"<p>Log file: {log_path()}</p>")
 
     def _about(self):
@@ -967,9 +1106,13 @@ class MainWindow(QtWidgets.QMainWindow):
         try:
             self.recorder.start(self.grab_function(source), fps or self.rec_fps)
         except Exception as e:
+            from .widgets import exception_details
             self._set_record_checked(False)
-            QtWidgets.QMessageBox.warning(self, "Record", f"Cannot start recording:\n{e}\n\n"
-                                          "Install: pip install imageio imageio-ffmpeg pillow")
+            hint = ("The video encoder is missing. From a source checkout, install it with "
+                    "“pip install imageio imageio-ffmpeg pillow”."
+                    if isinstance(e, ImportError) else
+                    "Screenshots (File → Save screenshot) still work.")
+            self._error("Record", "Recording could not start.", hint, exception_details(e))
             return
         self.rec_label.setText("● REC 00:00")
         self.rec_label.setVisible(True)
@@ -1036,11 +1179,10 @@ class MainWindow(QtWidgets.QMainWindow):
         log_text(f"Recording failed: {msg}")
         if self._closing:
             return
-        box = QtWidgets.QMessageBox(QtWidgets.QMessageBox.Warning, "Recording failed",
-                                    f"The recording could not be saved:\n\n{msg}", QtWidgets.QMessageBox.Ok, self)
-        box.setAttribute(QtCore.Qt.WA_DeleteOnClose)
-        box.open()  # window-modal, does not block the caller
-        self._rec_failed_box = box
+        from .widgets import error_box
+        self._rec_failed_box = error_box(self, "Recording failed", "The recording could not be saved.",
+                                         hint=f"{msg}\n\nCheck that the folder is writable and the disk is "
+                                              "not full, then record again.")
 
     # ------------------------------------------------------------------ settings
     def restore_settings(self, restore_tab=True):
@@ -1153,6 +1295,8 @@ def main(argv=None):
             launch = None
 
     shot_mode = bool(args.screenshot)
+    if shot_mode:
+        use_ephemeral_settings()   # reproducible screenshots: ignore (and never touch) the user's saved settings
     try:
         install_crash_logging()
     except Exception:

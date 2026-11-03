@@ -370,3 +370,117 @@ def test_main_window_recording_follows_tab(win, qapp):
     tmp = win.stop_recording(ask=False)
     assert tmp and os.path.getsize(tmp) > 0 and not win.act_record.isChecked()
     os.remove(tmp)
+
+
+def test_shortcuts_dialog_lists_every_action_shortcut(win, qapp):
+    """Help → Keyboard shortcuts is generated: every action with a shortcut is listed, with the same keys."""
+    from PySide6 import QtWidgets
+    from mrstudio.gui.app import ShortcutsDialog, shortcut_text
+    rows = win.shortcut_rows()
+    keys = {k for _g, _l, k in rows}
+    for a in win.actions():
+        if not a.shortcut().isEmpty():
+            assert shortcut_text(a) in keys, a.text()
+    labels = [lab for _g, lab, _k in rows]
+    assert len(labels) == len(set(labels)), "an action is listed twice"
+    assert all(lab and lab[0].isalnum() for lab in labels), labels   # no "＋ " / "● " / "…" noise
+    groups = {g for g, _l, _k in rows}
+    assert {"File", "View", "Help", "Tabs"} <= groups
+    assert any("Hardware" in g for g in groups)            # Esc = Stop button inside the Hardware tab
+    assert any(lab.startswith("Go to tab 1: Forward kinematics") for lab in labels)
+    dlg = win._shortcuts()
+    assert isinstance(dlg, ShortcutsDialog)
+    n = sum(dlg.tree.topLevelItem(i).childCount() for i in range(dlg.tree.topLevelItemCount()))
+    assert n == len(rows)
+    dlg.close()
+    assert win.act_keys in [a for m in win.menuBar().findChildren(QtWidgets.QMenu) for a in m.actions()]
+
+
+def test_tooltips_show_platform_shortcut(win):
+    """Tooltips get the shortcut appended by _act (⌘O on macOS, Ctrl+O elsewhere), not hand-written ⌘ glyphs."""
+    from mrstudio.gui.app import shortcut_text
+    for a in (win.act_urdf, win.act_shot, win.act_record, win.act_theory, win.act_projector, win.act_keys):
+        k = shortcut_text(a)
+        assert k and a.toolTip().endswith(f"({k})"), a.toolTip()
+        assert a.toolTip().count("(") == 1 or "⌘" not in a.statusTip()
+    assert " or " in shortcut_text(win.act_projector)                     # two shortcuts: Ctrl+Shift+P, F5
+    html = win.about_html()
+    assert shortcut_text(win.act_record) in html and "Keyboard shortcuts" in html
+
+
+def test_error_box_has_details_and_does_not_block(qapp):
+    from PySide6 import QtWidgets
+    from mrstudio.gui.widgets import error_box, exception_details
+    try:
+        raise ValueError("bad URDF")
+    except ValueError:
+        details = exception_details()
+    box = error_box(None, "Import URDF", "The robot could not be imported.", details=details, hint="Try again")
+    assert isinstance(box, QtWidgets.QMessageBox) and box.isVisible()      # open(): returns at once
+    assert "ValueError: bad URDF" in box.detailedText() and "Traceback" in box.detailedText()
+    assert "Traceback" not in box.text() and box.informativeText() == "Try again"
+    box.close()
+
+
+def test_urdf_import_failure_shows_friendly_box(win, qapp, monkeypatch):
+    import mrstudio.gui.urdf_dialog as ud
+
+    def boom(parent=None):
+        raise KeyError("link_7")
+    monkeypatch.setattr(ud, "open_urdf_dialog", boom)
+    win._import_urdf()
+    box = win._error_box
+    assert box.isVisible() and "could not be imported" in box.text()
+    assert "KeyError" in box.detailedText() and "Traceback" not in box.text()
+    box.close()
+    qapp.processEvents()
+
+
+def test_controls_column_fits_its_content(win, qapp):
+    """The left control column widens (within limits) so its widgets are not cut off behind a scroll bar."""
+    for i, page in enumerate(win.pages):
+        sc = getattr(page, "_controls_scroll", None)
+        if sc is None:
+            continue
+        win.tabs.setCurrentIndex(i)
+        qapp.processEvents()
+        need = sc.widget().minimumSizeHint().width()
+        cap = int((page._controls_width + page.CONTROLS_GROW) * __import__("mrstudio.gui.theme").gui.theme.font_scale())
+        if need + sc.verticalScrollBar().sizeHint().width() <= cap:
+            assert sc.minimumWidth() >= need, type(page).__name__
+    win.tabs.setCurrentIndex(0)
+    _wait(qapp)
+
+
+def test_screenshot_mode_ignores_saved_settings(tmp_path, monkeypatch):
+    """--screenshot uses a throw-away settings file: the saved tab / robot / lesson state never leaks in."""
+    import mrstudio.gui.app as A
+    monkeypatch.delenv("MRSTUDIO_SETTINGS", raising=False)
+    monkeypatch.setitem(A._SETTINGS, "ephemeral", None)
+    path = A.use_ephemeral_settings()
+    assert A.use_ephemeral_settings() == path and A.app_settings().fileName() == path
+    assert A.app_settings().value("robot") is None
+    monkeypatch.setenv("MRSTUDIO_SETTINGS", str(tmp_path / "s.ini"))   # an explicit file still wins
+    assert A.app_settings().fileName() == str(tmp_path / "s.ini")
+
+
+def test_settings_restore_tab_robot_engine(qapp, tmp_path, monkeypatch):
+    """Last tab, engine and theory-panel state come back; an unknown saved robot falls back to the default."""
+    monkeypatch.setenv("MRSTUDIO_SETTINGS", str(tmp_path / "s.ini"))
+    from mrstudio.gui.app import MainWindow, app_settings
+    from mrstudio.gui.base import AppContext
+    s = app_settings()
+    s.setValue("tab", 3)
+    s.setValue("engine", "mr")
+    s.setValue("theory", False)
+    s.sync()
+    w = MainWindow(AppContext("Planar 2R arm"))
+    w.persist = False
+    try:
+        w.restore_settings()
+        assert w.tabs.currentIndex() == 3 and w.ctx.backend == "mr" and not w.act_theory.isChecked()
+    finally:
+        w.act_theory.setChecked(True)
+        w.shutdown_pages()
+        w.deleteLater()
+        qapp.processEvents()

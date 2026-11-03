@@ -30,7 +30,7 @@ from dataclasses import dataclass, field
 import numpy as np
 
 from .checks import Check
-from .robots import ROBOTS, SerialRobot, get_robot
+from .robots import ROBOTS, RTB_ROBOTS, SerialRobot, get_robot
 
 CAT = "Motion planning"
 TWO_PI = 2.0 * np.pi
@@ -181,10 +181,18 @@ def is_planar_revolute(robot: SerialRobot) -> bool:
     return bool(robot.n >= 1 and np.all(np.abs(w[:2]) < 1e-9) and np.allclose(np.abs(w[2]), 1.0, atol=1e-9))
 
 
+#: built-in robots that are known not to be planar 2R / 3R arms and are slow to build (Robotics Toolbox import,
+#: URDF parsing): planning_robot_names() skips them instead of building them while the Planning tab starts.
+#: register_robot() never replaces a built-in name, so this stays true (tests/test_planning.py checks it).
+NOT_PLANAR_BUILTINS = frozenset(RTB_ROBOTS) | {"KUKA iiwa 7 (7R, URDF)"}
+
+
 def planning_robot_names(max_dof: int = 3) -> list[str]:
     """Registered robots usable by the planner: planar revolute 2R / 3R arms (course robots included)."""
     out = []
     for name in ROBOTS:
+        if name in NOT_PLANAR_BUILTINS:
+            continue
         try:
             r = get_robot(name)
         except Exception:   # noqa: BLE001 -- a broken robot factory must not break the planner
