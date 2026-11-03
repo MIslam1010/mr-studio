@@ -50,15 +50,23 @@ def grade_folder(code: str, folder: str) -> tuple[list[str], list[list], list[di
             sub = A.load_submission(path)
             rep = A.grade(asg, sub)
         except A.AssignmentError as e:
-            rows.append(["", rel, "", "", ""] + [""] * n + ["", "", "", "", "", f"skipped: {e}"])
+            rows.append(["", _cell(rel), "", "", ""] + [""] * n + ["", "", "", "", "", _cell(f"skipped: {e}")])
             continue
         details.append({"file": rel, **rep})
         late = "" if rep["late"] is None else ("yes" if rep["late"] else "no")
-        rows.append([rep["student_id"], rel, f"{rep['score']:g}", f"{rep['max_score']:g}", f"{rep['percent']:g}"]
+        rows.append([rep["student_id"], _cell(rel), f"{rep['score']:g}", f"{rep['max_score']:g}",
+                     f"{rep['percent']:g}"]
                     + [f"{it['score']:g}" for it in rep["items"]]
-                    + [late, rep["fingerprint_ok"], rep["code_ok"], rep["created"], sub.app_version,
-                       "; ".join(rep["notes"])])
+                    + [late, rep["fingerprint_ok"], rep["code_ok"], _cell(rep["created"]), _cell(sub.app_version),
+                       _cell("; ".join(rep["notes"]))])
     return header, rows, details
+
+
+def _cell(x) -> str:
+    """Text from a submission file as a CSV cell that a spreadsheet will not run as a formula (the student
+    writes ``created``, ``app_version`` and the file name): a leading = + - @ (or tab / CR) gets a quote."""
+    s = str(x)
+    return "'" + s if s[:1] in ("=", "+", "-", "@", "\t", "\r") else s
 
 
 def _finite(x):

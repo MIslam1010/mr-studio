@@ -36,6 +36,7 @@ import base64
 import datetime as _dt
 import hashlib
 import json
+import math
 import os
 import re
 import secrets
@@ -148,8 +149,8 @@ def _check_item(it: Item, n: int) -> None:
         raise AssignmentError(f"item {n}: rtol must be between 0 and 1")
     if not (0 <= it.atol < 1):
         raise AssignmentError(f"item {n}: atol must be between 0 and 1")
-    if it.points <= 0:
-        raise AssignmentError(f"item {n}: points must be positive")
+    if not (it.points > 0 and math.isfinite(it.points)):      # json.loads accepts NaN / Infinity
+        raise AssignmentError(f"item {n}: points must be a positive number")
     if it.quantities is not None:
         known = set(gradable(P.generate(it.topic, 0, it.difficulty))) | set(SEED_DEPENDENT.get(it.topic, ()))
         bad = [q for q in it.quantities if q not in known]
@@ -295,7 +296,7 @@ def parse_numbers(text) -> list[float]:
         return [float(text)]
     if isinstance(text, (list, tuple)):
         return [float(x) for x in np.ravel(np.asarray(text, dtype=float))]
-    s = str(text).strip()
+    s = str(text).strip().replace("−", "-").replace("–", "-")    # unicode minus / en dash typed or pasted
     if not s:
         raise ValueError("empty")
     junk = re.sub(r"[\s,;\[\]()]", "", _NUM.sub(" ", s))
@@ -485,6 +486,9 @@ def grade(code, submission: Submission | dict, student_id: str | None = None) ->
     for k, (it, p) in enumerate(zip(a.items, build(a, sid))):
         qs = quantities(p, it)
         given = sub.answers.get(str(k)) or {}
+        if not isinstance(given, dict):          # edited file: not {quantity: value} -> graded as unanswered
+            notes.append(f"problem {k + 1}: answers are not a list of quantities (ignored)")
+            given = {}
         per = it.points / max(1, len(qs))
         res, s = {}, 0.0
         for name, ref in qs.items():

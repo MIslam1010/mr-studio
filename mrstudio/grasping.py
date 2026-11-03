@@ -44,8 +44,15 @@ class Contact:
     def __post_init__(self):
         self.p = np.asarray(self.p, float).reshape(2)
         n = np.asarray(self.n, float).reshape(2)
-        self.n = n / np.linalg.norm(n)
-        self.mu = max(0.0, float(self.mu))
+        nn = float(np.linalg.norm(n))
+        mu = float(self.mu)
+        if not (np.all(np.isfinite(self.p)) and np.all(np.isfinite(n)) and math.isfinite(mu)):
+            raise ValueError(f"contact needs a finite point, normal and friction coefficient: p={self.p}, n={n}, "
+                             f"mu={mu}")
+        if not nn > 1e-12:
+            raise ValueError(f"contact normal {n} has no direction")
+        self.n = n / nn
+        self.mu = max(0.0, mu)
 
     @classmethod
     def at_angle(cls, x: float, y: float, angle: float, mu: float = 0.0, name: str = "") -> "Contact":
@@ -281,6 +288,8 @@ def min_friction(contacts: list[Contact], mu_max: float = 10.0, tol: float = 1e-
 def balance(F: np.ndarray, W) -> np.ndarray | None:
     """Nonnegative ``k`` with ``F k = W`` (a wrench W that the contacts can apply), or None."""
     F = np.asarray(F, float)
+    if F.shape[1] == 0:                     # no contacts: only the zero wrench is "applied"
+        return np.zeros(0) if np.allclose(np.asarray(W, float), 0.0) else None
     res = linprog(np.ones(F.shape[1]), A_eq=F, b_eq=np.asarray(W, float),
                   bounds=[(0.0, None)] * F.shape[1], method="highs")
     return np.asarray(res.x) if res.status == 0 else None
@@ -300,6 +309,8 @@ def grasp_quality(contacts: list[Contact], center=(0.0, 0.0), r: float = 1.0, f_
     contact normals; the split over the cone edges is the tab's extension to friction cones."""
     from scipy.spatial import ConvexHull, QhullError
     cs = [Contact(c.p - np.asarray(center, float), c.n, c.mu) for c in contacts]
+    if not cs:
+        return -math.inf
     F = wrench_matrix(cs, friction=friction) * f_max
     if friction:      # unit edges (n +/- mu t)/sqrt(1 + mu^2) -> (n +/- mu t)/2: normal parts sum to f_max
         F = F * np.concatenate([[math.sqrt(1.0 + c.mu ** 2) / 2.0] * 2 if len(cone_edges(c)) == 2 else [1.0]

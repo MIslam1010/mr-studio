@@ -207,7 +207,7 @@ class GraspingTab(BaseTab):
         """Select a preset by index, full name, or a case-insensitive substring (for launch URLs)."""
         names = list(gr.PRESETS)
         name = None
-        if isinstance(key, int) or (isinstance(key, str) and key.strip().isdigit()):
+        if isinstance(key, int) or (isinstance(key, str) and key.strip().isdecimal() and len(key.strip()) <= 6):
             i = int(key)
             name = names[i] if 0 <= i < len(names) else None
         elif key in gr.PRESETS:
@@ -265,20 +265,22 @@ class GraspingTab(BaseTab):
         i, j = item.row(), item.column()
         if i >= len(self.contacts):
             return
+        c = self.contacts[i]
         try:
-            v = float(item.text().replace("°", "").strip())
+            v = float(item.text().replace("°", "").replace("−", "-").strip())
+            if not math.isfinite(v):                   # "inf" / "nan" / "1e999": cos(inf) raises, NaN breaks the LP
+                raise ValueError(item.text())
+            if j == 0:
+                c = gr.Contact((v, c.p[1]), c.n, c.mu, c.name)
+            elif j == 1:
+                c = gr.Contact((c.p[0], v), c.n, c.mu, c.name)
+            elif j == 2:
+                c = gr.Contact.at_angle(c.p[0], c.p[1], math.radians(v), c.mu, c.name)
+            else:
+                c = gr.Contact(c.p, c.n, max(0.0, v), c.name)
         except ValueError:
             self._fill_table()
             return
-        c = self.contacts[i]
-        if j == 0:
-            c = gr.Contact((v, c.p[1]), c.n, c.mu, c.name)
-        elif j == 1:
-            c = gr.Contact((c.p[0], v), c.n, c.mu, c.name)
-        elif j == 2:
-            c = gr.Contact.at_angle(c.p[0], c.p[1], math.radians(v), c.mu, c.name)
-        else:
-            c = gr.Contact(c.p, c.n, max(0.0, v), c.name)
         self.contacts[i] = c
         self._debounce.start(40)
 

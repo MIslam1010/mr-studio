@@ -315,7 +315,7 @@ class MobileTab(BaseTab):
         names = list(mb.PRESETS)
         key = str(key).strip()
         name = None
-        if key.isdigit() and int(key) < len(names):
+        if key.isdecimal() and len(key) <= 6 and int(key) < len(names):
             name = names[int(key)]
         elif key in mb.PRESETS:
             name = key
