@@ -160,14 +160,20 @@ _FUN = {"sin": math.sin, "cos": math.cos, "tan": math.tan, "sqrt": math.sqrt, "a
 _CONST = {"pi": math.pi, "e": math.e}
 
 
+#: units the lessons print (``Check.unit``), stripped from the end of a typed answer
+_UNIT_RE = re.compile(r"\s*(°/s²|°/s|°|degrees|deg|rad/s²|rad/s|rad|m/s²|m/s|m²|m|N·m·s/rad|N\*m\*s/rad|N·m|Nm|"
+                      r"N\*m|kg·m²|kg\*m\*\*2|kg\*m\^2|kg|1/s²|1/s|s|%|J|N)\s*$")
+
+
 def parse_answer(text: str) -> float:
     """Parse a typed answer: a number (``-0.25``, ``1,5``, ``2.5e-3``, ``30°``) or a short arithmetic expression
     (``0.6*cos(pi/6)``, ``sqrt(2)/2``).  Raises ``ValueError`` with a student-readable message."""
     s = (text or "").strip()
     if not s:
         raise ValueError("Type a number first.")
-    s = s.replace("−", "-").replace("×", "*").replace("·", "*").replace("^", "**")
-    s = re.sub(r"\s*(°|deg|degrees|rad|m/s²|m/s|rad/s²|rad/s|N·m|Nm|N\*m|kg\*m\*\*2|kg·m²|kg|m|s|%|N)\s*$", "", s)
+    s = _UNIT_RE.sub("", s)                         # before the "·" -> "*" mapping below (kg·m², N·m·s/rad)
+    s = (s.replace("−", "-").replace("–", "-").replace("×", "*").replace("·", "*").replace("^", "**")
+         .replace("π", "pi"))
     if re.fullmatch(r"[+-]?\d+,\d+", s):          # decimal comma
         s = s.replace(",", ".")
     try:
@@ -182,7 +188,7 @@ def parse_answer(text: str) -> float:
 
 def _eval(n):
     if isinstance(n, ast.Constant) and isinstance(n.value, (int, float)) and not isinstance(n.value, bool):
-        return n.value
+        return float(n.value)       # floats overflow fast; exact ints made "(9**99)**99..." a huge-integer job
     if isinstance(n, ast.BinOp) and type(n.op) in _BIN:
         a, b = _eval(n.left), _eval(n.right)
         if isinstance(n.op, ast.Pow) and abs(b) > 100:

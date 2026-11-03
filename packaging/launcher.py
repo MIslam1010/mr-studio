@@ -335,7 +335,11 @@ def _cli_exit(fn, report: str | None) -> None:
 def run(argv: list[str] | None = None) -> int:
     argv = list(sys.argv[1:] if argv is None else argv)
     argv = [a for a in argv if not a.startswith("-psn_")]   # old macOS Finder launch argument
-    # an mrstudio:// link (Windows URL handler "%1") goes through unchanged: gui.app.main takes it as `url`
+    # an mrstudio:// link (Windows URL handler "%1") goes through unchanged: gui.app.main takes it as `url`.
+    # Started by a link, the link is the only argument: anything after it can only come from a link whose text
+    # broke out of the quotes of "%1" (e.g. "--self-test --report <file>" or "--screenshot <dir>"), so drop it.
+    if argv and argv[0].lower().startswith("mrstudio:"):
+        argv = argv[:1]
     _ensure_streams()
     report = _pop_option(argv, "--report", has_value=True)
     report = report if isinstance(report, str) else None
