@@ -245,7 +245,7 @@ jobs:
           # a module missing from the bundle shows up as a quiet SKIP, not a failure
           if grep -E '^SKIP ' "packaging/dist/validate-macOS.txt"; then echo "validation checks were skipped"; exit 1; fi
 
-      - name: Screenshot smoke test of the frozen app (14 tabs)
+      - name: Screenshot smoke test of the frozen app (16 tabs)
         timeout-minutes: 15
         shell: pwsh
         run: |
@@ -257,7 +257,7 @@ jobs:
           $png = @(Get-ChildItem -Path $dir -Filter *.png -ErrorAction SilentlyContinue)
           $empty = @($png | Where-Object { $_.Length -le 0 })
           Write-Host "$($png.Count) screenshots, $($empty.Count) empty"
-          if ($png.Count -ne 14 -or $empty.Count -gt 0) { throw "expected 14 non-empty PNGs in $dir" }
+          if ($png.Count -ne 16 -or $empty.Count -gt 0) { throw "expected 16 non-empty PNGs in $dir" }
 
       # A plain-text record of what was built, from what and where, with the installers' SHA-256.
       - name: Build record (BUILD-INFO)

@@ -449,7 +449,7 @@ def apply_page_preset(page, key: str) -> bool:
     k = str(key).strip()
     if k in names:
         i = names.index(k)
-    elif k.isdigit() and int(k) < len(names):
+    elif k.isdecimal() and len(k) <= 6 and int(k) < len(names):   # isdigit() accepts "²", which int() rejects
         i = int(k)
     else:
         i = next((j for j, n in enumerate(names) if k.lower() in n.lower()), -1)

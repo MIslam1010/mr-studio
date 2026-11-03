@@ -202,6 +202,16 @@ def test_inno_setup_script_matches_build():
     assert "SolidCompression=yes" in iss and "LZMANumBlockThreads={#LzmaThreads}" in iss
 
 
+def test_workflow_screenshot_count_matches_tabs():
+    """The frozen-app screenshot step counts PNGs: one per tab, so the number must follow the tab list."""
+    from mrstudio.kmap_links import TAB_ORDER
+
+    text = (ROOT / ".github/workflows/build.yml").read_text(encoding="utf-8")
+    counts = {int(n) for n in re.findall(r"\$png\.Count -ne (\d+)", text)}
+    assert counts == {len(TAB_ORDER)}, f"build.yml expects {counts} screenshots, the app has {len(TAB_ORDER)} tabs"
+    assert f"frozen app ({len(TAB_ORDER)} tabs)" in text
+
+
 def test_workflow_yaml():
     yaml = pytest.importorskip("yaml")
     wf = yaml.safe_load((ROOT / ".github/workflows/build.yml").read_text(encoding="utf-8"))

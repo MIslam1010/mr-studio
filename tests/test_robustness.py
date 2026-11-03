@@ -110,6 +110,20 @@ def test_tab_presets_reject_non_decimal_digits(qapp, key):
         assert tab.apply_preset("1") is True                     # plain indices still work
 
 
+@pytest.mark.parametrize("key", ["²", "³", "½"])
+def test_page_preset_box_rejects_non_decimal_digits(qapp, key):
+    """Same for tabs without ``apply_preset``: ``apply_page_preset`` used ``isdigit()`` and then ``int()``."""
+    from PySide6 import QtWidgets
+
+    from mrstudio.gui.app import apply_page_preset
+
+    page = QtWidgets.QWidget()
+    page.preset_box = QtWidgets.QComboBox(page)
+    page.preset_box.addItems(["first", "second"])
+    assert apply_page_preset(page, key) is False
+    assert apply_page_preset(page, "1") is True and page.preset_box.currentIndex() == 1
+
+
 # ------------------------------------------------------------------------------------------------ lessons
 
 @pytest.mark.parametrize("text, value", [

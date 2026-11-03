@@ -203,7 +203,7 @@ def load_targets(path: str | None = None) -> dict:
 
 
 def _sec_key(sec: str) -> tuple:
-    return tuple(int(p) for p in sec.split(".") if p.isdigit())
+    return tuple(int(p) for p in sec.split(".") if p.isdecimal())
 
 
 def nodes_for_tab(tab_cls: str, targets: dict | None = None) -> list[tuple[str, dict]]:
