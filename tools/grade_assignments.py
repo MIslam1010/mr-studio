@@ -54,7 +54,7 @@ def grade_folder(code: str, folder: str) -> tuple[list[str], list[list], list[di
             continue
         details.append({"file": rel, **rep})
         late = "" if rep["late"] is None else ("yes" if rep["late"] else "no")
-        rows.append([rep["student_id"], _cell(rel), f"{rep['score']:g}", f"{rep['max_score']:g}",
+        rows.append([_cell(rep["student_id"]), _cell(rel), f"{rep['score']:g}", f"{rep['max_score']:g}",
                      f"{rep['percent']:g}"]
                     + [f"{it['score']:g}" for it in rep["items"]]
                     + [late, rep["fingerprint_ok"], rep["code_ok"], _cell(rep["created"]), _cell(sub.app_version),
