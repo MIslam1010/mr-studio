@@ -1,4 +1,4 @@
-"""Randomised practice problems with step-by-step worked solutions (Modern Robotics, Ch. 3-11).
+"""Randomised practice problems with step-by-step worked solutions (Modern Robotics, Ch. 3-13).
 
 Every generator is deterministic in ``(topic, seed, difficulty)`` and returns a :class:`Problem`:
 
@@ -20,6 +20,8 @@ rotation   Ch. 3  Rodrigues (3.51) p. 82, log of a rotation (3.58)-(3.61) pp. 85
 fk         Ch. 4  space / body PoE (4.14) p. 140, (4.16) p. 147
 jacobian   Ch. 5  J_s (5.11) p. 178, J_b (5.18) p. 183, J_b = [Ad_Tbs] J_s (5.22) p. 185,
                   singularities Sec. 5.3 p. 189
+statics    Ch. 5  tau = J^T F for a 2R / 3R arm, both directions (Sec. 5.2); manipulability and force
+                  ellipses of J_v J_v^T, isotropy mu_1 (Sec. 5.4)
 ik         Ch. 6  Newton-Raphson with the body Jacobian, Sec. 6.2.2 p. 228, Example 6.1 pp. 229-230
 inertia    Ch. 8  box / cylinder principal inertias, Steiner, rotated inertia (Sec. 8.2.1), spatial
                   inertia G_b (8.32), G_a = [Ad_Tba]^T G_b [Ad_Tba] (8.42), kinetic energy
@@ -31,6 +33,14 @@ constrained Ch. 8 Pfaffian constraint A(theta) dtheta = 0, Lagrange multiplier, 
 trajectory Ch. 9  cubic (9.9)-(9.13) pp. 331-332, quintic p. 332 (Fig. 9.4 p. 333)
 control    Ch. 11 second-order error dynamics (11.8) p. 412, overshoot / settling pp. 414-415,
                   PD (11.25)-(11.26) p. 425, computed torque (11.33)-(11.35) p. 431
+force_control Ch. 11 1-DOF impedance M x'' + B x' + K x = f_ext: deflection f/K, zeta, omega_n, rendered
+                  stiffness (Sec. 11.7); PI force control against a stiff surface, steady-state error and the
+                  Routh-Hurwitz limit on k_fi (Sec. 11.5)
+grasp_closure Ch. 12 wrench matrix of contact normals / friction-cone edges, first-order form closure
+                  (Sec. 12.1.7), force closure and the minimum friction coefficient (Sec. 12.2.3); uses grasping.py
+mobile_kin Ch. 13 diff-drive wheel speeds <-> (v, omega) (Sec. 13.3), H(0) of three omniwheels (13.9) and four
+                  mecanum wheels (13.10), wheel speeds for a body twist, odometry with F = H^+(0) (Sec. 13.4);
+                  uses mobile.py
 ========== ====================================================================================
 """
 from __future__ import annotations
@@ -47,6 +57,8 @@ import modern_robotics as mr
 import numpy as np
 from scipy.linalg import expm
 
+from . import grasping as GR
+from . import mobile as MB
 from .checks import Check
 
 DEG = np.pi / 180.0
@@ -2085,6 +2097,891 @@ def _verify_constrained(p: Problem) -> float:
 
 
 # ------------------------------------------------------------------------------------------------
+# Ch. 5 statics, Ch. 11 impedance / force control, Ch. 12 grasping, Ch. 13 wheeled mobile robots
+# ------------------------------------------------------------------------------------------------
+
+
+def _cross2(a, b) -> float:
+    """z-component of the planar cross product a x b (the moment of a force b applied at a)."""
+    return float(a[0] * b[1] - a[1] * b[0])
+
+
+def _rot2(a: float) -> np.ndarray:
+    c, s = np.cos(a), np.sin(a)
+    return np.array([[c, -s], [s, c]])
+
+
+def _chain_points(L, th):
+    """Planar nR chain in closed form: [joint 1, ..., joint n, tip] positions and the tip angle phi."""
+    pts, ang = [np.zeros(2)], 0.0
+    for Li, t in zip(L, th):
+        ang += t
+        pts.append(pts[-1] + Li * np.array([np.cos(ang), np.sin(ang)]))
+    return pts, ang
+
+
+def _fd_tip_jacobian(L, th, eps: float = 1e-6) -> np.ndarray:
+    """2 x n Jacobian of the tip position by central differences of the closed-form chain."""
+    th = np.asarray(th, float)
+    cols = []
+    for i in range(len(th)):
+        dt = np.zeros(len(th))
+        dt[i] = eps
+        cols.append((_chain_points(L, th + dt)[0][-1] - _chain_points(L, th - dt)[0][-1]) / (2 * eps))
+    return np.array(cols).T
+
+
+_FORCES = [-20.0, -10.0, -5.0, 0.0, 5.0, 10.0, 20.0]
+
+
+# -- Ch. 5: statics tau = J^T F and the manipulability ellipse --------------------------------------
+
+def gen_statics(seed: int, difficulty: int) -> Problem:
+    rng = _rng("statics", seed, difficulty)
+    spec = random_robot(rng, "3R" if difficulty == 3 else "2R")
+    n = spec.n
+    th = random_theta(rng, spec, difficulty)
+    if difficulty >= 2:      # keep J square and well away from the elbow singularity theta_2 = 0
+        while abs(np.sin(th[1])) < 0.45:
+            th[1] = int(rng.integers(2, 7)) * 15 * _pick(rng, [-1, 1]) * DEG
+    L = [spec.dims[f"L_{i}"] for i in range(1, n + 1)]
+    Tsb = mr.FKinSpace(spec.M, spec.Slist, th)
+    p = Tsb[:2, 3]
+    Jsp = mr.JacobianSpace(spec.Slist, th)[[2, 3, 4]]          # planar rows (omega_z, v_x, v_y)
+    Jb = mr.JacobianBody(spec.Blist, th)
+    Jbp = Jb[[2, 3, 4]]
+    Jv = (Tsb[:3, :3] @ Jb[3:])[:2]                             # tip linear velocity in {s}
+    q_pts = [np.array(j["q"][:2], float) for j in spec.joints]  # joint axes at theta = 0 ...
+    q_now = [mr.FKinSpace(mr.RpToTrans(np.eye(3), np.r_[q, 0]), spec.Slist[:, :i], th[:i])[:2, 3]
+             if i else q for i, q in enumerate(q_pts)]          # ... and where they are now
+
+    st = Doc()
+    st.p(spec.description_md() + "  The arm is at rest in a horizontal plane (no gravity, no friction).")
+    st.p(f"Configuration $\\theta = $ {degs(th)}.  Planar twists are written $(\\omega_z, v_x, v_y)$ and planar "
+         "wrenches $\\mathcal{F} = (m_z, f_x, f_y)$, the planar parts of MR's $(\\omega, v)$ and $(m, f)$.")
+    steps, ans = [], {}
+    data = dict(L=np.array(L), theta=th, family=spec.family)
+    if difficulty <= 2:
+        while True:
+            f = np.array([_pick(rng, _FORCES), _pick(rng, _FORCES)])
+            if np.any(f):
+                break
+        Fs = np.r_[_cross2(p, f), f]
+        tau = Jsp.T @ Fs
+        data["f"] = f
+        q = (f"The tip pushes on the environment with the force $f = {vec(f)}$ N (in {{s}}) and no moment.  "
+             "**(a)** Write the tip wrench $\\mathcal{F}_s = (m_z, f_x, f_y)$ in {s}.  **(b)** Find the planar rows of the "
+             "space Jacobian $J_s(\\theta)$.  **(c)** Find the joint torques $\\tau$ that hold the arm at rest while it "
+             "applies this force.")
+        if difficulty == 2:
+            ts_ = np.array([_pick(rng, [-10.0, -5.0, -2.0, 2.0, 5.0, 10.0]), _pick(rng, [-4.0, -2.0, -1.0, 1.0, 2.0, 4.0])])
+            data["tau_star"] = ts_
+            q += (f"  **(d)** Now the tip is pinned to a fixture (a point contact: any force, no moment) and the motors "
+                  f"apply $\\tau^{{*}} = {vec(ts_)}$ N·m.  What force $f^{{*}}$ does the tip exert on the fixture?  (The "
+                  "$2\\times 2$ Jacobian $J_v$ of the tip position is square here.)")
+        st.p(q)
+        s1 = Doc()
+        s1.eq(r"p = \left(L_1\cos\theta_1 + L_2\cos(\theta_1+\theta_2),\ L_1\sin\theta_1 + L_2\sin(\theta_1+\theta_2)"
+              r"\right) = " + vec(p, 4) + r"\ \mathrm{m}")
+        s1.p(f"A force $f$ applied at $p$ has the moment $m_z = p_xf_y - p_yf_x = {num(Fs[0], 4)}$ N·m about the "
+             f"{{s}} origin, so $\\mathcal{{F}}_s = (m_z, f_x, f_y) = {vec(Fs, 4)}$.")
+        steps.append(Step("Tip position and tip wrench in {s}", s1))
+        s2 = Doc()
+        s2.p("Joint $i$ rotates about $\\hat{z}$ through the point $q_i$, so its space screw axis has "
+             "$\\omega = \\hat{z}$ and $v = -\\omega\\times q_i = (q_{iy}, -q_{ix})$: the planar column is "
+             "$(1, q_{iy}, -q_{ix})$.  " +
+             ", ".join(f"$q_{{{i + 1}}} = {vec(qq, 4)}$" for i, qq in enumerate(q_now)) + ":")
+        s2.mat("J_s", Jsp, 4)
+        s2.p("(rows $\\omega_z, v_x, v_y$ of `mr.JacobianSpace`).")
+        steps.append(Step("Space Jacobian", s2))
+        s3 = Doc()
+        s3.p("At rest the power the motors put in equals the power delivered at the tip, "
+             "$\\tau^{T}\\dot{\\theta} = \\mathcal{F}_s^{T}\\mathcal{V}_s = \\mathcal{F}_s^{T}J_s\\dot{\\theta}$ for every "
+             "$\\dot{\\theta}$, hence (Sec. 5.2)")
+        s3.eq(r"\tau = J_s^{T}(\theta)\mathcal{F}_s = " + vec(tau, 4) + r"\ \mathrm{N\cdot m}")
+        s3.p("Check: each $\\tau_i$ is the moment of $f$ about joint $i$, $\\tau_i = (p - q_i)\\times f$: " +
+             ", ".join(f"$\\tau_{{{i + 1}}} = {num(_cross2(p - qq, f), 4)}$" for i, qq in enumerate(q_now)) + ".")
+        steps.append(Step("Joint torques", s3))
+        ans.update(Fs=Fs, Js_p=Jsp, tau=tau)
+        ad = Doc().p(f"$\\mathcal{{F}}_s = {vec(Fs, 4)}$, $\\tau = J_s^{{T}}\\mathcal{{F}}_s = {vec(tau, 4)}$ N·m.")
+        if difficulty == 2:
+            fstar = np.linalg.solve(Jv.T, ts_)
+            s4 = Doc()
+            s4.p("For a pure force at the tip the moment rows drop out and $\\tau = J_v^{T}f$, with $J_v$ the Jacobian of "
+                 "the tip position (linear rows of `mr.JacobianBody` rotated into {s}):")
+            s4.mat("J_v", Jv, 4)
+            s4.p(f"(check: $J_v^{{T}}f = {vec(Jv.T @ f, 4)}$ N·m, as in (c)).  $\\det J_v = L_1L_2\\sin\\theta_2 = "
+                 f"{num(np.linalg.det(Jv), 4)}$ ≠ 0, so the map is invertible:")
+            s4.eq(r"f^{*} = J_v^{-T}\tau^{*} = " + vec(fstar, 4) + r"\ \mathrm{N}")
+            steps.append(Step("(d) Force from the joint torques", s4))
+            ans.update(Jv=Jv, f_star=fstar)
+            ad.p(f"(d) $f^{{*}} = J_v^{{-T}}\\tau^{{*}} = {vec(fstar, 4)}$ N.")
+        title = ("Statics of a 2R arm: τ = JᵀF" if difficulty == 1 else "Statics of a 2R arm: torques ↔ tip force")
+    else:
+        Fb = np.array([_pick(rng, [-2.0, -1.0, 0.0, 1.0, 2.0]), _pick(rng, _FORCES), _pick(rng, _FORCES)])
+        if not np.any(Fb):
+            Fb[1] = 10.0
+        ts_ = np.array([_pick(rng, [-10.0, -5.0, 5.0, 10.0]), _pick(rng, [-4.0, -2.0, 2.0, 4.0]),
+                        _pick(rng, [-1.0, -0.5, 0.5, 1.0])])
+        data.update(Fb=Fb, tau_star=ts_)
+        st.p(f"A tool frame {{b}} sits at the tip, its $\\hat{{x}}_b$ axis along link 3.  **(a)** Find the planar rows of the "
+             f"body Jacobian $J_b(\\theta)$.  **(b)** The tool applies the wrench $\\mathcal{{F}}_b = {vec(Fb)}$ "
+             "(N·m, N, N; in {b}) to the environment: which joint torques hold it?  **(c)** With the tool clamped, the "
+             f"motors apply $\\tau^{{*}} = {vec(ts_)}$ N·m: which wrench $\\mathcal{{F}}_b^{{*}}$ does the tool exert?  "
+             "**(d)** Give the semi-axis lengths and directions of the tip's linear-velocity manipulability ellipse "
+             "and of its force ellipse, and the isotropy $\\mu_1$.")
+        tau = Jbp.T @ Fb
+        Fbs = np.linalg.solve(Jbp.T, ts_)
+        r_b = [Tsb[:2, :2].T @ (qq - p) for qq in q_now]
+        s1 = Doc()
+        s1.p(f"Tip $p = {vec(p, 4)}$ m, tool angle $\\phi = \\theta_1+\\theta_2+\\theta_3 = {mdeg(sum(th))}$.  In {{b}} "
+             "joint $i$ sits at $r_i = R_{sb}^{T}(q_i - p)$, and its body screw axis has the planar column "
+             "$(1, r_{iy}, -r_{ix})$: " + ", ".join(f"$r_{{{i + 1}}} = {vec(rr, 4)}$" for i, rr in enumerate(r_b)) + ".")
+        s1.mat("J_b", Jbp, 4)
+        s1.p(f"(rows $\\omega_z, v_x, v_y$ of `mr.JacobianBody`); $\\det J_b = L_1L_2\\sin\\theta_2 = "
+             f"{num(np.linalg.det(Jbp), 4)}$.")
+        steps.append(Step("Body Jacobian", s1))
+        s2 = Doc()
+        s2.p("Power balance in the body frame, $\\tau^{T}\\dot{\\theta} = \\mathcal{F}_b^{T}J_b\\dot{\\theta}$, gives "
+             "(Sec. 5.2)")
+        s2.eq(r"\tau = J_b^{T}(\theta)\mathcal{F}_b = " + vec(tau, 4) + r"\ \mathrm{N\cdot m}")
+        steps.append(Step("(b) Joint torques", s2))
+        s3 = Doc()
+        s3.p("$J_b$ is $3\\times 3$ and non-singular, so the static relation can be inverted:")
+        s3.eq(r"\mathcal{F}_b^{*} = J_b^{-T}\tau^{*} = " + vec(Fbs, 4))
+        s3.p("(moment in N·m, force in N, both in {b}).")
+        steps.append(Step("(c) Wrench from the joint torques", s3))
+        ans.update(Jb_p=Jbp, tau=tau, Fb_star=Fbs)
+        ad = Doc().p(f"(b) $\\tau = {vec(tau, 4)}$ N·m.  (c) $\\mathcal{{F}}_b^{{*}} = {vec(Fbs, 4)}$.")
+        title = "Statics of a 3R arm: body wrench and manipulability"
+    if difficulty == 3:
+        A = Jv @ Jv.T
+        lam, vecs = np.linalg.eigh(A)
+        ax_v, ax_f = np.sqrt(lam), 1.0 / np.sqrt(lam)
+        mu1 = float(np.sqrt(lam[1] / lam[0]))
+        angs = [np.degrees(np.arctan2(v[1], v[0])) % 180.0 for v in vecs.T]
+        s4 = Doc()
+        s4.p("The tip-position Jacobian $J_v = R_{sb}J_{b,v}$ (the linear rows $J_{b,v}$ of $J_b$ rotated into {s}) maps unit joint "
+             "speeds $\\|\\dot{\\theta}\\| = 1$ onto the manipulability ellipse $\\dot{p}^{T}A^{-1}\\dot{p} = 1$ with "
+             "$A = J_vJ_v^{T}$ (Sec. 5.4):")
+        s4.mat("J_v", Jv, 4)
+        s4.mat("A = J_vJ_v^{T}", A, 4)
+        s4.p(f"Eigenvalues $\\lambda = {vec(lam, 4)}$ with unit eigenvectors at {num(angs[0], 2)}° and {num(angs[1], 2)}° "
+             f"from $\\hat{{x}}_s$.  Velocity-ellipse semi-axes $\\sqrt{{\\lambda_i}} = {vec(ax_v, 4)}$ m/s per rad/s; the "
+             f"force ellipse ($f^{{T}}Af = 1$ for $\\|\\tau\\| = 1$) has the same axes with lengths $1/\\sqrt{{\\lambda_i}} = "
+             f"{vec(ax_f, 4)}$ N per N·m — strongest where the arm is slowest.  Isotropy "
+             f"$\\mu_1 = \\sqrt{{\\lambda_{{max}}/\\lambda_{{min}}}} = {num(mu1, 4)}$ (1 would be a circle).")
+        steps.append(Step("(d) Manipulability and force ellipses", s4))
+        ans.update(Jv=Jv, ell_axes=ax_v, force_axes=np.sort(ax_f), mu1=mu1)
+        ad.p(f"(d) velocity ellipse semi-axes ${vec(ax_v, 4)}$ (at {num(angs[0], 2)}°, {num(angs[1], 2)}°), force "
+             f"ellipse ${vec(ax_f, 4)}$, $\\mu_1 = {num(mu1, 4)}$.")
+    chap = "Ch. 5 (Secs. 5.2, 5.4)" if difficulty == 3 else "Ch. 5 (Sec. 5.2)"
+    return Problem("statics", seed, difficulty, title, chap, st, data, steps, ans, ad,
+                   _robot_visual(spec, th, frames={"b": Tsb}))
+
+
+def _verify_statics(p: Problem) -> float:
+    """Closed-form joint positions: tau_i as the moment of f about joint i, J_s columns (1, q_y, -q_x); the tip
+    Jacobian by central differences; least-squares inverses; ellipse axes from the singular values of J_v."""
+    d, a = p.data, p.answer
+    L, th = d["L"], d["theta"]
+    pts, phi = _chain_points(L, th)
+    tip, joints = pts[-1], pts[:-1]
+    Jv = _fd_tip_jacobian(L, th)
+    e = 0.0
+    if "f" in d:
+        f = d["f"]
+        Jsp = np.array([[1.0, q[1], -q[0]] for q in joints]).T
+        tau = np.array([_cross2(tip - q, f) for q in joints])
+        e = max(abs(a["Fs"][0] - _cross2(tip, f)), np.abs(a["Fs"][1:] - f).max(), np.abs(Jsp - a["Js_p"]).max(),
+                np.abs(tau - a["tau"]).max())
+    if "f_star" in a:
+        fs = np.linalg.lstsq(Jv.T, d["tau_star"], rcond=None)[0]
+        e = max(e, np.abs(Jv - a["Jv"]).max(), np.abs(fs - a["f_star"]).max())
+    if "Fb" in d:
+        Jbp = np.vstack([np.ones(len(th)), _rot2(phi).T @ Jv])     # body twist (phi-dot, R^T p-dot)
+        e = max(e, np.abs(Jbp - a["Jb_p"]).max(), np.abs(Jbp.T @ d["Fb"] - a["tau"]).max(),
+                np.abs(np.linalg.lstsq(Jbp.T, d["tau_star"], rcond=None)[0] - a["Fb_star"]).max())
+    if "ell_axes" in a:
+        sv = np.sort(np.linalg.svd(Jv, compute_uv=False))
+        e = max(e, np.abs(Jv - a["Jv"]).max(), np.abs(sv - a["ell_axes"]).max(),
+                np.abs(np.sort(1 / sv) - a["force_axes"]).max(), abs(sv[-1] / sv[0] - a["mu1"]))
+    return float(e)
+
+
+# -- Ch. 11: impedance control and PI force control -------------------------------------------------
+
+def _ts_rule(zeta, wn) -> float:
+    """MR's 2 % rule of thumb: 4/(zeta wn), or four time constants of the slow root when overdamped."""
+    if zeta > 1 + 1e-9:
+        return 4.0 / (wn * (zeta - np.sqrt(zeta**2 - 1)))
+    return 4.0 / (zeta * wn)
+
+
+def _overshoot(zeta) -> float:
+    return float(np.exp(-np.pi * zeta / np.sqrt(1 - zeta**2))) if zeta < 1 - 1e-9 else 0.0
+
+
+def _response_doc(doc: Doc, zeta, wn, what: str):
+    kind = _classify(zeta)
+    os_, ts = _overshoot(zeta), _ts_rule(zeta, wn)
+    if kind == "underdamped":
+        doc.p(f"$\\zeta < 1$: **underdamped**.  {what} overshoots its final value by "
+              f"$e^{{-\\pi\\zeta/\\sqrt{{1-\\zeta^{{2}}}}}} = {num(100 * os_, 2)}$ %; MR's rule of thumb gives the 2% "
+              f"settling time $t_s \\approx 4/(\\zeta\\omega_n) = {num(ts, 4)}$ s.")
+    elif kind == "overdamped":
+        doc.p(f"$\\zeta > 1$: **overdamped**, no overshoot; the slow root $s_1 = -\\omega_n(\\zeta - "
+              f"\\sqrt{{\\zeta^{{2}}-1}}) = {num(-4 / ts, 4)}$ 1/s sets the settling time "
+              f"$t_s \\approx 4/|s_1| = {num(ts, 4)}$ s.")
+    else:
+        doc.p(f"$\\zeta = 1$: **critically damped**, no overshoot; $t_s \\approx 4/\\omega_n = {num(ts, 4)}$ s.")
+    return os_, ts
+
+
+def _lin_response(A, b, x0, t_end, n=1200):
+    """Response of x' = A x + b from x0 on a uniform grid (exact: matrix exponential of the augmented system)."""
+    k = len(x0)
+    Aa = np.zeros((k + 1, k + 1))
+    Aa[:k, :k], Aa[:k, k] = A, b
+    dt = t_end / (n - 1)
+    Ed = expm(Aa * dt)
+    X = np.empty((n, k))
+    z = np.r_[np.asarray(x0, float), 1.0]
+    for i in range(n):
+        X[i] = z[:k]
+        z = Ed @ z
+    return np.linspace(0, t_end, n), X
+
+
+def gen_force_control(seed: int, difficulty: int) -> Problem:
+    rng = _rng("force_control", seed, difficulty)
+    st, steps = Doc(), []
+    if difficulty <= 2:
+        if difficulty == 1:
+            M = float(_pick(rng, [1.0, 2.0, 4.0]))
+            wn = float(_pick(rng, [5.0, 10.0, 20.0]))
+            zeta = float(_pick(rng, [0.25, 0.5, 0.7, 1.0, 1.5]))
+            K, B = M * wn**2, 2 * zeta * wn * M
+            f = float(_pick(rng, [5.0, 10.0, 20.0, 40.0]))
+            st.p("An impedance-controlled robot renders, along one task direction $x$, the virtual mass–spring–damper "
+                 f"$M\\ddot{{x}} + B\\dot{{x}} + Kx = f_{{ext}}$ with $M = {num(M)}$ kg, $B = {num(B)}$ N·s/m and "
+                 f"$K = {num(K)}$ N/m ($x$ is the end-effector's displacement from its rest position, $f_{{ext}}$ the "
+                 f"force a user applies to it).  At rest at $x = 0$ the user suddenly pushes with a constant "
+                 f"$f_{{ext}} = {num(f)}$ N.")
+            st.p("**(a)** Find the steady-state deflection.  **(b)** Find $\\omega_n$ and $\\zeta$ and classify the "
+                 "response.  **(c)** Give the overshoot beyond the steady state and the 2% settling time (MR's rule of "
+                 "thumb).")
+            s1 = Doc()
+            s1.p("At steady state $\\ddot{x} = \\dot{x} = 0$, so only the virtual spring balances the push:")
+            s1.eq(r"x_{ss} = \frac{f_{ext}}{K} = \frac{" + num(f) + "}{" + num(K) + "} = " + num(f / K, 5)
+                  + r"\ \mathrm{m}")
+            steps.append(Step("Steady-state deflection", s1))
+            s2 = Doc()
+            s2.p("Dividing by $M$ gives the standard second-order form "
+                 "$\\ddot{x} + 2\\zeta\\omega_n\\dot{x} + \\omega_n^{2}x = f_{ext}/M$ (as in Sec. 11.2.2):")
+            s2.eq(r"\omega_n = \sqrt{\frac{K}{M}} = " + num(wn, 4) + r"\ \mathrm{rad/s},\quad \zeta = "
+                  r"\frac{B}{2\sqrt{KM}} = " + num(zeta, 4))
+            steps.append(Step("Natural frequency and damping ratio", s2))
+            data = dict(M=M, B=B, K=K, f=f)
+            title = "Impedance control: deflection and transient"
+        else:
+            M = float(_pick(rng, [1.0, 2.0, 4.0]))
+            f = float(_pick(rng, [10.0, 20.0, 30.0, 50.0]))
+            delta = float(_pick(rng, [0.01, 0.02, 0.05]))
+            zeta = float(_pick(rng, [0.5, 0.7, 1.0]))
+            K = f / delta
+            B = 2 * zeta * np.sqrt(K * M)
+            wn = np.sqrt(K / M)
+            st.p("You program an impedance controller to render $M\\ddot{x} + B\\dot{x} + Kx = f_{ext}$ along one "
+                 f"direction with apparent mass $M = {num(M)}$ kg.  Specification: a steady push of {num(f)} N must "
+                 f"deflect the end-effector by {num(100 * delta)} cm, and the response must have damping ratio "
+                 f"$\\zeta = {num(zeta)}$.")
+            st.p("**(a)** Choose the rendered stiffness $K$ and damping $B$.  **(b)** Find $\\omega_n$, the overshoot "
+                 "and the 2% settling time (rule of thumb) of the deflection after a step push.")
+            s1 = Doc()
+            s1.p("At steady state $Kx_{ss} = f_{ext}$, so the stiffness follows from the allowed deflection; then "
+                 "$\\zeta = B/(2\\sqrt{KM})$ fixes the damping:")
+            s1.eq(r"K = \frac{f_{ext}}{x_{ss}} = \frac{" + num(f) + "}{" + num(delta) + "} = " + num(K, 4)
+                  + r"\ \mathrm{N/m},\quad B = 2\zeta\sqrt{KM} = " + num(B, 4) + r"\ \mathrm{N\cdot s/m}")
+            steps.append(Step("Stiffness and damping", s1))
+            s2 = Doc()
+            s2.eq(r"\omega_n = \sqrt{\frac{K}{M}} = " + num(wn, 4) + r"\ \mathrm{rad/s}")
+            steps.append(Step("Natural frequency", s2))
+            data = dict(M=M, f=f, delta=delta, zeta_req=zeta)
+            title = "Impedance control: rendering a stiffness"
+        s3 = Doc()
+        s3.p("The deviation $x - x_{ss}$ obeys the free equation with initial value $-x_{ss}$, so the step response "
+             "has the same overshoot and settling time as the error dynamics of Sec. 11.2.2.")
+        os_, ts = _response_doc(s3, zeta, wn, "The deflection")
+        steps.append(Step("Transient", s3))
+        xss = f / K
+        ans = dict(x_ss=xss, wn=wn, zeta=zeta, overshoot=os_, ts=ts) if difficulty == 1 else \
+            dict(K_imp=K, B_imp=B, wn=wn, overshoot=os_, ts=ts)
+        ad = Doc()
+        ad.p((f"$K = {num(K, 4)}$ N/m, $B = {num(B, 4)}$ N·s/m; " if difficulty == 2 else "") +
+             f"$x_{{ss}} = {num(xss, 5)}$ m, $\\omega_n = {num(wn, 4)}$ rad/s, $\\zeta = {num(zeta, 4)}$ "
+             f"({_classify(zeta)}); overshoot {num(100 * os_, 2)} %, $t_s \\approx {num(ts, 4)}$ s.")
+        t = np.linspace(0, 1.5 * ts + 2 * np.pi / wn, 1200)
+        vis = dict(kind="plot", title="deflection x(t) after a step push", ylabel="x [m]", t=t,
+                   series=[("x(t)", xss * (1 - _step_error(zeta, wn, t))), ("x_ss", np.full_like(t, xss))])
+        return Problem("force_control", seed, difficulty, title, "Ch. 11 (Sec. 11.7)", st, data, steps, ans, ad, vis)
+
+    # difficulty 3: PI force control of a 1-DOF robot against a stiff environment (Sec. 11.5)
+    m = float(_pick(rng, [1.0, 2.0, 5.0]))
+    ke = float(_pick(rng, [1000.0, 2000.0, 5000.0]))
+    kfp = float(_pick(rng, [0.5, 1.0, 2.0, 4.0]))
+    kd = float(_pick(rng, [20.0, 50.0, 100.0]))
+    fd = float(_pick(rng, [5.0, 10.0, 20.0]))
+    dist = float(_pick(rng, [-3.0, -2.0, 2.0, 3.0, 5.0]))
+    kfi_max = kd * (1 + kfp) / m
+    while True:
+        kfi = float(_pick(rng, [5.0, 10.0, 20.0, 50.0, 100.0, 200.0, 500.0]))
+        if not 0.8 < kfi / kfi_max < 1.25:
+            break
+    st.p(f"A 1-DOF robot of mass $\\mathfrak{{m}} = {num(m)}$ kg presses on a stiff surface modelled as a spring "
+         f"$k_e = {num(ke)}$ N/m: with $x \\geq 0$ the penetration, the force the robot applies to the environment "
+         "(measured by its force sensor) is $f_{tip} = k_ex$.  Gravity is compensated, but an unmodelled constant "
+         f"force $d = {num(dist)}$ N also acts on the robot.  The force controller is")
+    st.eq(r"f = f_d + k_{fp}f_e + k_{fi}\int f_e\,dt - k_{damp}\dot{x},\quad f_e = f_d - f_{tip},\quad "
+          r"\mathfrak{m}\ddot{x} = f + d - k_ex")
+    st.p(f"with $f_d = {num(fd)}$ N, $k_{{fp}} = {num(kfp)}$, $k_{{damp}} = {num(kd)}$ N·s/m.  **(a)** With "
+         "$k_{fi} = 0$: find the steady-state contact force and force error, and $\\omega_n$, $\\zeta$ of the contact "
+         f"dynamics.  **(b)** With $k_{{fi}} = {num(kfi)}$ 1/s: find the steady-state contact force and the "
+         "closed-loop characteristic polynomial.  **(c)** For which $k_{fi}$ is the loop stable?  Is the given gain stable?")
+    s1 = Doc()
+    s1.p("With $k_{fi} = 0$ and $f_{tip} = k_ex$, setting $\\ddot{x} = \\dot{x} = 0$:")
+    s1.eq(r"0 = f_d + k_{fp}(f_d - f_{tip}) + d - f_{tip}\ \Rightarrow\ f_{tip} = f_d + \frac{d}{1+k_{fp}}")
+    fP = fd + dist / (1 + kfp)
+    wnP = np.sqrt(ke * (1 + kfp) / m)
+    zP = kd / (2 * np.sqrt(m * ke * (1 + kfp)))
+    s1.p(f"$f_{{tip}} = {num(fP, 4)}$ N, force error $f_e = -d/(1+k_{{fp}}) = {num(fd - fP, 4)}$ N: the proportional "
+         "gain only divides the disturbance.  The dynamics are "
+         "$\\mathfrak{m}\\ddot{x} + k_{damp}\\dot{x} + (1+k_{fp})k_ex = (1+k_{fp})f_d + d$, so")
+    s1.eq(r"\omega_n = \sqrt{\frac{(1+k_{fp})k_e}{\mathfrak{m}}} = " + num(wnP, 4) + r"\ \mathrm{rad/s},\quad \zeta = "
+          r"\frac{k_{damp}}{2\sqrt{\mathfrak{m}(1+k_{fp})k_e}} = " + num(zP, 4))
+    steps.append(Step("(a) Proportional force control", s1))
+    s2 = Doc()
+    s2.p("At a steady state the integrator input must vanish, $f_e = 0$, so $f_{tip} = f_d$ whatever $d$ is.  "
+         "Differentiating the equation of motion once ($f_d$ and $d$ constant, $\\dot{f}_{tip} = k_e\\dot{x}$):")
+    poly = np.array([m, kd, ke * (1 + kfp), kfi * ke])
+    s2.eq(r"\mathfrak{m}s^{3} + k_{damp}s^{2} + (1+k_{fp})k_es + k_{fi}k_e = 0")
+    s2.p(f"Coefficients $({num(poly[0])},\\ {num(poly[1])},\\ {num(poly[2])},\\ {num(poly[3])})$.")
+    steps.append(Step("(b) Integral action", s2))
+    s3 = Doc()
+    stable = kfi < kfi_max
+    s3.p("A cubic $a_3s^{3} + a_2s^{2} + a_1s + a_0$ with positive coefficients has all roots in the left half-plane "
+         "iff $a_2a_1 > a_3a_0$ (Routh–Hurwitz):")
+    s3.eq(r"k_{damp}(1+k_{fp})k_e > \mathfrak{m}k_{fi}k_e\ \Leftrightarrow\ k_{fi} < \frac{k_{damp}(1+k_{fp})}"
+          r"{\mathfrak{m}} = " + num(kfi_max, 4) + r"\ \mathrm{1/s}")
+    roots = np.roots(poly)
+    s3.p(f"The given $k_{{fi}} = {num(kfi)}$ is {'below' if stable else 'above'} the limit: the loop is "
+         f"**{'stable' if stable else 'unstable'}** (roots {', '.join(_root_txt(r) for r in roots)}).  Note the limit "
+         "does not depend on $k_e$: a stiffer environment speeds the loop up but the integral gain is capped by the "
+         "damping.")
+    steps.append(Step("(c) Stability of the PI loop", s3))
+    ans = dict(f_tip_P=fP, fe_P=fd - fP, wn_P=wnP, zeta_P=zP, f_tip_PI=fd, char_poly=poly, kfi_max=kfi_max,
+               stable=bool(stable))
+    ad = Doc().p(f"(a) $f_{{tip}} = {num(fP, 4)}$ N (error ${num(fd - fP, 4)}$ N), $\\omega_n = {num(wnP, 4)}$ rad/s, "
+                 f"$\\zeta = {num(zP, 4)}$.  (b) $f_{{tip}} = f_d = {num(fd)}$ N; ${num(m)}s^{{3}} + {num(kd)}s^{{2}} + "
+                 f"{num(poly[2])}s + {num(poly[3])} = 0$.  (c) $k_{{fi}} < {num(kfi_max, 4)}$ 1/s; the given gain is "
+                 f"{'stable' if stable else 'unstable'}.")
+    data = dict(m=m, ke=ke, kfp=kfp, kdamp=kd, fd=fd, d=dist, kfi=kfi)
+    A3, b3 = _pi_force_system(data)
+    sigma = float(np.max(roots.real))
+    t_end = min(3.0, max(8 / (zP * wnP), 5 * (1 + kfp) / kfi)) if stable else min(3.0, np.log(50.0) / sigma)
+    t, X = _lin_response(A3, b3, np.zeros(3), t_end)
+    A2, b2 = _pi_force_system(data, integral=False)
+    _, X2 = _lin_response(A2, b2, np.zeros(2), t_end)
+    vis = dict(kind="plot", title="contact force f_tip(t) from first touch (linear model, contact kept)", ylabel="f_tip [N]", t=t,
+               series=[("PI", ke * X[:, 0]), ("P only", ke * X2[:, 0]), ("f_d", np.full_like(t, fd))])
+    return Problem("force_control", seed, difficulty, "PI force control against a stiff surface",
+                   "Ch. 11 (Sec. 11.5)", st, data, steps, ans, ad, vis)
+
+
+def _root_txt(r) -> str:
+    r = complex(r)
+    if abs(r.imag) < 1e-9:
+        return num(r.real, 3)
+    return f"{num(r.real, 3)} {'+' if r.imag > 0 else '−'} {num(abs(r.imag), 3)}j"
+
+
+def _pi_force_system(d: dict, integral: bool = True, kfi=None):
+    """State-space model of the 1-DOF force loop: states (x, x-dot[, integral of f_e])."""
+    m, ke, kfp, kd, fd, dist = d["m"], d["ke"], d["kfp"], d["kdamp"], d["fd"], d["d"]
+    kfi = d["kfi"] if kfi is None else kfi
+    if not integral:
+        return (np.array([[0.0, 1.0], [-(1 + kfp) * ke / m, -kd / m]]),
+                np.array([0.0, ((1 + kfp) * fd + dist) / m]))
+    return (np.array([[0.0, 1.0, 0.0], [-(1 + kfp) * ke / m, -kd / m, kfi / m], [-ke, 0.0, 0.0]]),
+            np.array([0.0, ((1 + kfp) * fd + dist) / m, fd]))
+
+
+def _verify_force_control(p: Problem) -> float:
+    """Eigenvalues of the state matrix (omega_n, zeta, settling rule 4/min|Re s|), steady states by a linear solve,
+    overshoot by solve_ivp; for the PI loop np.poly of the state matrix and the stability limit by root finding."""
+    from scipy.integrate import solve_ivp
+    from scipy.optimize import brentq
+    d, a = p.data, p.answer
+    if "kfi" in d:
+        A2, b2 = _pi_force_system(d, integral=False)
+        x2 = np.linalg.solve(A2, -b2)
+        lam = np.linalg.eigvals(A2)
+        wn = np.sqrt(np.real(np.prod(lam)))
+        A3, b3 = _pi_force_system(d)
+        x3 = np.linalg.solve(A3, -b3)
+        e = max(abs(d["ke"] * x2[0] - a["f_tip_P"]), abs(d["fd"] - d["ke"] * x2[0] - a["fe_P"]),
+                abs(wn - a["wn_P"]), abs(-np.real(lam.sum()) / (2 * wn) - a["zeta_P"]),
+                abs(d["ke"] * x3[0] - a["f_tip_PI"]), np.abs(d["m"] * np.poly(A3) - a["char_poly"]).max())
+        e = max(e, float((np.linalg.eigvals(A3).real.max() < 0) != a["stable"]))
+
+        def growth(k):
+            return float(np.linalg.eigvals(_pi_force_system(d, kfi=k)[0]).real.max())
+        lim = brentq(growth, 0.5 * a["kfi_max"], 2 * a["kfi_max"], xtol=1e-12, rtol=1e-14)
+        return float(max(e, abs(lim - a["kfi_max"]) / max(1.0, a["kfi_max"])))
+    M = d["M"]
+    K, B = (d["K"], d["B"]) if "B" in d else (a["K_imp"], a["B_imp"])   # design: the spec is checked below
+    A = np.array([[0.0, 1.0], [-K / M, -B / M]])
+    b = np.array([0.0, d["f"] / M])
+    lam = np.linalg.eigvals(A)
+    wn = np.sqrt(np.real(np.prod(lam)))
+    zeta = -np.real(lam.sum()) / (2 * wn)
+    xss = np.linalg.solve(A, -b)[0]
+    e = max(abs(wn - a["wn"]), abs(4 / np.abs(lam.real).min() - a["ts"]))
+    if "x_ss" in a:
+        e = max(e, abs(xss - a["x_ss"]), abs(zeta - a["zeta"]))
+    else:
+        e = max(e, abs(xss - d["delta"]), abs(zeta - d["zeta_req"]))
+    if zeta < 1 - 1e-6:                     # genuinely complex roots (a double root may come out with tiny j)
+        sol = solve_ivp(lambda t, x: A @ x + b, (0, 3 * np.pi / np.abs(lam.imag).max()), [0.0, 0.0], rtol=1e-11,
+                        atol=1e-13, dense_output=True)
+        tt = np.linspace(0, sol.t[-1], 20001)
+        e = max(e, abs(sol.sol(tt)[0].max() / xss - 1 - a["overshoot"]))
+    else:
+        e = max(e, abs(a["overshoot"]))
+    return float(e)
+
+
+# -- Ch. 12: wrench matrix, form and force closure, minimum friction --------------------------------
+
+#: candidate planar contacts on the square body with corners (+-1, +-1): edge -> (point(s), inward normal)
+_EDGES = {"left": (lambda s: (-1.0, s), (1.0, 0.0)), "right": (lambda s: (1.0, s), (-1.0, 0.0)),
+          "bottom": (lambda s: (s, -1.0), (0.0, 1.0)), "top": (lambda s: (s, 1.0), (0.0, -1.0))}
+_OFFS = [-0.5, 0.0, 0.5]
+_MUS = [0.1, 0.15, 0.2, 0.3, 0.4, 0.5, 0.6, 0.8, 1.0, 1.25, 1.5, 2.0, 2.5, 3.5]
+
+
+def _contact(edge: str, s: float, mu: float, name: str):
+    pt, n = _EDGES[edge]
+    return GR.Contact(pt(s), n, mu, name)
+
+
+def _contacts_table(cs) -> tuple[list[str], list[list[str]]]:
+    return (["contact", "point $p_i$", "inward normal $\\hat{n}_i$"],
+            [[c.name, vec(c.p), vec(c.n)] for c in cs])
+
+
+def _grasp_visual(cs, friction: bool) -> dict:
+    lines = [dict(x=[-1, 1, 1, -1, -1], y=[-1, -1, 1, 1, -1], name="body", color=5, width=2)]
+    for k, c in enumerate(cs):
+        tail = c.p - 0.45 * c.n
+        lines.append(dict(x=[tail[0], c.p[0]], y=[tail[1], c.p[1]], name=f"finger {c.name}", color=k, width=3))
+        if friction and c.mu > 0:
+            for edge in GR.cone_edges(c):
+                tip = c.p + 0.7 * edge
+                lines.append(dict(x=[c.p[0], tip[0]], y=[c.p[1], tip[1]], color=k, dash=True, width=1.5))
+    return dict(kind="xy", title="contacts (solid) and friction-cone edges (dashed)", lines=lines)
+
+
+def _alt_closure(F) -> bool:
+    """Positive span of the columns = R^3 iff rank 3 and some strictly positive k has F k = 0: maximise the smallest
+    weight t subject to F k = 0, sum k = 1, k_i >= t (a different LP from MR's 12.14 test in grasping.py)."""
+    from scipy.optimize import linprog
+    F = np.asarray(F, float)
+    if np.linalg.matrix_rank(F, tol=1e-9) < 3:
+        return False
+    j = F.shape[1]
+    c = np.r_[np.zeros(j), -1.0]
+    A_eq = np.vstack([np.c_[F, np.zeros(3)], np.r_[np.ones(j), 0.0]])
+    A_ub = np.c_[-np.eye(j), np.ones(j)]
+    res = linprog(c, A_ub=A_ub, b_ub=np.zeros(j), A_eq=A_eq, b_eq=np.r_[np.zeros(3), 1.0],
+                  bounds=[(0, None)] * j + [(None, 1.0)], method="highs")
+    return res.status == 0 and -res.fun > 1e-9
+
+
+def _two_finger_mu(p1, n1, p2, n2) -> float:
+    """Two-finger force closure: the line between the contacts must lie inside both friction cones, so
+    mu_min = max tan(angle between each inward normal and the direction to the other contact)."""
+    d = (p2 - p1) / np.linalg.norm(p2 - p1)
+    out = 0.0
+    for n, u in ((n1, d), (n2, -d)):
+        c = float(n @ u)
+        out = max(out, np.sqrt(max(0.0, 1 - c * c)) / c)
+    return out
+
+
+def gen_grasp_closure(seed: int, difficulty: int) -> Problem:
+    rng = _rng("grasp_closure", seed, difficulty)
+    st, steps = Doc(), []
+    st.p("A planar rigid body is the square with corners $(\\pm 1, \\pm 1)$ (lengths in any unit; closure does not "
+         "depend on it).  Fingers touch it at stationary point contacts; each has a contact point $p_i$ and an inward "
+         "unit normal $\\hat{n}_i$ (pointing into the body).  Planar wrenches are $\\mathcal{F} = (m_z, f_x, f_y)$.")
+    if difficulty == 1:
+        want = bool(rng.random() < 0.5)
+        while True:
+            if want or rng.random() < 0.4:
+                edges = ["left", "right", "bottom", "top"]
+            else:
+                edges = [_pick(rng, list(_EDGES)) for _ in range(4)]
+            cs = [_contact(e, float(_pick(rng, _OFFS)), 0.0, str(i + 1)) for i, e in enumerate(edges)]
+            if len({(tuple(c.p), tuple(c.n)) for c in cs}) < 4:
+                continue
+            res = GR.form_closure(cs)
+            if res.closed == want:
+                break
+        st.table(*_contacts_table(cs))
+        st.p("The contacts are frictionless.  **(a)** Build the wrench matrix $F = [\\mathcal{F}_1\\ \\cdots\\ "
+             "\\mathcal{F}_4]$ of the contact normals.  **(b)** What is its rank?  **(c)** Does the grasp have "
+             "first-order form closure?  Justify with a positive combination $Fk = 0$ or with a twist that breaks "
+             "the grasp.")
+        F = GR.wrench_matrix(cs, friction=False)
+        s1 = Doc()
+        s1.p("A unit force $\\hat{n}_i$ at $p_i$ has the wrench $\\mathcal{F}_i = (p_{ix}n_{iy} - p_{iy}n_{ix},\\ "
+             "n_{ix},\\ n_{iy})$:")
+        s1.mat("F", F, 3)
+        rank = int(np.linalg.matrix_rank(F))
+        s1.p(f"$\\mathrm{{rank}}\\,F = {rank}$" + (" — less than 3, so some twist leaves every contact "
+                                                    "inactive and the grasp cannot be in form closure." if rank < 3 else "."))
+        steps.append(Step("Wrench matrix", s1))
+        s2 = Doc()
+        s2.p("First-order form closure (Sec. 12.1.7) holds iff the columns of $F$ positively span $\\mathbb{R}^{3}$: "
+             "rank 3 and a solution of $Fk = 0$ with every $k_i \\geq 1$ (the linear program of Sec. 12.1.7).")
+        if res.closed:
+            k = res.k / res.k.min()
+            s2.p(f"The LP returns $k = {vec(k, 3)}$ and $Fk = {vec(F @ k, 6)}$: the contact normals can balance each "
+                 "other with strictly positive forces, so **form closure** holds (four contacts, the minimum for a "
+                 "planar body).")
+        else:
+            V = GR.nonzero_twist(cs)
+            V = V / np.abs(V).max()
+            s2.p(f"No such $k$ exists (LP infeasible{', rank deficient' if rank < 3 else ''}).  For example the twist "
+                 f"$\\mathcal{{V}} = (\\omega_z, v_x, v_y) = {vec(V, 3)}$ has $F^{{T}}\\mathcal{{V}} = {vec(F.T @ V, 3)}$ "
+                 "≥ 0: no contact is penetrated, so the body can move — **no form closure**.")
+        steps.append(Step("Form closure test", s2))
+        ans = dict(F=F, rank=rank, closed=bool(res.closed))
+        if res.closed:
+            ans["k_lp"] = [float(x) for x in res.k]          # not unique: shown, not graded (a list)
+        ad = Doc().p(f"rank $F = {rank}$; {'form closure' if res.closed else 'no form closure'}.")
+        data = dict(contacts=[(c.p.copy(), c.n.copy()) for c in cs], mu=0.0)
+        title = "Form closure with frictionless contacts"
+        return Problem("grasp_closure", seed, difficulty, title, "Ch. 12 (Sec. 12.1.7)", st, data, steps, ans, ad,
+                       _grasp_visual(cs, False))
+
+    nc = 2 if difficulty == 2 else 3
+    while True:
+        edges = [str(x) for x in rng.permutation(list(_EDGES))[:nc]]
+        cs = [_contact(e, float(_pick(rng, _OFFS)), 0.0, str(i + 1)) for i, e in enumerate(edges)]
+        if nc == 2:
+            if abs(cs[0].n @ cs[1].n + 1) < 1e-9 and abs(cs[0].tangent @ (cs[1].p - cs[0].p)) < 1e-9:
+                continue                   # collinear antipodal fingers: any mu > 0 works, the minimum is not attained
+            mu_min = GR.min_friction(cs, tol=1e-10)
+        else:
+            mu_min = GR.min_friction(cs, mu_max=10.0, tol=1e-10)
+        if not np.isfinite(mu_min) or mu_min > 3.0 or mu_min < 0.05:
+            continue
+        want = bool(rng.random() < 0.5)                    # half the problems in closure, half not
+        cands = [m for m in _MUS if (m > mu_min) == want and abs(m - mu_min) > 0.08 * max(1.0, mu_min)]
+        if cands:
+            mu = float(_pick(rng, cands))
+            break
+    cs = GR.with_mu(cs, mu)
+    st.table(*_contacts_table(cs))
+    st.p(f"Every contact has Coulomb friction $\\mu = {num(mu)}$.  **(a)** Write the unit edges of each friction cone and "
+         f"the $3\\times {2 * nc}$ wrench matrix $F$ of the cone edges.  **(b)** Is the grasp in force closure?  "
+         "**(c)** Find the smallest friction coefficient $\\mu_{min}$ (the same at every contact) that gives force "
+         "closure.")
+    F = GR.wrench_matrix(cs, friction=True)
+    s1 = Doc()
+    s1.p("A planar friction cone is spanned by its two unit edges $(\\hat{n}_i \\pm \\mu\\hat{t}_i)/\\sqrt{1+\\mu^{2}}$, "
+         "$\\hat{t}_i$ the normal turned $+90^{\\circ}$; each edge force at $p_i$ gives one column $([p_i]f, f)$:")
+    s1.table(["contact", "$\\hat{t}_i$", "edge forces"],
+             [[c.name, vec(c.tangent), ",  ".join(vec(e, 4) for e in GR.cone_edges(c))] for c in cs])
+    s1.mat("F", F, 4)
+    steps.append(Step("Friction cones and wrench matrix", s1))
+    res = GR.force_closure(cs)
+    s2 = Doc()
+    s2.p("Force closure (Sec. 12.2.3) holds iff the cone-edge wrenches positively span $\\mathbb{R}^{3}$, which is "
+         "the same rank-and-LP test as form closure, applied to the edge columns (exact in the plane).")
+    s2.p(f"$\\mathrm{{rank}}\\,F = {np.linalg.matrix_rank(F)}$; the LP is {'feasible' if res.closed else 'infeasible'}: "
+         + ("**force closure**." if res.closed else "**no force closure** at this $\\mu$."))
+    steps.append(Step("(b) Force closure", s2))
+    s3 = Doc()
+    if nc == 2:
+        d12 = cs[1].p - cs[0].p
+        angs = [np.degrees(np.arccos(cs[0].n @ d12 / np.linalg.norm(d12))),
+                np.degrees(np.arccos(-cs[1].n @ d12 / np.linalg.norm(d12)))]
+        s3.p("Two frictional fingers hold a planar body in force closure iff the segment joining the contacts lies "
+             "inside both friction cones (each finger can push along the line towards the other).  The segment "
+             f"$p_2 - p_1 = {vec(d12)}$ makes {num(angs[0], 2)}° with $\\hat{{n}}_1$ and {num(angs[1], 2)}° with "
+             "$\\hat{n}_2$, and a cone of half-angle $\\arctan\\mu$ contains it when $\\mu \\geq \\tan$ of that angle:")
+        s3.eq(r"\mu_{min} = \max\left(\tan " + mdeg(np.radians(angs[0])) + r",\ \tan " + mdeg(np.radians(angs[1]))
+              + r"\right) = " + num(mu_min, 4))
+    else:
+        s3.p("The cones only grow with $\\mu$, so force closure is monotone in $\\mu$; bisection on the LP test "
+             f"(`grasping.min_friction`) gives $\\mu_{{min}} = {num(mu_min, 4)}$.  Below it some twist still keeps "
+             "every contact feasible; above it the cone edges positively span the plane's wrenches.")
+    s3.p(f"With $\\mu = {num(mu)}$ the grasp is {'above' if mu > mu_min else 'below'} the limit, consistent with (b).")
+    steps.append(Step("(c) Minimum friction coefficient", s3))
+    ans = dict(F=F, closed=bool(res.closed), mu_min=float(mu_min))
+    ad = Doc().p(f"{'Force closure' if res.closed else 'No force closure'} at $\\mu = {num(mu)}$; "
+                 f"$\\mu_{{min}} = {num(mu_min, 4)}$.")
+    data = dict(contacts=[(c.p.copy(), c.n.copy()) for c in cs], mu=mu)
+    title = "Force closure with two frictional fingers" if nc == 2 else "Force closure with three frictional contacts"
+    return Problem("grasp_closure", seed, difficulty, title, "Ch. 12 (Secs. 12.1.7, 12.2.3)", st, data, steps, ans, ad,
+                   _grasp_visual(cs, True))
+
+
+def _verify_grasp_closure(p: Problem) -> float:
+    """Wrenches rebuilt from the geometry; closure by a max-min-weight LP (not 12.14) and, for frictionless contacts,
+    by the dual twist test; two fingers: the angle rule; three: closure just above and not just below mu_min."""
+    d, a = p.data, p.answer
+    mu = d["mu"]
+    cols = []
+    for pt, n in d["contacts"]:
+        if mu > 0:
+            t = np.array([-n[1], n[0]])
+            fs = [(n + mu * t) / np.sqrt(1 + mu * mu), (n - mu * t) / np.sqrt(1 + mu * mu)]
+        else:
+            fs = [n]
+        cols += [np.r_[_cross2(pt, f), f] for f in fs]
+    F = np.array(cols).T
+    e = max(np.abs(F - a["F"]).max(), float(_alt_closure(F) != a["closed"]))
+    if mu == 0:
+        cs = [GR.Contact(pt, n) for pt, n in d["contacts"]]
+        e = max(e, abs(np.linalg.matrix_rank(F) - a["rank"]), float((GR.nonzero_twist(cs) is None) != a["closed"]))
+        if "k_lp" in a:
+            k = np.asarray(a["k_lp"])
+            e = max(e, np.abs(F @ k).max(), max(0.0, 1 - k.min()))
+        return float(e)
+    if len(d["contacts"]) == 2:
+        (p1, n1), (p2, n2) = d["contacts"]
+        return float(max(e, abs(_two_finger_mu(p1, n1, p2, n2) - a["mu_min"])))
+
+    def closed_at(m):
+        cs = [GR.Contact(pt, n, m) for pt, n in d["contacts"]]
+        return _alt_closure(GR.wrench_matrix(cs, friction=True))
+    m0 = a["mu_min"]
+    return float(max(e, float(not closed_at(m0 * (1 + 1e-4))), float(closed_at(m0 * (1 - 1e-4)))))
+
+
+# -- Ch. 13: wheeled mobile robots ------------------------------------------------------------------
+
+def _wheel_speed(wh, Vb) -> float:
+    """Driving speed of one wheel for a chassis twist V_b = (omega, v_x, v_y): velocity of the wheel centre
+    v + omega x p in {b}, expressed along / across the driving direction beta; the rollers at gamma let the wheel
+    slide across, so u = (v_drive + tan(gamma) v_across) / r."""
+    w, vx, vy = Vb
+    v = np.array([vx - w * wh.y, vy + w * wh.x])
+    drive = np.array([np.cos(wh.beta), np.sin(wh.beta)])
+    across = np.array([-np.sin(wh.beta), np.cos(wh.beta)])
+    return float((drive @ v + np.tan(wh.gamma) * (across @ v)) / wh.r)
+
+
+def _H_from_rigid_body(wheels) -> np.ndarray:
+    return np.array([[_wheel_speed(wh, e) for e in np.eye(3)] for wh in wheels])
+
+
+def _chassis_visual(kind: str, wheels, size, Vb) -> dict:
+    if kind == "omni3":
+        a = np.linspace(0, 2 * np.pi, 61)
+        lines = [dict(x=list(size * np.cos(a)), y=list(size * np.sin(a)), name="chassis", color=5, width=2)]
+    else:
+        hx, hy = size
+        lines = [dict(x=[-hx, hx, hx, -hx, -hx], y=[-hy, -hy, hy, hy, -hy], name="chassis", color=5, width=2)]
+    for k, wh in enumerate(wheels):
+        dvec = np.array([np.cos(wh.beta), np.sin(wh.beta)]) * 0.7 * wh.r
+        lines.append(dict(x=[wh.x - dvec[0], wh.x + dvec[0]], y=[wh.y - dvec[1], wh.y + dvec[1]],
+                          name=f"wheel {k + 1}", color=k, width=5))
+    v = np.asarray(Vb[1:], float)
+    if np.linalg.norm(v) > 1e-9:
+        tip = 0.6 * (size if np.isscalar(size) else max(size)) * v / np.linalg.norm(v)
+        lines.append(dict(x=[0, tip[0]], y=[0, tip[1]], name="(v_x, v_y)", color=6, width=2, dash=True))
+    return dict(kind="xy", title="chassis frame {b}: wheels and driving directions", lines=lines)
+
+
+def _wheel_table(wheels) -> tuple[list[str], list[list[str]]]:
+    return (["wheel", "$(x_i, y_i)$ in {b} [m]", "$\\beta_i$", "$\\gamma_i$", "$r_i$ [m]"],
+            [[str(k + 1), vec((wh.x, wh.y), 4), f"{num(np.degrees(wh.beta), 2)}°", f"{num(np.degrees(wh.gamma), 2)}°",
+              num(wh.r)] for k, wh in enumerate(wheels)])
+
+
+def gen_mobile_kin(seed: int, difficulty: int) -> Problem:
+    rng = _rng("mobile_kin", seed, difficulty)
+    st, steps = Doc(), []
+    r = float(_pick(rng, [0.05, 0.1]))
+    phi = int(rng.integers(-5, 7)) * 30 * DEG
+    if difficulty == 1:
+        dd = float(_pick(rng, [0.2, 0.25, 0.3]))
+        v = float(_pick(rng, [-0.5, 0.2, 0.3, 0.5, 1.0]))
+        w = float(_pick(rng, [-2.0, -1.0, -0.5, 0.5, 1.0, 2.0]))
+        uL2 = float(_pick(rng, [-4.0, 2.0, 4.0, 5.0, 6.0, 8.0]))
+        uR2 = float(_pick(rng, [2.0, 4.0, 6.0, 8.0, 10.0]))
+        if uR2 == uL2:
+            uR2 += 2.0
+        uL, uR = MB.diff_drive_wheel_speeds(v, w, r, dd)
+        qd = MB.diff_drive_qdot(phi, uL, uR, r, dd)
+        Vb2 = MB.F_diff_drive_book(r, dd) @ np.array([uL2, uR2])
+        st.p(f"A differential-drive robot has two driven wheels of radius $r = {num(r)}$ m, a distance $2d = "
+             f"{num(2 * dd)}$ m apart; the chassis frame {{b}} is midway between them with $\\hat{{x}}_b$ pointing "
+             "forward, and the canonical controls are the forward speed $v$ and the yaw rate $\\omega$.")
+        st.p(f"**(a)** Find the wheel speeds $(u_L, u_R)$ (rad/s) for $v = {num(v)}$ m/s, $\\omega = {num(w)}$ rad/s.  "
+             f"**(b)** With the chassis at heading $\\phi = {mdeg(phi)}$, give $\\dot{{q}} = (\\dot{{\\phi}}, \\dot{{x}}, "
+             f"\\dot{{y}})$.  **(c)** The encoders read $u_L = {num(uL2)}$, $u_R = {num(uR2)}$ rad/s: find $v$, $\\omega$ and "
+             "the radius of the circle the robot drives.")
+        s1 = Doc()
+        s1.p("A wheel centre at lateral offset $\\pm d$ moves forward at $v \\mp \\omega d$ (left wheel at $+d$), and "
+             "rolling means $r u = $ forward speed (Sec. 13.3):")
+        s1.eq(r"u_L = \frac{v - \omega d}{r} = " + num(uL, 4) + r",\quad u_R = \frac{v + \omega d}{r} = " + num(uR, 4)
+              + r"\ \mathrm{rad/s}")
+        steps.append(Step("(a) Wheel speeds", s1))
+        s2 = Doc()
+        s2.p("The chassis twist is $\\mathcal{V}_b = (\\omega, v, 0)$ (no sideways slip); rotating into {s}:")
+        s2.eq(r"\dot{q} = \left(\omega,\ v\cos\phi,\ v\sin\phi\right) = " + vec(qd, 4))
+        steps.append(Step("(b) Chassis velocity", s2))
+        s3 = Doc()
+        s3.p("Inverting (a), $v = r(u_L + u_R)/2$ and $\\omega = r(u_R - u_L)/(2d)$:")
+        s3.eq(r"v = " + num(Vb2[1], 4) + r"\ \mathrm{m/s},\quad \omega = " + num(Vb2[0], 4) + r"\ \mathrm{rad/s}")
+        s3.p(f"Turning radius $|v/\\omega| = {num(abs(Vb2[1] / Vb2[0]), 4)}$ m, turning "
+             f"{'left (counter-clockwise)' if Vb2[0] * Vb2[1] > 0 else 'right (clockwise)'} while driving "
+             f"{'forward' if Vb2[1] > 0 else 'backward'}.")
+        steps.append(Step("(c) Speeds from the encoders", s3))
+        ans = dict(u_LR=np.array([uL, uR]), qdot=qd, v_enc=float(Vb2[1]), omega_enc=float(Vb2[0]))
+        ad = Doc().p(f"(a) $(u_L, u_R) = {vec((uL, uR), 4)}$ rad/s.  (b) $\\dot{{q}} = {vec(qd, 4)}$.  (c) "
+                     f"$v = {num(Vb2[1], 4)}$ m/s, $\\omega = {num(Vb2[0], 4)}$ rad/s.")
+        data = dict(kind="diff", r=r, d=dd, v=v, omega=w, phi=phi, u_enc=np.array([uL2, uR2]))
+        wheels = MB.diff_drive_wheels(r, dd)
+        vis = _chassis_visual("diff", wheels, (0.6 * dd + r, 1.2 * dd), (w, v, 0.0))
+        return Problem("mobile_kin", seed, difficulty, "Differential-drive kinematics", "Ch. 13 (Sec. 13.3)", st,
+                       data, steps, ans, ad, vis)
+
+    while True:
+        Vb = np.array([_pick(rng, [-1.0, -0.5, 0.0, 0.5, 1.0]), _pick(rng, [-0.5, -0.2, 0.0, 0.2, 0.5, 1.0]),
+                       _pick(rng, [-0.5, -0.2, 0.0, 0.2, 0.5])])
+        if np.count_nonzero(Vb) >= 2:
+            break
+    if difficulty == 2:
+        dd = float(_pick(rng, [0.2, 0.25, 0.3]))
+        wheels = MB.three_omni_wheels(r, dd)
+        H0 = MB.H0_three_omni_book(r, dd)
+        qd = np.array([_pick(rng, [-0.5, 0.0, 0.5, 1.0]), _pick(rng, [-0.4, 0.0, 0.3, 0.4]),
+                       _pick(rng, [-0.3, 0.2, 0.4, 0.5])])
+        st.p(f"A robot with three omniwheels (free rollers, $\\gamma_i = 0$) at distance $d = {num(dd)}$ m from the "
+             "centre of its chassis frame {b}, as in MR Fig. 13.5:")
+        st.table(*_wheel_table(wheels))
+        st.p(f"**(a)** Build $H(0)$, the matrix with $u = H(0)\\mathcal{{V}}_b$.  **(b)** Find the wheel speeds for "
+             f"$\\mathcal{{V}}_b = (\\omega_{{bz}}, v_{{bx}}, v_{{by}}) = {vec(Vb)}$.  **(c)** At heading $\\phi = "
+             f"{mdeg(phi)}$ the chassis must move with $\\dot{{q}} = (\\dot{{\\phi}}, \\dot{{x}}, \\dot{{y}}) = {vec(qd)}$ "
+             "(in {s}): find $\\mathcal{V}_b$ and the wheel speeds.")
+        title, chap = "Three-omniwheel robot: H(0) and wheel speeds", "Ch. 13 (Sec. 13.2, eq. 13.9)"
+    else:
+        l, wd = float(_pick(rng, [0.2, 0.25, 0.3])), float(_pick(rng, [0.15, 0.2, 0.25]))
+        wheels = MB.four_mecanum_wheels(r, l, wd)
+        H0 = MB.H0_mecanum_book(r, l, wd)
+        while True:
+            V2 = np.array([_pick(rng, [-1.0, -0.5, 0.0, 0.5, 1.0]), _pick(rng, [-0.5, 0.0, 0.3, 0.5]),
+                           _pick(rng, [-0.4, 0.0, 0.2, 0.4])])
+            if np.any(V2):
+                break
+        slip = float(_pick(rng, [0.0, 0.0, 0.5, 1.0]))
+        u_meas = H0 @ V2 + slip * np.array([1.0, 1.0, -1.0, -1.0])
+        u_meas = np.round(u_meas, 3)
+        st.p(f"A chassis with four mecanum wheels ($\\gamma_i = \\pm 45^{{\\circ}}$ rollers), wheel centres at "
+             f"$(\\pm l, \\pm w)$ with $l = {num(l)}$ m, $w = {num(wd)}$ m, as in MR Fig. 13.5:")
+        st.table(*_wheel_table(wheels))
+        st.p(f"**(a)** Build $H(0)$ with $u = H(0)\\mathcal{{V}}_b$.  **(b)** Find the wheel speeds for $\\mathcal{{V}}_b = "
+             f"{vec(Vb)}$.  **(c)** Odometry: the wheel encoders report the speeds $u = {vec(u_meas)}$ rad/s.  Find "
+             "$F = H^{\\dagger}(0)$ and the chassis twist that best explains them; are the four readings consistent?")
+        title, chap = "Mecanum-wheel robot: H(0), wheel speeds and odometry", "Ch. 13 (Secs. 13.2, 13.4; eq. 13.10)"
+    s1 = Doc()
+    s1.p("Each row is $h_i(0) = \\frac{1}{r_i\\cos\\gamma_i}\\left(x_i\\sin(\\beta_i+\\gamma_i) - "
+         "y_i\\cos(\\beta_i+\\gamma_i),\\ \\cos(\\beta_i+\\gamma_i),\\ \\sin(\\beta_i+\\gamma_i)\\right)$: the velocity of "
+         "the wheel centre, $v + \\omega\\times p_i$, resolved along the driving direction $\\beta_i$ and across it "
+         "(the rollers at $\\gamma_i$ slide freely), divided by $r_i$:")
+    s1.mat("H(0)", H0, 4)
+    steps.append(Step("(a) Wheel-speed matrix H(0)", s1))
+    u = H0 @ Vb
+    s2 = Doc()
+    s2.eq(r"u = H(0)\mathcal{V}_b = " + vec(u, 4) + r"\ \mathrm{rad/s}")
+    steps.append(Step("(b) Wheel speeds", s2))
+    ans = dict(H0=H0, u=u)
+    ad = Doc().mat("H(0)", H0, 4).p(f"(b) $u = {vec(u, 4)}$ rad/s.")
+    if difficulty == 2:
+        Vbp = MB.body_twist(phi, qd)
+        uphi = MB.H_matrix(wheels, phi) @ qd
+        s3 = Doc()
+        s3.p("The body twist is $\\dot{q}$ seen in {b}: $\\omega_{bz} = \\dot{\\phi}$, $(v_{bx}, v_{by}) = "
+             "R(\\phi)^{T}(\\dot{x}, \\dot{y})$, and then $u = H(0)\\mathcal{V}_b = H(\\phi)\\dot{q}$:")
+        s3.eq(r"\mathcal{V}_b = " + vec(Vbp, 4) + r",\quad u = " + vec(uphi, 4) + r"\ \mathrm{rad/s}")
+        steps.append(Step("(c) From a velocity in {s}", s3))
+        ans.update(Vb_phi=Vbp, u_phi=uphi)
+        ad.p(f"(c) $\\mathcal{{V}}_b = {vec(Vbp, 4)}$, $u = {vec(uphi, 4)}$ rad/s.")
+        data = dict(kind="omni3", r=r, d=dd, Vb=Vb, phi=phi, qdot=qd)
+        vis = _chassis_visual("omni3", wheels, 1.25 * dd, Vb)
+    else:
+        Fm = MB.F_mecanum_book(r, l, wd)
+        Vo = Fm @ u_meas
+        res = u_meas - H0 @ Vo
+        s3 = Doc()
+        s3.p("Four wheel speeds over-determine the three twist components.  The least-squares twist uses the "
+             "pseudoinverse $F = H^{\\dagger}(0) = (H^{T}H)^{-1}H^{T}$ (Sec. 13.4):")
+        s3.mat("F", Fm, 5)
+        s3.eq(r"\mathcal{V}_b = Fu = " + vec(Vo, 4))
+        s3.p(f"Residual $u - H(0)\\mathcal{{V}}_b = {vec(res, 4)}$ rad/s: "
+             + ("zero, so the readings are consistent with rolling without slip." if np.abs(res).max() < 1e-9 else
+                "not zero, so the readings are inconsistent — some wheels slip (the residual is along "
+                "$(1, 1, -1, -1)$, the one wheel-speed pattern no chassis twist can produce, which $F$ maps to zero)."))
+        steps.append(Step("(c) Odometry with the pseudoinverse", s3))
+        ans.update(F_odo=Fm, Vb_odo=Vo)
+        ad.p(f"(c) $\\mathcal{{V}}_b = {vec(Vo, 4)}$ ({'consistent' if np.abs(res).max() < 1e-9 else 'wheels slip'}).")
+        data = dict(kind="mecanum", r=r, l=l, w=wd, Vb=Vb, u_meas=u_meas)
+        vis = _chassis_visual("mecanum", wheels, (l + 0.08, wd + 0.04), Vb)
+    return Problem("mobile_kin", seed, difficulty, title, chap, st, data, steps, ans, ad, vis)
+
+
+def _verify_mobile_kin(p: Problem) -> float:
+    """Wheel speeds from the rigid-body velocity of each wheel centre (no H matrix formula), qdot / V_b by an explicit
+    rotation, the encoder inverse by a linear solve and odometry by least squares (numpy lstsq / pinv)."""
+    d, a = p.data, p.answer
+    r = d["r"]
+    if d["kind"] == "diff":
+        wheels = [MB.Wheel(0.0, d["d"], 0.0, 0.0, r), MB.Wheel(0.0, -d["d"], 0.0, 0.0, r)]
+        V = np.array([d["omega"], d["v"], 0.0])
+        u = np.array([_wheel_speed(wh, V) for wh in wheels])
+        qd = np.r_[d["omega"], _rot2(d["phi"]) @ np.array([d["v"], 0.0])]
+        vw = np.linalg.solve(np.array([[1.0, -d["d"]], [1.0, d["d"]]]) / r, d["u_enc"])
+        return float(max(np.abs(u - a["u_LR"]).max(), np.abs(qd - a["qdot"]).max(), abs(vw[0] - a["v_enc"]),
+                         abs(vw[1] - a["omega_enc"])))
+    if d["kind"] == "omni3":
+        dd = d["d"]
+        wheels = [MB.Wheel(dd * np.cos(ang), dd * np.sin(ang), beta, 0.0, r)
+                  for beta, ang in ((0.0, np.pi / 2), (-2 * np.pi / 3, -np.pi / 6), (2 * np.pi / 3, 7 * np.pi / 6))]
+    else:
+        l, w = d["l"], d["w"]
+        g = np.pi / 4
+        wheels = [MB.Wheel(l, w, 0.0, -g, r), MB.Wheel(l, -w, 0.0, g, r), MB.Wheel(-l, -w, 0.0, -g, r),
+                  MB.Wheel(-l, w, 0.0, g, r)]
+    H = _H_from_rigid_body(wheels)
+    e = max(np.abs(H - a["H0"]).max(), np.abs(np.array([_wheel_speed(wh, d["Vb"]) for wh in wheels]) - a["u"]).max())
+    if "Vb_phi" in a:
+        Vb = np.r_[d["qdot"][0], _rot2(d["phi"]).T @ d["qdot"][1:]]
+        e = max(e, np.abs(Vb - a["Vb_phi"]).max(),
+                np.abs(np.array([_wheel_speed(wh, Vb) for wh in wheels]) - a["u_phi"]).max())
+    if "Vb_odo" in a:
+        e = max(e, np.abs(np.linalg.pinv(H) - a["F_odo"]).max(),
+                np.abs(np.linalg.lstsq(H, d["u_meas"], rcond=None)[0] - a["Vb_odo"]).max())
+    return float(e)
+
+
+# ------------------------------------------------------------------------------------------------
 # registry and public API
 # ------------------------------------------------------------------------------------------------
 
@@ -2092,6 +2989,7 @@ TOPICS: dict[str, dict] = {
     "rotation": dict(title="Rotations & rigid motions: exp / log (Ch. 3)", gen=gen_rotation, verify=_verify_rotation),
     "fk": dict(title="PoE forward kinematics, space & body (Ch. 4)", gen=gen_fk, verify=_verify_fk),
     "jacobian": dict(title="Space / body Jacobian & singularities (Ch. 5)", gen=gen_jacobian, verify=_verify_jacobian),
+    "statics": dict(title="Statics τ = JᵀF and manipulability (Ch. 5)", gen=gen_statics, verify=_verify_statics),
     "ik": dict(title="Newton–Raphson IK iteration table (Ch. 6)", gen=gen_ik, verify=_verify_ik),
     "inertia": dict(title="Rigid-body inertia: principal moments, Steiner, spatial inertia (Ch. 8)", gen=gen_inertia,
                     verify=_verify_inertia),
@@ -2106,12 +3004,19 @@ TOPICS: dict[str, dict] = {
     "trajectory": dict(title="Cubic / quintic time scaling (Ch. 9)", gen=gen_trajectory, verify=_verify_trajectory),
     "control": dict(title="PD / computed-torque error dynamics ζ, ωₙ (Ch. 11)", gen=gen_control,
                     verify=_verify_control),
+    "force_control": dict(title="Impedance and PI force control: deflection, ζ, ωₙ, stability (Ch. 11)",
+                          gen=gen_force_control, verify=_verify_force_control),
+    "grasp_closure": dict(title="Grasping: wrench matrix, form / force closure, minimum μ (Ch. 12)",
+                          gen=gen_grasp_closure, verify=_verify_grasp_closure),
+    "mobile_kin": dict(title="Wheeled mobile robots: diff-drive, omniwheel / mecanum H(0) (Ch. 13)",
+                       gen=gen_mobile_kin, verify=_verify_mobile_kin),
 }
 TOPIC_KEYS = list(TOPICS)
 #: fixed random-stream id per topic (topics are listed by chapter, but a seed keeps giving the same problem
 #: when topics are added or reordered)
 _RNG_ID = {"rotation": 0, "fk": 1, "jacobian": 2, "ik": 3, "dynamics": 4, "trajectory": 5, "control": 6,
-           "inertia": 7, "fwd_dynamics": 8, "task_space": 9, "constrained": 10}
+           "inertia": 7, "fwd_dynamics": 8, "task_space": 9, "constrained": 10, "statics": 11, "force_control": 12,
+           "grasp_closure": 13, "mobile_kin": 14}
 MIXED = "mixed"
 
 
@@ -2206,7 +3111,9 @@ def validation_checks() -> list[Check]:
     cat = "Practice problems"
     chap = {"rotation": "MR 3.2–3.3", "fk": "MR 4.1", "jacobian": "MR 5.1–5.3", "ik": "MR 6.2",
             "dynamics": "MR 8.1, 8.3", "trajectory": "MR 9.2", "control": "MR 11.2–11.4", "inertia": "MR 8.2",
-            "fwd_dynamics": "MR 8.1, 8.5", "task_space": "MR 8.6, 8.9.2", "constrained": "MR 8.7"}
+            "fwd_dynamics": "MR 8.1, 8.5", "task_space": "MR 8.6, 8.9.2", "constrained": "MR 8.7",
+            "statics": "MR 5.2, 5.4", "force_control": "MR 11.5, 11.7", "grasp_closure": "MR 12.1.7, 12.2.3",
+            "mobile_kin": "MR 13.2–13.4"}
     how = {"rotation": "SciPy Rotation / expm vs mr.MatrixExp3/Log3/Exp6/Log6",
            "fk": "screw axes rebuilt as q×ω, SciPy expm products (space and M⁻¹[S]M body form) vs mr.FKinSpace",
            "jacobian": "central finite differences of the PoE map (SciPy expm) vs mr.JacobianSpace/Body; rank decision",
@@ -2221,7 +3128,15 @@ def validation_checks() -> list[Check]:
                            "mr.InverseDynamics; Euler steps recomputed",
            "task_space": "Λ = (J M⁻¹ Jᵀ)⁻¹ from the closed-form J and M; felt mass as a minimum-energy KKT solve",
            "constrained": "KKT system [[M, −Aᵀ], [A, 0]] with the closed-form Lagrangian and Ȧθ̇ by central "
-                          "differences vs the multiplier formula"}
+                          "differences vs the multiplier formula",
+           "statics": "τᵢ as the moment of f about joint i, J from finite differences of the closed-form chain, "
+                      "lstsq inverse, ellipse axes from SVD vs mr.JacobianSpace/Body and eig(J Jᵀ)",
+           "force_control": "eigenvalues and linear steady state of the state matrix, overshoot by solve_ivp, "
+                            "np.poly of the PI loop and its stability limit by root finding vs Routh–Hurwitz",
+           "grasp_closure": "wrenches rebuilt from the geometry; max-min-weight LP and the dual twist test vs the "
+                            "LP of grasping.py; two-finger angle rule vs bisection for μ_min",
+           "mobile_kin": "wheel speeds from the rigid-body velocity of each wheel centre, explicit rotations, "
+                         "numpy lstsq / pinv vs mobile.py and the book matrices H(0), F"}
     for t in TOPIC_KEYS:
         err, n = 0.0, 0
         for d in (1, 2, 3):

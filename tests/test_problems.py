@@ -258,6 +258,123 @@ def test_mixed_problem_set_covers_every_topic():
     assert all(P.verify(p) < 1e-6 for p in probs)
 
 
+# --- Ch. 5 statics, Ch. 11 force control, Ch. 12 grasping, Ch. 13 mobile robots ----------------------
+
+NEW = {"statics": "Ch. 5", "force_control": "Ch. 11", "grasp_closure": "Ch. 12", "mobile_kin": "Ch. 13"}
+
+
+def test_new_topics_registered_by_chapter():
+    for t, ch in NEW.items():
+        assert t in P.TOPIC_KEYS and P.TOPICS[t]["title"].endswith(f"({ch})")
+    assert [P._RNG_ID[t] for t in NEW] == [11, 12, 13, 14]
+    # the topic list is ordered by chapter
+    chapters = [int(re.search(r"\(Ch\. (\d+)\)$", P.TOPICS[t]["title"]).group(1)) for t in P.TOPIC_KEYS]
+    assert chapters == sorted(chapters)
+
+
+def test_existing_seeds_unchanged_by_new_topics():
+    """New topics get new random-stream ids, so the earlier topics still give the same problem for a seed."""
+    p = P.generate("constrained", 5, 3)
+    assert P._rng("constrained", 5, 3).integers(1 << 30) == np.random.default_rng([5, 10, 3]).integers(1 << 30)
+    assert p.topic == "constrained" and P.verify(p) < 1e-6
+
+
+@pytest.mark.parametrize("topic", list(NEW))
+@pytest.mark.parametrize("diff", (1, 2, 3))
+def test_new_topics_verified_rendered_deterministic(topic, diff):
+    from mrstudio.gui.theory import validate_all
+    for seed in (1, 2, 3):
+        p = P.generate(topic, seed, diff)
+        assert p.topic == topic and p.difficulty == diff and p.chapter.startswith(NEW[topic] + " ")
+        assert P.verify(p) < 1e-6, (topic, diff, seed)
+        assert validate_all(["$" + m + "$" for m in p.all_math()]) == [], (topic, diff, seed)
+        md = p.markdown(1, with_solution=True)
+        assert "### Solution" in md and "**Final answer.**" in md and "Step 1." in md
+        assert p.visual.get("kind") in ("robot", "plot", "xy")
+        q = P.generate(topic, seed, diff)
+        assert (q.statement, q.solution) == (p.statement, p.solution)
+
+
+@pytest.mark.parametrize("topic,diff,key", [("statics", 1, "tau"), ("statics", 2, "f_star"), ("statics", 3, "mu1"),
+                                            ("force_control", 1, "x_ss"), ("force_control", 2, "B_imp"),
+                                            ("force_control", 3, "kfi_max"), ("grasp_closure", 2, "mu_min"),
+                                            ("grasp_closure", 1, "closed"), ("mobile_kin", 1, "u_LR"),
+                                            ("mobile_kin", 2, "u"), ("mobile_kin", 3, "Vb_odo")])
+def test_new_verifiers_catch_a_wrong_answer(topic, diff, key):
+    p = P.generate(topic, 2, diff)
+    v = p.answer[key]
+    p.answer[key] = (not v) if isinstance(v, bool) else v + 1e-3 * (1 + np.abs(v))
+    assert P.verify(p) > 1e-4
+
+
+def test_statics_textbook_facts():
+    for s in range(10):
+        p = P.generate("statics", s, 1)                  # tau_1 is the moment of the tip force about the base
+        assert np.isclose(p.answer["tau"][0], p.answer["Fs"][0])
+        p = P.generate("statics", s, 2)
+        d, a = p.data, p.answer
+        assert np.allclose(a["Jv"].T @ d["f"], a["tau"])  # tau = J_v^T f = J_s^T F_s for a pure tip force
+        assert np.allclose(a["Jv"].T @ a["f_star"], d["tau_star"])
+        p = P.generate("statics", s, 3)
+        d, a = p.data, p.answer
+        L, th = d["L"], d["theta"]
+        assert np.isclose(np.linalg.det(a["Jb_p"]), L[0] * L[1] * np.sin(th[1]))
+        assert np.allclose(a["ell_axes"] * a["force_axes"][::-1], 1.0)   # force ellipse = inverse lengths
+        assert a["mu1"] >= 1.0
+
+
+def test_force_control_facts():
+    kinds = set()
+    for s in range(12):
+        a = P.generate("force_control", s, 1).answer
+        kinds.add(P._classify(a["zeta"]))
+        d = P.generate("force_control", s, 2)
+        assert np.isclose(d.answer["K_imp"] * d.data["delta"], d.data["f"])          # spec deflection met
+        assert np.isclose(d.answer["B_imp"], 2 * d.data["zeta_req"] * np.sqrt(d.answer["K_imp"] * d.data["M"]))
+        p = P.generate("force_control", s, 3)
+        dd, a = p.data, p.answer
+        assert a["f_tip_PI"] == dd["fd"]
+        assert np.isclose(a["fe_P"], -dd["d"] / (1 + dd["kfp"]))
+        roots = np.roots(a["char_poly"])
+        assert (roots.real.max() < 0) == a["stable"] == (dd["kfi"] < a["kfi_max"])
+    assert len(kinds) >= 2
+    stab = {P.generate("force_control", s, 3).answer["stable"] for s in range(20)}
+    assert stab == {True, False}
+
+
+def test_grasp_closure_uses_grasping_module_and_varies():
+    from mrstudio import grasping as GR
+    for diff in (1, 2, 3):
+        seen = set()
+        for s in range(16):
+            p = P.generate("grasp_closure", s, diff)
+            d, a = p.data, p.answer
+            seen.add(a["closed"])
+            cs = [GR.Contact(pt, n, d["mu"]) for pt, n in d["contacts"]]
+            assert np.allclose(GR.wrench_matrix(cs, friction=d["mu"] > 0), a["F"])
+            if diff >= 2:
+                assert a["closed"] == (d["mu"] > a["mu_min"])
+                assert np.isfinite(a["mu_min"])
+        assert seen == {True, False}, diff
+
+
+def test_mobile_kin_matches_book_matrices():
+    from mrstudio import mobile as MB
+    for s in range(8):
+        p = P.generate("mobile_kin", s, 1)
+        d, a = p.data, p.answer
+        assert np.isclose(a["u_LR"].mean() * d["r"], d["v"])                        # v = r (u_L + u_R) / 2
+        p = P.generate("mobile_kin", s, 2)
+        d, a = p.data, p.answer
+        assert np.allclose(a["H0"], MB.H_matrix(MB.three_omni_wheels(d["r"], d["d"])))
+        assert np.allclose(a["u_phi"], a["H0"] @ a["Vb_phi"])
+        p = P.generate("mobile_kin", s, 3)
+        d, a = p.data, p.answer
+        assert np.allclose(a["F_odo"] @ a["H0"], np.eye(3))
+        res = d["u_meas"] - a["H0"] @ a["Vb_odo"]
+        assert np.allclose(a["H0"].T @ res, 0)                                       # least-squares residual
+
+
 # --- export -----------------------------------------------------------------------------------------
 
 def test_problem_set_versions_share_topics():

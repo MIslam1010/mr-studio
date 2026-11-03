@@ -73,6 +73,20 @@ LABELS = {
     "zeta": "ζ", "wn": "ωₙ (rad/s)", "wd": "ω_d (rad/s)", "overshoot": "overshoot (%)",
     "ts": "t_s ≈ 4/(ζωₙ) (s)", "ts_exact": "exact 2 % settling time (s)", "kd_critical": "K_d for ζ = 1",
     "kp": "K_p", "kd": "K_d",
+    "Fs": "tip wrench 𝓕_s = (m_z, f_x, f_y)", "Js_p": "J_s, planar rows (ω_z, v_x, v_y)",
+    "Jb_p": "J_b, planar rows (ω_z, v_x, v_y)", "Jv": "tip Jacobian J_v (m/rad)", "f_star": "tip force f* (N)",
+    "Fb_star": "tool wrench 𝓕_b* (N m, N, N)", "ell_axes": "velocity-ellipse semi-axes √λᵢ",
+    "force_axes": "force-ellipse semi-axes 1/√λᵢ", "mu1": "isotropy μ₁",
+    "x_ss": "steady-state deflection (m)", "K_imp": "rendered stiffness K (N/m)", "B_imp": "damping B (N s/m)",
+    "f_tip_P": "contact force, P control (N)", "fe_P": "force error, P control (N)", "wn_P": "ωₙ, P control (rad/s)",
+    "zeta_P": "ζ, P control", "f_tip_PI": "contact force, PI control (N)",
+    "char_poly": "characteristic polynomial coefficients (s³ … s⁰)", "kfi_max": "largest stable k_fi (1/s)",
+    "stable": "stable? (1 = yes, 0 = no)",
+    "F": "wrench matrix F (columns 𝓕ᵢ)", "closed": "closure? (1 = yes, 0 = no)", "mu_min": "minimum friction μ_min",
+    "u_LR": "wheel speeds (u_L, u_R) (rad/s)", "qdot": "q̇ = (φ̇, ẋ, ẏ)", "v_enc": "v from the encoders (m/s)",
+    "omega_enc": "ω from the encoders (rad/s)", "H0": "H(0)", "u": "wheel speeds u (rad/s)",
+    "Vb_phi": "𝒱_b = (ω_bz, v_bx, v_by)", "u_phi": "wheel speeds for q̇ (rad/s)", "F_odo": "F = H†(0)",
+    "Vb_odo": "odometry twist 𝒱_b",
 }
 
 
@@ -81,8 +95,10 @@ LABELS = {
 SEED_DEPENDENT = {"control": ("wd", "roots")}
 LABELS.setdefault("roots", "real roots s₁, s₂ (1/s, any order)")
 LABELS["Lam_eig"] = "eigenvalues of Λ (any order)"
+LABELS["ell_axes"] += " (any order)"
+LABELS["force_axes"] += " (any order)"
 #: quantities whose entries may be typed in any order (roots, eigenvalues)
-UNORDERED = {"roots", "Lam_eig"}
+UNORDERED = {"roots", "Lam_eig", "ell_axes", "force_axes"}
 
 
 class AssignmentError(ValueError):
