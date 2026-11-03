@@ -390,6 +390,9 @@ def apply_page_preset(page, key: str) -> bool:
     return True
 
 
+_FILE_OPEN = QtCore.QEvent.FileOpen        # looked up once: the filter sees every event of the app
+
+
 class UrlOpenFilter(QtCore.QObject):
     """Receives ``mrstudio://`` URLs that macOS delivers as ``QFileOpenEvent`` (the app is opened by a link).
 
@@ -407,7 +410,7 @@ class UrlOpenFilter(QtCore.QObject):
             win.open_url(u)
 
     def eventFilter(self, obj, ev):
-        if ev.type() == QtCore.QEvent.FileOpen:
+        if ev.type() == _FILE_OPEN:
             url = ev.url().toString() or ev.file()
             if url.lower().startswith("mrstudio:"):
                 if self.window is not None:
@@ -1162,7 +1165,8 @@ def main(argv=None):
     app.setApplicationName("MR Studio")
     app.setOrganizationName("MRStudio")
     url_filter = UrlOpenFilter(app)          # macOS: links clicked while (or before) the app runs
-    app.installEventFilter(url_filter)
+    if sys.platform == "darwin":             # QFileOpenEvent is macOS-only; elsewhere links arrive as --open
+        app.installEventFilter(url_filter)
     s = app_settings()
     if args.projector:
         projector = True
