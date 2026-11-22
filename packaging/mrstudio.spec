@@ -22,8 +22,15 @@ import bundle_config as cfg  # noqa: E402
 IS_MAC = sys.platform == "darwin"
 IS_WIN = sys.platform == "win32"
 
+# Optional Knowledge Map tab: only with MRSTUDIO_BUNDLE_KMAP=<map folder> (local builds; never in CI). Refuses
+# instructor content (SystemExit). Unset: KMAP is None and every list below is exactly the standard build's.
+KMAP = cfg.kmap_bundle()
+if KMAP:
+    print(f"mrstudio.spec: bundling the Knowledge Map ({KMAP['edition']}) from {KMAP['dir']} with Qt WebEngine")
+
 # ---------------------------------------------------------------- hidden imports
 hiddenimports = list(cfg.HIDDEN_IMPORTS) + cfg.optional_hidden_imports() + ["bundle_config"]
+hiddenimports += cfg.kmap_hidden_imports(KMAP)
 for pkg in cfg.COLLECT_ALL_SUBMODULES:
     hiddenimports += collect_submodules(pkg, on_error="warn once")
 if not IS_WIN:
@@ -41,6 +48,7 @@ for dist in cfg.METADATA_DISTS:
         if dist not in cfg.METADATA_OPTIONAL:
             raise
         print(f"mrstudio.spec: no metadata for {dist!r} (About box will show '-' for it)")
+datas += cfg.kmap_datas(KMAP)          # [] unless MRSTUDIO_BUNDLE_KMAP is set
 
 # ---------------------------------------------------------------- native libraries
 binaries = []
@@ -72,7 +80,7 @@ a = Analysis(  # noqa: F821
     hookspath=[os.path.join(SPEC_DIR, "hooks")],
     hooksconfig={"matplotlib": {"backends": ["Agg"]}},
     runtime_hooks=[os.path.join(SPEC_DIR, "rthook_mrstudio.py")],
-    excludes=cfg.EXCLUDES,
+    excludes=cfg.excludes_for(KMAP),     # == cfg.EXCLUDES unless the map (Qt WebEngine) is bundled
     noarchive=False,
     optimize=0,          # keep docstrings/asserts: modern_robotics and sympy rely on them
 )

@@ -8,7 +8,9 @@
                                   headless smoke test of the *bundle*: every library imports, Pinocchio and
                                   Modern Robotics agree on the UR5 dynamics, the Corke DH models and the
                                   bundled URDFs load, equations render, ffmpeg encodes and re-reads a short
-                                  H.264 MP4, every tab imports.
+                                  H.264 MP4, every tab imports; with a bundled Knowledge Map (MRSTUDIO_BUNDLE_KMAP
+                                  build): Qt WebEngine imports, index.html and pyodide/pyodide.js are served by the
+                                  kmap: scheme handler, no x_*.js / instructor content.
                                   Exit code 0 = OK. Used by the build scripts and CI after freezing.
     MRStudio --validate [--report FILE]
                                   run the full cross-validation suite (the Validation tab) headless.
@@ -119,6 +121,47 @@ def _step(rep: _Report, name: str, fn) -> object:
         rep(False, name, f"{type(e).__name__}: {e}")
         rep.note(traceback.format_exc())
         return None
+
+
+def kmap_checks(rep: _Report, root, edition: str = "student") -> None:
+    """Self-test of a bundled Knowledge Map in ``root`` (only run when the build has one)."""
+    import importlib
+    try:
+        import bundle_config as cfg
+        mods = cfg.KMAP_SELF_TEST_IMPORTS
+    except ImportError:  # pragma: no cover
+        mods = ["PySide6.QtWebEngineCore", "PySide6.QtWebEngineWidgets"]
+    rep.note(f"Knowledge Map bundled: {root}")
+    for m in mods:
+        _step(rep, f"import {m}", lambda m=m: getattr(importlib.import_module(m), "__version__", None))
+
+    def _index():
+        p = os.path.join(str(root), "index.html")
+        if not os.path.isfile(p):
+            raise FileNotFoundError(p)
+        return f"{os.path.getsize(p) / 1e6:.1f} MB"
+    _step(rep, "Knowledge Map: index.html present", _index)
+
+    def _served():
+        from mrstudio.gui.kmap_view import serve_check
+        out = []
+        for rel, mime in (("index.html", "text/html"), ("pyodide/pyodide.js", "text/javascript")):
+            job = serve_check(root, rel)
+            if job.error is not None or not job.data or job.mime != mime:
+                raise AssertionError(f"kmap://map/{rel}: error={job.error} mime={job.mime} bytes={len(job.data or b'')}")
+            out.append(f"{rel} {len(job.data)} B")
+        if serve_check(root, "../index.html").error is None:
+            raise AssertionError("kmap://map/../index.html was served (path traversal)")
+        return "; ".join(out)
+    _step(rep, "Knowledge Map: kmap: scheme handler serves index.html and pyodide/pyodide.js", _served)
+
+    def _clean():
+        from mrstudio.kmap_links import content_problems
+        bad = content_problems(root, edition)
+        if bad:
+            raise AssertionError("; ".join(bad[:5]))
+        return f"no x_*.js, no instructor folder, edition {edition}"
+    _step(rep, "Knowledge Map: no instructor content", _clean)
 
 
 def self_test(report: str | None = None, tabs: bool = True) -> int:
@@ -287,6 +330,14 @@ def self_test(report: str | None = None, tabs: bool = True) -> int:
                 ok.append(cls)
             return f"{len(ok)} tabs import" + (f"; not present: {skipped}" if skipped else "")
         _step(rep, "every tab module imports", _tabs)
+    try:
+        from mrstudio.kmap_links import app_edition, bundled_kmap_dir
+        kmap_root = bundled_kmap_dir()        # frozen builds made with MRSTUDIO_BUNDLE_KMAP only
+    except Exception as e:  # noqa: BLE001
+        rep(False, "Knowledge Map lookup", f"{type(e).__name__}: {e}")
+        kmap_root = None
+    if kmap_root is not None:
+        kmap_checks(rep, kmap_root, app_edition())
     return rep.close()
 
 
