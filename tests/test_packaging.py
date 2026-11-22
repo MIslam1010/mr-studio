@@ -101,15 +101,18 @@ def test_data_covers_what_the_app_loads():
     dests = {os.path.join(d, os.path.basename(s)) for s, d in cfg.all_package_data()}
     rel = os.path.relpath(U.IIWA7_URDF, str(ROOT))
     assert rel in dests
-    rtb_root = cfg.package_dir("rtbdata")
+    # realpath on both sides: the .venv may be a symlink (e.g. to a shared venv), and
+    # roboticstoolbox reports resolved mesh paths while find_spec keeps the link path.
+    rtb_root = os.path.realpath(cfg.package_dir("rtbdata"))
     for label, path in U.example_urdfs().items():
+        path = os.path.realpath(path)
         if path.startswith(rtb_root):
             assert os.path.join("rtbdata", os.path.relpath(path, rtb_root)) in dests, label
     import roboticstoolbox as rtb
     for name in ("Puma560", "Panda", "Stanford", "Cobra600", "UR5"):
         meshdir = getattr(getattr(rtb.models.DH, name)(), "meshdir", None) if hasattr(rtb.models.DH, name) else None
         if meshdir is not None:
-            rel = os.path.relpath(str(meshdir), rtb_root)
+            rel = os.path.relpath(os.path.realpath(str(meshdir)), rtb_root)
             assert any(d.startswith(os.path.join("rtbdata", rel)) for d in dests), f"{name}: {rel}"
 
 
