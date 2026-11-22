@@ -383,6 +383,25 @@ def _cli_exit(fn, report: str | None) -> None:
     os._exit(code)
 
 
+def _webengine_paths() -> None:
+    """macOS app bundle with the Knowledge Map: PyInstaller leaves Qt WebEngine's helper process and its resources
+    in ``Contents/Frameworks/QtWebEngineCore.framework/Versions/A`` only, but Qt looks for them in
+    ``Frameworks/PySide6/Qt/lib/QtWebEngineCore.framework`` (no ``Helpers`` there), so the map tab never started.
+    Point Qt at the copy that exists (an explicit setting of the user is kept)."""
+    if sys.platform != "darwin" or not getattr(sys, "frozen", False):
+        return
+    base = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(sys.executable))), "Frameworks",
+                        "QtWebEngineCore.framework", "Versions", "A")
+    helper = os.path.join(base, "Helpers", "QtWebEngineProcess.app", "Contents", "MacOS", "QtWebEngineProcess")
+    res = os.path.join(base, "Resources")
+    if os.path.isfile(helper):
+        os.environ.setdefault("QTWEBENGINEPROCESS_PATH", helper)
+    if os.path.isdir(res):
+        os.environ.setdefault("QTWEBENGINE_RESOURCES_PATH", res)
+        if os.path.isdir(os.path.join(res, "qtwebengine_locales")):
+            os.environ.setdefault("QTWEBENGINE_LOCALES_PATH", os.path.join(res, "qtwebengine_locales"))
+
+
 def run(argv: list[str] | None = None) -> int:
     argv = list(sys.argv[1:] if argv is None else argv)
     argv = [a for a in argv if not a.startswith("-psn_")]   # old macOS Finder launch argument
@@ -392,6 +411,7 @@ def run(argv: list[str] | None = None) -> int:
     if argv and argv[0].lower().startswith("mrstudio:"):
         argv = argv[:1]
     _ensure_streams()
+    _webengine_paths()
     report = _pop_option(argv, "--report", has_value=True)
     report = report if isinstance(report, str) else None
     if _pop_option(argv, "--self-test"):

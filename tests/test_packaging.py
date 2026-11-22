@@ -604,3 +604,28 @@ def test_launcher_kmap_checks(tmp_path):
     rep = launcher._Report(None)
     launcher.kmap_checks(rep, root)
     assert rep.failed == 1 and any("pyodide/pyodide.js" in ln and ln.startswith("FAIL") for ln in rep.lines)
+
+
+def test_launcher_points_qt_webengine_at_the_bundled_helper(tmp_path, monkeypatch):
+    """Frozen macOS app: the helper process lives in Contents/Frameworks/QtWebEngineCore.framework/Versions/A."""
+    import launcher
+    base = tmp_path / "MR Studio.app" / "Contents"
+    a = base / "Frameworks" / "QtWebEngineCore.framework" / "Versions" / "A"
+    helper = a / "Helpers" / "QtWebEngineProcess.app" / "Contents" / "MacOS" / "QtWebEngineProcess"
+    helper.parent.mkdir(parents=True)
+    helper.write_text("x")
+    (a / "Resources" / "qtwebengine_locales").mkdir(parents=True)
+    (base / "MacOS").mkdir()
+    for v in ("QTWEBENGINEPROCESS_PATH", "QTWEBENGINE_RESOURCES_PATH", "QTWEBENGINE_LOCALES_PATH"):
+        monkeypatch.setenv(v, "x")          # recorded, so that it is removed again after the test
+        monkeypatch.delenv(v)
+    monkeypatch.setattr(sys, "platform", "darwin")
+    monkeypatch.setattr(sys, "frozen", True, raising=False)
+    monkeypatch.setattr(sys, "executable", str(base / "MacOS" / "MRStudio"))
+    launcher._webengine_paths()
+    assert os.environ["QTWEBENGINEPROCESS_PATH"] == str(helper)
+    assert os.environ["QTWEBENGINE_RESOURCES_PATH"] == str(a / "Resources")
+    assert os.environ["QTWEBENGINE_LOCALES_PATH"] == str(a / "Resources" / "qtwebengine_locales")
+    monkeypatch.setenv("QTWEBENGINEPROCESS_PATH", "/mine")      # a user's own setting stays
+    launcher._webengine_paths()
+    assert os.environ["QTWEBENGINEPROCESS_PATH"] == "/mine"
