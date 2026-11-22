@@ -412,11 +412,12 @@ def qapp():
     return app
 
 
-def test_practice_tab_headless(qapp, tmp_path):
+def test_practice_tab_headless(qapp, tmp_path, instructor):
     from mrstudio.gui.base import AppContext
     from mrstudio.gui.tabs.practice_tab import THEORY, PracticeTab
     from mrstudio.gui.theory import validate_all
-    assert validate_all([THEORY]) == []
+    from mrstudio.gui.tabs.practice_tab import theory_html
+    assert validate_all([THEORY, theory_html()]) == []
     tab = PracticeTab(AppContext())
     assert tab.uses_serial_robot is False and "Practice" in tab.title
     for i in range(tab.topic.count()):           # every topic draws (robot, frames or plot)
@@ -495,7 +496,7 @@ def test_3rs_tip_on_base_axis_is_named():
     assert hits >= 1
 
 
-def test_practice_tab_export_runs_in_worker(qapp, tmp_path):
+def test_practice_tab_export_runs_in_worker(qapp, tmp_path, instructor):
     from PySide6 import QtCore
     from mrstudio.gui.base import AppContext
     from mrstudio.gui.tabs.practice_tab import PracticeTab

@@ -59,6 +59,8 @@ Open a Terminal in the project folder: `cd "$HOME/Documents/Edu/Lectures/Robotic
 
 ## D. Connect, stop test and calibration (no commanded motion)
 
+> Editing and saving the calibration (D4) is an instructor feature of the instructor copy of MR Studio; the student build shows it read-only ("Calibration is set by the instructor"). This is a convenience, not secrecy: the calibration file format is open source.
+
 | ☐ | Do | You should see | Stop if |
 |---|---|---|---|
 | ☐ D1 | Start MR Studio (`.venv/bin/python run_app.py`), open the **Hardware** tab, choose **myCobot 280 (USB serial)**, pick the port, baud **115200**, and click **Connect**. Connect switches the servos on. | "connected: myCobot (serial) on /dev/cu.… at 115200 baud" and a warning that there is **no calibration file**. The servos stiffen and hold the pose (a click or a hum is normal). The health line reads "last fresh … ms ago · 0 failed reads" | the arm moves more than a degree or two. Connect fails twice: check the baud rate. Connect fails with "did not acknowledge" or "fresh mode": the firmware does not answer the way pymycobot 4.0.7 expects (Connect also switches on the firmware's *fresh mode*, so it never queues set-points). Note the message and the firmware version, and do not continue |

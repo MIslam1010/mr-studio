@@ -121,3 +121,15 @@ def pytest_unconfigure(config):
     sys.stdout.flush()
     sys.stderr.flush()
     os._exit(_STATUS["code"])
+
+
+@pytest.fixture
+def instructor(monkeypatch):
+    """Pretend to be the private instructor copy: inject a fake ``mrstudio.edition`` module (that module exists
+    only in the instructor copy; the public repository never has it)."""
+    import types
+    mod = types.ModuleType("mrstudio.edition")
+    mod.EDITION = "instructor"
+    mod.APP_NAME = "MR Studio Instructor"
+    monkeypatch.setitem(sys.modules, "mrstudio.edition", mod)
+    return mod

@@ -15,6 +15,7 @@ import pyqtgraph as pg
 from PySide6 import QtCore, QtWidgets
 
 from ... import problems as P
+from ...edition_info import is_instructor
 from ...references import further_reading
 from .. import theme
 from ..base import BaseTab
@@ -74,6 +75,8 @@ odometry (Sec. 13.4) with the pseudoinverse $F = H^{\dagger}(0)$:</p>
 $$h_i(0) = \frac{1}{r_i\cos\gamma_i}\left(x_i\sin(\beta_i+\gamma_i) - y_i\cos(\beta_i+\gamma_i),\ \cos(\beta_i+\gamma_i),\ \sin(\beta_i+\gamma_i)\right)$$
 <p>Settling-time answers give both MR's rule of thumb $t_s\approx 4/(\zeta\omega_n)$ (from the envelope
 $e^{-\zeta\omega_n t}$) and the exact 2 % settling time; gain-design problems meet the exact value.</p>
+"""
+THEORY_EXPORT = r"""
 <h3>Quizzes</h3>
 <p><b>Export</b> writes N problems from the starting seed.  With <i>Mixed</i> topics question k is always on the
 same topic, so versions A, B, … of a quiz have the same structure and different numbers.  The Word file
@@ -87,6 +90,15 @@ THEORY += further_reading([
     ('featherstone', '§5.3, pp. 92–97, Table 5.1 p. 96', 'recursive Newton–Euler algorithm'),
     ('astrom_murray', '§6.3, pp. 183–184', 'second-order systems: damping ratio, natural frequency'),
 ])
+
+def theory_html() -> str:
+    """The theory panel text; the quiz-export section is only for the instructor copy (that feature is hidden
+    in the student build)."""
+    if not is_instructor():
+        return THEORY
+    head, sep, tail = THEORY.partition("<h3>Further reading")
+    return THEORY + THEORY_EXPORT if not sep else head + THEORY_EXPORT + sep + tail
+
 
 PLACEHOLDER = ("<h2>Worked solution</h2><p style='color:gray'>Try the problem first, then press "
                "<b>Reveal solution</b>.</p>")
@@ -163,8 +175,12 @@ class PracticeTab(BaseTab):
         cl.addWidget(group("Solution", self.reveal_btn, self.verify_lbl))
         note = value_label("Uses the topic, difficulty and start seed above.")
         note.setObjectName("muted")
-        cl.addWidget(group("Export problem set", note, ef, self.exp_md_btn, self.exp_key_cb, self.exp_doc_btn,
-                           self.exp_lbl))
+        # Problem-set export is an instructor feature (instructor copy only); the student build omits the group.
+        self.export_group = None
+        if is_instructor():
+            self.export_group = group("Export problem set", note, ef, self.exp_md_btn, self.exp_key_cb,
+                                      self.exp_doc_btn, self.exp_lbl)
+            cl.addWidget(self.export_group)
         cl.addStretch(1)
 
         # Problems | Lessons | Assignment (the two panels are built when first opened: lessons take ~0.5 s)
@@ -173,7 +189,7 @@ class PracticeTab(BaseTab):
         self.side.addTab(controls, SUBTABS[0])
         for name in SUBTABS[1:]:
             self.side.addTab(QtWidgets.QWidget(), name)
-        self.side.setTabToolTip(0, "Randomised problems with worked solutions; quiz export")
+        self.side.setTabToolTip(0, "Randomised problems with worked solutions")
         self.side.setTabToolTip(1, "Guided step-by-step lessons (SBEG 361 / 461) with answer checks")
         self.side.setTabToolTip(2, "Your assignment from the instructor's code: per-student problems, "
                                    "answers saved as a submission file")
@@ -195,7 +211,7 @@ class PracticeTab(BaseTab):
         center.setStretchFactor(1, 2)
         self.solution = TheoryPanel()
         self.solution.set_content(PLACEHOLDER)
-        self.assemble(self.side, center, self.solution, THEORY, bottom_ratio=(3, 2))
+        self.assemble(self.side, center, self.solution, theory_html(), bottom_ratio=(3, 2))
 
         self.topic.currentIndexChanged.connect(lambda _i: self.generate())
         self.diff.currentIndexChanged.connect(lambda _i: self.generate())

@@ -6,6 +6,8 @@ submissions, and (optionally) grading in the private course repository with GitH
 
 ## Be clear about what this does and does not protect
 
+- **Instructor features.** Problem-set export and myCobot calibration editing are instructor features: they appear only in the instructor copy of MR Studio. The student build hides them to keep students on the course path. This is a convenience, not secrecy: the generators and the calibration file format are open source.
+
 - **The answers are not secret.** MR Studio is open source, so the problem generators are public. A
   student who knows Python can recompute the answer to any problem, and the Practice tab's *Problems* page shows
   worked solutions for any seed. Do not use this for exams where that matters.

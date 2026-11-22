@@ -158,6 +158,7 @@ $T(\theta) = e^{[\mathcal{S}_1]\theta_1}\cdots e^{[\mathcal{S}_n]\theta_n}M$ in 
 * **⑭ Hardware** — use the built-in simulation, not a real arm, in front of an audience.
   > "This streams a joint trajectory at 50 Hz, logs commanded against measured joints, and refuses to run
   > until the safety checklist and calibration are done."
+  (Calibration editing is an instructor feature: the student build shows it read-only. Convenience, not secrecy: the code is open source.)
 * **⑮ Practice** — open **Problems** for a randomised exercise with its worked solution, **Lessons** for a
   guided step-by-step walk-through with answer checks, and **Assignment** to show how an instructor gives each
   student their own numbers and collects a submission file.

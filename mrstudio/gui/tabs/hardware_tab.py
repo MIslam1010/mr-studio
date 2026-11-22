@@ -31,6 +31,7 @@ from ...hardware.mycobot import (BAUD_RATES, DEFAULT_STREAM_SPEED_PCT, MyCobotCa
                                  default_calibration_path, list_serial_ports, sdk_available)
 from ...hardware.safety import SESSION_LABELS, SESSIONS, SafetySupervisor, retime_to_speed
 from ...hardware.session import HardwareRun, LatestValue, concat, quintic_move, with_approach
+from ...edition_info import is_instructor
 from ...references import further_reading
 from .. import theme
 from ..base import BaseTab
@@ -111,6 +112,9 @@ def _emergency_stop(driver):
         driver.disconnect()
     except Exception:
         pass
+
+
+CALIB_LOCKED_MSG = "Calibration is set by the instructor."
 
 
 class _StreamWorker(QtCore.QThread):
@@ -273,6 +277,12 @@ class HardwareTab(BaseTab):
         self.calib_save_btn = button("Save calibration", lambda: self.save_calibration())
         self.calib_lbl = value_label()
         self.calib_lbl.setTextInteractionFlags(QtCore.Qt.TextSelectableByMouse)
+        if not is_instructor():
+            # Student edition: the calibration is commissioned by the instructor; students see it, not edit it.
+            for w in (*self.sign_boxes, *self.offset_spins, self.stream_pct):
+                w.setEnabled(False)
+                w.setToolTip(CALIB_LOCKED_MSG)
+            self.calib_save_btn.setVisible(False)
         theme.notifier().projector_changed.connect(self._retone)
 
         controls = QtWidgets.QWidget()
@@ -570,11 +580,19 @@ class HardwareTab(BaseTab):
             self._tone(self.calib_lbl, "bad")
         else:
             self.calib_lbl.setText(f"No calibration file yet ({self.calib_path}). Run on the myCobot is blocked "
-                                   "until the signs and offsets are commissioned and saved.")
+                                   "until the signs and offsets are commissioned and saved."
+                                   + ("" if is_instructor() else " " + CALIB_LOCKED_MSG))
             self._tone(self.calib_lbl, "warn")
 
     def save_calibration(self, path: str | None = None) -> bool:
-        """Write the calibration of the UI to the JSON file and apply it to a connected myCobot."""
+        """Write the calibration of the UI to the JSON file and apply it to a connected myCobot.
+
+        Student edition: refused (the calibration is set by the instructor; an existing file is still loaded)."""
+        if not is_instructor():
+            self.calib_lbl.setText(CALIB_LOCKED_MSG)
+            self._tone(self.calib_lbl, "warn")
+            self._event("calibration", CALIB_LOCKED_MSG)
+            return False
         if self.run is not None and not self.run.finished:
             return False
         if path is not None:

@@ -907,7 +907,7 @@ def _drive(tab, clock, dt=0.02, limit=2000):
         tab._tick()
 
 
-def test_tab_blocks_run_without_calibration(qapp, monkeypatch, tmp_path):
+def test_tab_blocks_run_without_calibration(qapp, monkeypatch, tmp_path, instructor):
     tab, clock = _mycobot_tab(monkeypatch, tmp_path, calibrated=False)
     assert not tab.run_btn.isEnabled()
     assert not tab.start_run() and "calibration" in tab.status_lbl.text()

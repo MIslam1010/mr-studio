@@ -126,7 +126,7 @@ generated automatically, and a robot you build is then validated by the ⑯ Vali
 | **⑫ Grasping** | Planar grasps with point contacts: roll / slide / break labels for a test twist and the feasible centres of rotation, the form-closure LP, friction cones and the force-closure test, the minimum friction coefficient, a grasp metric and quasistatic balance. Presets from the book's examples (two fingers in a hole, square, triangle, block on two fingers). | Ch. 12 |
 | **⑬ Mobile robots** | Wheeled chassis seen from above: three omniwheels, four mecanum wheels, unicycle, diff-drive and car. Wheel speeds $u = H(\phi)\dot q$, closed-loop trajectory tracking and stabilisation with the book's control laws, and odometry with an optional wheel-radius error. | Ch. 13 |
 | **⑭ Hardware** | Hardware bridge for the course arm (or its simulation): streams a joint trajectory at 50 Hz, logs commanded vs measured joints in the SBEG 361 / 461 CSV formats, enforces the safety checklist and computes the hardware acceptance tests HW-2 … HW-6. See *Hardware bridge* below. | — |
-| **⑮ Practice** | Randomised exercises with worked solutions and quiz export (left column: **Problems**), guided step-by-step **Lessons** with answer checks, and per-student **Assignment** problems saved as a submission file. Problems: 15 topics, including Ch. 5 statics τ = JᵀF with manipulability / force ellipses, Ch. 8 rigid-body inertia, forward dynamics with an Euler step, the task-space mass matrix (felt mass, reflected rotor inertia) and constrained dynamics with a Lagrange multiplier, Ch. 11 impedance and PI force control, Ch. 12 form / force closure with the minimum friction coefficient, and Ch. 13 diff-drive, omniwheel and mecanum kinematics. | Ch. 3–13 |
+| **⑮ Practice** | Randomised exercises with worked solutions (left column: **Problems**; the quiz / problem-set export is an instructor feature, see *Instructor features* below), guided step-by-step **Lessons** with answer checks, and per-student **Assignment** problems saved as a submission file. Problems: 15 topics, including Ch. 5 statics τ = JᵀF with manipulability / force ellipses, Ch. 8 rigid-body inertia, forward dynamics with an Euler step, the task-space mass matrix (felt mass, reflected rotor inertia) and constrained dynamics with a Lagrange multiplier, Ch. 11 impedance and PI force control, Ch. 12 form / force closure with the minimum friction coefficient, and Ch. 13 diff-drive, omniwheel and mecanum kinematics. | Ch. 3–13 |
 | **⑯ Validation** | One-click cross-validation of everything above (500+ checks), with a colour-coded table, a details pane per check, a theory panel and an HTML report export. | Ch. 4–9, 11 |
 
 **Also in the app (beyond the tab table):**
@@ -149,7 +149,7 @@ The tab drives the course arm (myCobot-280 class) over a serial port, or a built
 
 * Put the arm in **Transponder mode** (the arm's controller then forwards the serial commands to the servos).
 * Choose the port: on a Mac it is `/dev/cu.usbserial-*`; on Windows a `COM` port. The baud rate is **115200** (default) or **1000000**, whichever the arm's firmware uses.
-* **Calibration is required before Run.** Until the servo zero offsets are calibrated, the PoE zero pose does not match the servos' zero (the tab shows a warning), so calibrate first.
+* **Calibration is required before Run.** In the student edition it is read-only (an existing file is loaded and applied; editing and saving it is an instructor feature, "Calibration is set by the instructor"). Until the servo zero offsets are calibrated, the PoE zero pose does not match the servos' zero (the tab shows a warning), so calibrate first.
 * **First-run protocol:** low speed first; move one joint only, by at most **±10°**; keep **a person at the power switch**; do a **cable-pull test** (unplug the USB cable while moving: the arm must stop safely); release the torque **last**, with the arm supported by hand or on its rest.
 * The installed app bundles pyserial but cannot install the myCobot SDK later; build the app with `pymycobot` installed if you need that back-end.
 * **Before the first real-arm session:** install the pinned SDK with `.venv/bin/python -m pip install -r requirements-hardware.txt`, run `.venv/bin/python tools/mycobot_dryrun.py` (no motion), rehearse with the firmware emulator `tools/mycobot_emulator.py`, and follow the printable protocol [docs/MYCOBOT-FIRST-SESSION.md](docs/MYCOBOT-FIRST-SESSION.md).
@@ -283,3 +283,7 @@ tests/
 ```
 
 See `DEMO_GUIDE.md` for a 10-minute demonstration script, and `DEVELOPER.md` for coding conventions.
+
+## Instructor features
+
+Problem-set export and myCobot calibration editing are instructor features: they appear only in the instructor copy of MR Studio. The student build hides them to keep students on the course path. This is a convenience, not secrecy: the generators and the calibration file format are open source.
