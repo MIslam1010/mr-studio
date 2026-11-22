@@ -133,7 +133,9 @@ generated automatically, and a robot you build is then validated by the ⑯ Vali
 
 * **Knowledge Map links.** Every theory panel ends with a *Knowledge Map* heading that links to the matching
   nodes of the companion Robotics Knowledge Map (`mrstudio://` links open the right tab from the map, and the
-  footer opens the map in your browser). See [docs/KMAP-LINKING.md](docs/KMAP-LINKING.md).
+  footer opens the map in your browser). With a local copy of the map (`MRSTUDIO_KMAP_DIR`, or an installer built
+  with it) MR Studio shows the map itself in an extra last tab, *⑰ Knowledge Map*, and the footer links open there.
+  See [docs/KMAP-LINKING.md](docs/KMAP-LINKING.md).
 * **Lessons (tab ⑮).** Guided, step-by-step lessons with an answer check at each step, next to the randomised Problems.
 * **Assignments (tab ⑮).** An instructor makes per-student problem sets from an assignment code; students solve
   them in the app and save a submission file, which the instructor grades in bulk. See

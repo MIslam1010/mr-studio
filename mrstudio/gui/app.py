@@ -497,6 +497,24 @@ class UrlOpenFilter(QtCore.QObject):
         return super().eventFilter(obj, ev)
 
 
+class MRStudioApplication(QtWidgets.QApplication):
+    """The QApplication used when the Knowledge Map tab (Qt WebEngine) is active.
+
+    macOS sends ``mrstudio://`` links to the application object as ``QFileOpenEvent``. Normally an event filter on
+    the application catches them, but a Python event filter on the *application* sees every event of every
+    object, and with Qt WebEngine running that crashed PySide6 (segmentation fault while the map page loads).
+    Here only the application's own events reach Python (``event``)."""
+
+    def __init__(self, argv):
+        super().__init__(argv)
+        self.url_filter: UrlOpenFilter | None = None
+
+    def event(self, ev):
+        if self.url_filter is not None and ev.type() == _FILE_OPEN and self.url_filter.eventFilter(self, ev):
+            return True
+        return super().event(ev)
+
+
 class _ModelWarmer(QtCore.QObject):
     done = QtCore.Signal(object)  # list of robot names that failed to load
 
@@ -530,6 +548,12 @@ class MainWindow(QtWidgets.QMainWindow):
         self.tabs.setElideMode(QtCore.Qt.ElideNone)
         self.tabs.setUsesScrollButtons(True)
         self.pages = []
+        # the optional Knowledge Map tab (gui/kmap_view.py): decided before the tabs are built, because their
+        # theory-panel footers link either to it or to the map in the browser
+        from . import kmap_view
+        from .. import kmap_links
+        kmap_root = kmap_view.prepared_root()
+        kmap_links.set_embedded(kmap_root is not None)
         for mod, cls in TABS:
             res = load_tab(mod, cls, ctx)
             if res is None:
@@ -542,6 +566,9 @@ class MainWindow(QtWidgets.QMainWindow):
                 key = QtGui.QKeySequence(f"Ctrl+{i + 1}").toString(QtGui.QKeySequence.NativeText)
                 tip = f"{tip}  ({key})"
             self.tabs.setTabToolTip(i, tip)
+        self.kmap_tab = self._kmap_sink = None
+        if kmap_root is not None:
+            self._add_kmap_tab(kmap_root)
         self._current = None
         self.tabs.currentChanged.connect(self._tab_changed)
         self._make_tab_shortcuts()
@@ -692,6 +719,26 @@ class MainWindow(QtWidgets.QMainWindow):
             if not ok:
                 self.statusBar().showMessage(f"Preset {preset!r} not found on this tab", 10000)
         return True
+
+    def _add_kmap_tab(self, root):
+        """Last tab: the embedded Knowledge Map (kept out of TABS / TAB_ORDER, so tab indexes stay as they are).
+        Map links clicked anywhere in the app (``kmap://…``) come to ``open_map_url``."""
+        from . import kmap_view
+        page = kmap_view.KmapTab(root, self.open_url, on_log=log_text)
+        self.pages.append(page)
+        i = self.tabs.addTab(page, page.title)
+        self.tabs.setTabToolTip(i, kmap_view.TAB_LONG_NAME)
+        self.kmap_tab = page
+        self._kmap_sink = kmap_view.UrlSink(self.open_map_url, self)
+        QtGui.QDesktopServices.setUrlHandler(kmap_view.SCHEME, self._kmap_sink, "handle")
+
+    def open_map_url(self, url) -> bool:
+        """Show a map link (``kmap://map/index.html#map/<node>/learn``) in the Knowledge Map tab."""
+        if self.kmap_tab is None:
+            return False
+        self.tabs.setCurrentWidget(self.kmap_tab)
+        frag = QtCore.QUrl(url).fragment(QtCore.QUrl.ComponentFormattingOption.FullyEncoded)
+        return self.kmap_tab.show_hash(frag)
 
     def open_url(self, url: str) -> bool:
         """Handle ``mrstudio://open?tab=…&robot=…&preset=…`` (Knowledge Map links); False if it is not valid."""
@@ -926,7 +973,7 @@ class MainWindow(QtWidgets.QMainWindow):
         if uses_engine is None:
             uses_engine = type(page).__name__ in ENGINE_TABS
         self.robot_box.setEnabled(uses_robot)
-        self.robot_box.setToolTip("" if uses_robot else OWN_MECHANISM_TIP)
+        self.robot_box.setToolTip("" if uses_robot else getattr(page, "robot_box_tip", OWN_MECHANISM_TIP))
         self.engine_box.setEnabled(bool(uses_engine))
         self.engine_box.setToolTip(ENGINE_TIP if uses_engine else
                                    (OWN_MECHANISM_TIP if not uses_robot else
@@ -1238,6 +1285,10 @@ class MainWindow(QtWidgets.QMainWindow):
                 fn()
             except Exception:
                 traceback.print_exc()
+        if self._kmap_sink is not None:
+            from . import kmap_view
+            QtGui.QDesktopServices.unsetUrlHandler(kmap_view.SCHEME)
+            self._kmap_sink = None
 
     def closeEvent(self, e):
         if self.recorder.recording or self.recorder.busy():
@@ -1257,6 +1308,25 @@ class MainWindow(QtWidgets.QMainWindow):
         if self.persist:
             self.save_settings()
         super().closeEvent(e)
+
+
+def prepare_kmap() -> bool:
+    """If a Knowledge Map is bundled or named by MRSTUDIO_KMAP_DIR, get Qt WebEngine ready for the Knowledge Map tab
+    (``gui/kmap_view.prepare``; must run before the QApplication exists). False: no tab, everything as before."""
+    try:
+        from ..kmap_links import embedded_content_dir
+        root = embedded_content_dir()
+        if root is None:
+            return False
+        from . import kmap_view
+        if kmap_view.prepare(root):
+            return True
+        log_text(f"Knowledge Map in {root} not embedded: {kmap_view.last_error()}")
+        print(f"Knowledge Map not embedded: {kmap_view.last_error()}", file=sys.stderr)
+    except Exception:
+        log_text(f"Knowledge Map tab disabled:\n{traceback.format_exc()}")
+        traceback.print_exc()
+    return False
 
 
 def main(argv=None):
@@ -1304,13 +1374,17 @@ def main(argv=None):
     software_gl = software_gl_requested(args.software_gl)
     if software_gl:
         use_software_gl()
+    kmap = prepare_kmap()         # before the QApplication: Qt WebEngine, only if a Knowledge Map is found
     QtWidgets.QApplication.setAttribute(QtCore.Qt.AA_ShareOpenGLContexts)
-    app = QtWidgets.QApplication.instance() or QtWidgets.QApplication(sys.argv[:1])
+    app = QtWidgets.QApplication.instance() or (MRStudioApplication if kmap else QtWidgets.QApplication)(sys.argv[:1])
     app.setApplicationName("MR Studio")
     app.setOrganizationName("MRStudio")
     url_filter = UrlOpenFilter(app)          # macOS: links clicked while (or before) the app runs
     if sys.platform == "darwin":             # QFileOpenEvent is macOS-only; elsewhere links arrive as --open
-        app.installEventFilter(url_filter)
+        if isinstance(app, MRStudioApplication):
+            app.url_filter = url_filter      # no application-wide Python event filter next to Qt WebEngine
+        else:
+            app.installEventFilter(url_filter)
     s = app_settings()
     if args.projector:
         projector = True

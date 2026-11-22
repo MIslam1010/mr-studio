@@ -135,6 +135,77 @@ SELF_TEST_IMPORTS = [
 ]
 
 
+# ----------------------------------------------------------------------------- optional: the Knowledge Map
+# Set MRSTUDIO_BUNDLE_KMAP=<built map folder> (e.g. the map app's content/student) to put the Robotics Knowledge Map
+# into the installer as the "Knowledge Map" tab (mrstudio/gui/kmap_view.py). Local builds only: the public repository
+# and its CI never contain or bundle map content. Unset (the default) the build is exactly the standard one.
+KMAP_BUNDLE_ENV = "MRSTUDIO_BUNDLE_KMAP"
+KMAP_EDITION_ENV = "MRSTUDIO_KMAP_EDITION"   # edition the map must be (default student; checked in build-info.json)
+KMAP_DEST = "kmap"                           # folder inside the bundle (kmap_links.BUNDLED_KMAP)
+# Qt WebEngine and what it needs; in EXCLUDES for the standard build, bundled with the map
+WEBENGINE_MODULES = [
+    "PySide6.QtWebEngineCore", "PySide6.QtWebEngineWidgets", "PySide6.QtWebChannel", "PySide6.QtQuick",
+    "PySide6.QtQml", "PySide6.QtQuickWidgets", "PySide6.QtPositioning",
+]
+KMAP_SELF_TEST_IMPORTS = ["PySide6.QtWebEngineCore", "PySide6.QtWebEngineWidgets", "PySide6.QtQuick"]
+KMAP_SKIP_FILES = {".DS_Store", "Thumbs.db", "desktop.ini"}
+
+
+def kmap_bundle(environ=None) -> dict | None:
+    """The map to bundle: None when MRSTUDIO_BUNDLE_KMAP is unset or empty (standard build), else
+    ``{"dir": <absolute folder>, "edition": <edition>}``. Refuses (SystemExit, the build stops) a folder without
+    index.html, with any x_*.js, an "instructor" folder, or a build-info.json whose edition is not
+    MRSTUDIO_KMAP_EDITION (default student)."""
+    import os
+    import sys
+    env = os.environ if environ is None else environ
+    raw = (env.get(KMAP_BUNDLE_ENV) or "").strip()
+    if not raw:
+        return None
+    edition = (env.get(KMAP_EDITION_ENV) or "").strip() or "student"
+    root = os.path.abspath(os.path.expanduser(raw))
+    if not os.path.isdir(root):
+        raise SystemExit(f"{KMAP_BUNDLE_ENV}={raw!r}: no such folder")
+    repo = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+    if repo not in sys.path:
+        sys.path.insert(0, repo)
+    from mrstudio.kmap_links import content_problems
+    problems = content_problems(root, edition, require_build_info=True)
+    real = os.path.realpath(root)
+    if real == repo or real.startswith(repo + os.sep):
+        problems.append(f"{root} is inside the MR Studio repository (map content must never be committed)")
+    if problems:
+        raise SystemExit(f"{KMAP_BUNDLE_ENV}={raw!r}: refusing to bundle this Knowledge Map ({edition} build):\n  - "
+                         + "\n  - ".join(problems))
+    return {"dir": root, "edition": edition}
+
+
+def excludes_for(kmap: dict | None) -> list[str]:
+    """EXCLUDES, without the Qt WebEngine modules when the map is bundled."""
+    return list(EXCLUDES) if not kmap else [m for m in EXCLUDES if m not in WEBENGINE_MODULES]
+
+
+def kmap_hidden_imports(kmap: dict | None) -> list[str]:
+    return list(WEBENGINE_MODULES) if kmap else []
+
+
+def kmap_datas(kmap: dict | None) -> list[tuple[str, str]]:
+    """PyInstaller ``datas`` for every file of the map folder, under ``kmap/`` in the bundle ([] without a map)."""
+    import os
+    if not kmap:
+        return []
+    root = kmap["dir"]
+    out = []
+    for dirpath, dirnames, filenames in os.walk(root):
+        dirnames.sort()
+        rel = os.path.relpath(dirpath, root)
+        dest = KMAP_DEST if rel == "." else os.path.join(KMAP_DEST, rel)
+        for f in sorted(filenames):
+            if f not in KMAP_SKIP_FILES:
+                out.append((os.path.join(dirpath, f), dest))
+    return out
+
+
 # ----------------------------------------------------------------------------- helpers (used by the spec + tests)
 def package_dir(pkg: str) -> str:
     """Directory of an installed package, located WITHOUT importing it."""

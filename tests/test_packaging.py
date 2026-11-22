@@ -125,14 +125,23 @@ def test_excludes_do_not_hit_modules_the_app_imports():
 
     for mod in cfg.HIDDEN_IMPORTS + cfg.SELF_TEST_IMPORTS:
         assert not hit(mod), mod
+    # the optional Knowledge Map tab imports Qt WebEngine -- only lazily (inside functions, failures caught), only in
+    # gui/kmap_view.py, and only modules that an MRSTUDIO_BUNDLE_KMAP build takes out of EXCLUDES
+    lazy_ok = {ROOT / "mrstudio" / "gui" / "kmap_view.py"}
+    webengine = set(cfg.WEBENGINE_MODULES)
     for py in (ROOT / "mrstudio").rglob("*.py"):
-        for node in ast.walk(ast.parse(py.read_text(encoding="utf-8"))):
+        tree = ast.parse(py.read_text(encoding="utf-8"))
+        top = {id(n) for n in tree.body}
+        for node in ast.walk(tree):
             names = []
             if isinstance(node, ast.Import):
                 names = [a.name for a in node.names]
             elif isinstance(node, ast.ImportFrom) and node.module and node.level == 0:
                 names = [node.module] + [f"{node.module}.{a.name}" for a in node.names]
             for n in names:
+                if py in lazy_ok and id(node) not in top and any(
+                        n == m or n.startswith(m + ".") for m in webengine):
+                    continue
                 assert not hit(n), f"{py.relative_to(ROOT)} imports excluded module {n}"
 
 
@@ -451,3 +460,147 @@ def test_third_party_notice_versions_match_lock():
     assert set(table) == set(rows), f"notice rows missing: {set(rows) - set(table)}"
     for row, pkg in rows.items():
         assert table[row] == lock[pkg], f"THIRD_PARTY_NOTICES '{row}' says {table[row]}, the lock bundles {lock[pkg]}"
+
+
+# ----------------------------------------------------------------------------- optional Knowledge Map (MRSTUDIO_BUNDLE_KMAP)
+def _fake_map(root: Path, edition: str | None = "student") -> Path:
+    """A tiny stand-in for a built map folder (never the real map)."""
+    (root / "pyodide").mkdir(parents=True)
+    (root / "index.html").write_text("<!doctype html><title>Robotics Knowledge Map</title>", encoding="utf-8")
+    (root / "pyodide" / "pyodide.js").write_text("// fake\n", encoding="utf-8")
+    (root / ".DS_Store").write_bytes(b"junk")
+    if edition is not None:
+        (root / "build-info.json").write_text('{"edition": "%s"}' % edition, encoding="utf-8")
+    return root
+
+
+def _run_spec(monkeypatch, env: dict) -> dict:
+    """Execute mrstudio.spec with PyInstaller stubbed out; returns what it passed to Analysis()."""
+    import types
+    hooks = types.ModuleType("PyInstaller.utils.hooks")
+    hooks.collect_submodules = lambda pkg, on_error=None: [f"{pkg}.collected"]
+    hooks.copy_metadata = lambda dist: [(f"/meta/{dist}.dist-info", f"{dist}.dist-info")]
+    for name, mod in (("PyInstaller", types.ModuleType("PyInstaller")),
+                      ("PyInstaller.utils", types.ModuleType("PyInstaller.utils")), ("PyInstaller.utils.hooks", hooks)):
+        monkeypatch.setitem(sys.modules, name, mod)
+    for k in (cfg.KMAP_BUNDLE_ENV, cfg.KMAP_EDITION_ENV):
+        monkeypatch.delenv(k, raising=False)
+    for k, v in env.items():
+        monkeypatch.setenv(k, v)
+    got = {}
+
+    def analysis(scripts, **kw):
+        got.update(kw)
+        return types.SimpleNamespace(pure=[], scripts=[], binaries=[], datas=[])
+
+    stub = lambda *a, **k: None  # noqa: E731
+    ns = {"SPECPATH": str(PKG), "Analysis": analysis, "PYZ": stub, "EXE": stub, "COLLECT": stub, "BUNDLE": stub,
+          "__file__": str(PKG / "mrstudio.spec"), "__name__": "__main__"}
+    exec(compile((PKG / "mrstudio.spec").read_text(encoding="utf-8"), "mrstudio.spec", "exec"), ns)
+    return got
+
+
+def _standard_build_lists() -> dict:
+    """The Analysis() lists of the standard build, computed as the spec did before the Knowledge Map option."""
+    hidden = list(cfg.HIDDEN_IMPORTS) + cfg.optional_hidden_imports() + ["bundle_config"]
+    for pkg in cfg.COLLECT_ALL_SUBMODULES:
+        hidden += [f"{pkg}.collected"]
+    if sys.platform != "win32":
+        hidden.remove("OpenGL.platform.win32")
+    if sys.platform != "darwin":
+        hidden.remove("OpenGL.platform.darwin")
+    datas = cfg.all_package_data() + [(os.path.join(str(ROOT), f), ".") for f in cfg.EXTRA_FILES]
+    for dist in cfg.METADATA_DISTS:
+        datas += [(f"/meta/{dist}.dist-info", f"{dist}.dist-info")]
+    return {"hiddenimports": hidden, "datas": datas, "excludes": list(cfg.EXCLUDES)}
+
+
+def test_kmap_option_is_off_by_default():
+    assert cfg.kmap_bundle({}) is None and cfg.kmap_bundle({cfg.KMAP_BUNDLE_ENV: "  "}) is None
+    assert cfg.excludes_for(None) == cfg.EXCLUDES
+    assert cfg.kmap_hidden_imports(None) == [] and cfg.kmap_datas(None) == []
+    # the standard installer never ships Qt WebEngine
+    assert set(cfg.WEBENGINE_MODULES) <= set(cfg.EXCLUDES)
+    assert not any(m.startswith("PySide6.QtWebEngine") for m in cfg.HIDDEN_IMPORTS + cfg.SELF_TEST_IMPORTS)
+
+
+@pytest.mark.skipif(sys.platform == "win32", reason="the spec needs the conda DLL folders on Windows")
+def test_spec_standard_build_is_unchanged(monkeypatch):
+    got = _run_spec(monkeypatch, {})
+    want = _standard_build_lists()
+    for key in ("hiddenimports", "datas", "excludes"):
+        assert got[key] == want[key], key
+    assert not any(d.startswith("kmap") for _s, d in got["datas"])
+
+
+@pytest.mark.skipif(sys.platform == "win32", reason="the spec needs the conda DLL folders on Windows")
+def test_spec_bundles_kmap_when_asked(monkeypatch, tmp_path):
+    root = _fake_map(tmp_path / "content" / "student")
+    got = _run_spec(monkeypatch, {cfg.KMAP_BUNDLE_ENV: str(root)})
+    want = _standard_build_lists()
+    assert got["excludes"] == [m for m in want["excludes"] if m not in cfg.WEBENGINE_MODULES]
+    assert sorted(got["hiddenimports"]) == sorted(want["hiddenimports"] + cfg.WEBENGINE_MODULES)
+    extra = got["datas"][len(want["datas"]):]
+    assert got["datas"][:len(want["datas"])] == want["datas"]
+    assert sorted(extra) == sorted([(str(root / "build-info.json"), "kmap"), (str(root / "index.html"), "kmap"),
+                                    (str(root / "pyodide" / "pyodide.js"), os.path.join("kmap", "pyodide"))])
+    for m in cfg.WEBENGINE_MODULES:
+        assert _exists(m), m
+
+
+@pytest.mark.parametrize("plant", ["x_js", "instructor_dir", "edition", "no_build_info", "edition_env", "missing"])
+def test_kmap_bundle_refuses_leaky_content(tmp_path, plant):
+    root = _fake_map(tmp_path / "m", edition=None if plant == "no_build_info" else
+                     ("instructor" if plant == "edition" else "student"))
+    env = {cfg.KMAP_BUNDLE_ENV: str(root)}
+    if plant == "x_js":
+        (root / "data").mkdir()
+        (root / "data" / "x_test.js").write_text("// planted\n", encoding="utf-8")
+    elif plant == "instructor_dir":
+        (root / "instructor").mkdir()
+    elif plant == "edition_env":
+        env[cfg.KMAP_EDITION_ENV] = "instructor"
+    elif plant == "missing":
+        env[cfg.KMAP_BUNDLE_ENV] = str(tmp_path / "nowhere")
+    with pytest.raises(SystemExit) as e:
+        cfg.kmap_bundle(env)
+    assert "MRSTUDIO_BUNDLE_KMAP" in str(e.value)
+
+
+def test_kmap_bundle_accepts_clean_student_map(tmp_path):
+    root = _fake_map(tmp_path / "m")
+    got = cfg.kmap_bundle({cfg.KMAP_BUNDLE_ENV: str(root)})
+    assert got == {"dir": str(root), "edition": "student"}
+    assert ".DS_Store" not in {os.path.basename(s) for s, _ in cfg.kmap_datas(got)}
+
+
+def test_kmap_bundle_refuses_a_folder_inside_the_repo():
+    with pytest.raises(SystemExit):
+        cfg.kmap_bundle({cfg.KMAP_BUNDLE_ENV: str(ROOT / "mrstudio" / "data" / "kmap")})
+
+
+@pytest.mark.skipif(sys.platform == "win32", reason="the spec needs the conda DLL folders on Windows")
+def test_spec_refuses_a_planted_x_js(monkeypatch, tmp_path):
+    root = _fake_map(tmp_path / "m")
+    (root / "x_test.js").write_text("// planted\n", encoding="utf-8")
+    with pytest.raises(SystemExit, match="x_test.js"):
+        _run_spec(monkeypatch, {cfg.KMAP_BUNDLE_ENV: str(root)})
+
+
+def test_launcher_kmap_checks(tmp_path):
+    import launcher
+    root = _fake_map(tmp_path / "m")
+    rep = launcher._Report(None)
+    launcher.kmap_checks(rep, root)
+    text = "\n".join(rep.lines)
+    assert rep.failed == 0, text
+    assert "serves index.html and pyodide/pyodide.js" in text and "no instructor content" in text
+    (root / "x_test.js").write_text("// planted\n", encoding="utf-8")
+    rep = launcher._Report(None)
+    launcher.kmap_checks(rep, root)
+    assert rep.failed == 1 and any("x_test.js" in ln for ln in rep.lines)
+    (root / "x_test.js").unlink()
+    (root / "pyodide" / "pyodide.js").unlink()
+    rep = launcher._Report(None)
+    launcher.kmap_checks(rep, root)
+    assert rep.failed == 1 and any("pyodide/pyodide.js" in ln and ln.startswith("FAIL") for ln in rep.lines)

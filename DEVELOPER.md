@@ -19,6 +19,12 @@ via `_act(..., shortcut=...)` and the tooltip and list update themselves. `--scr
 file (`use_ephemeral_settings`), and tests/conftest.py points `MRSTUDIO_SETTINGS` at a temp file, so neither reads
 nor changes the user's saved state. The tab titles carry circled numbers (1-16),
 so tab N has title number N+1. `mrstudio.kmap_links.TAB_ORDER` must list the same classes in the same order (test).
+Optional 17th tab "⑰ Knowledge Map" (`gui/kmap_view.py`, Qt WebEngine): only when a built map is bundled or named by
+`MRSTUDIO_KMAP_DIR` and Qt WebEngine loads; it is appended after the TABS and is not in TABS / TAB_ORDER. Qt WebEngine
+must be set up before the QApplication (`app.prepare_kmap`), so tests that need it run in a subprocess
+(`tests/test_kmap_view.py`); `MRSTUDIO_KMAP_EMBED=0` turns the tab off. Installers with the map: `MRSTUDIO_BUNDLE_KMAP`
+(local builds only, packaging/README.md); the public repository and CI never contain or bundle map content.
+Details: docs/KMAP-LINKING.md, section 1a.
 Launch links: `run_app.py --open "mrstudio://open?tab=<class or index>&robot=<name>&preset=<key>"` (or the URL as the
 only positional argument, as Windows passes it; macOS delivers it as a QFileOpenEvent) -> `MainWindow.open_url`.
 Tests: `pip install -r requirements.txt -r requirements-dev.txt`, then `QT_QPA_PLATFORM=offscreen python -m pytest -q`.
@@ -78,6 +84,7 @@ mrstudio/
                   the theory panels' "Further reading" (printed page numbers, verified); Help -> References…
   gui/
     app.py        MainWindow; TABS list (module, class) — lists all 16 tabs; open_url / open_target (mrstudio:// links).
+    kmap_view.py  optional Knowledge Map tab (Qt WebEngine, kmap:// scheme handler, link routing); not in TABS.
     base.py       AppContext (ctx.robot, ctx.backend, ctx.engine(robot=None, backend=None) cached engines,
                   signals robot_changed / backend_changed) and BaseTab.
     viewer.py     SceneView(gl.GLViewWidget) keyed scene graph; RobotGraphic; GhostRobot

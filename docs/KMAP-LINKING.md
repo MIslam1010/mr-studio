@@ -22,12 +22,73 @@ where `<map page>` is, in this order: the environment variable `MRSTUDIO_KMAP_UR
 `$MRSTUDIO_KMAP_DIR/Robotics Knowledge Map - Student Edition/index.html`, only if `MRSTUDIO_KMAP_DIR` is set
 (there is no built-in default folder); else the published artifact https://claude.ai/artifact/Qd3y25kCzuRo4ChtS8gsW5.
 Set `MRSTUDIO_NO_KMAP_LINKS=1` to leave the footers out (e.g. for documentation screenshots).
+When the map is embedded (section 1a), `<map page>` is `kmap://map/index.html` and the links open in the
+**⑰ Knowledge Map** tab instead of the browser.
 
 Note: some browsers / `open` drop the `#fragment` of a `file://` URL handed over by the OS. If the local
 edition opens on its start page instead of the node, set `MRSTUDIO_KMAP_URL` to an `http(s)` copy of the map.
 `file://` deep links into the local edition otherwise work, but its PWA service worker does not register from
 `file://` (browsers allow service workers only on `http(s)`), so the offline cache / install prompt need an
 `http(s)` copy.
+
+## 1a. The map inside MR Studio (embedded "⑰ Knowledge Map" tab)
+
+MR Studio can show the offline map itself, as a last tab after ⑯ Validation (`mrstudio/gui/kmap_view.py`,
+Qt WebEngine). The tab is optional: it appears only when map content is found **and** Qt WebEngine loads;
+otherwise MR Studio is exactly as before (16 tabs, links open in the browser).
+
+**The public repository and its CI never contain or bundle map content.** The standard installers (GitHub Actions)
+exclude Qt WebEngine and have no map; only a local build with `MRSTUDIO_BUNDLE_KMAP` (below) puts one in.
+
+Where the map comes from (first match wins):
+
+1. **Bundled** with a frozen app: the folder `kmap/` in the bundle (`sys._MEIPASS`, next to the executable, or
+   `Contents/Resources` of the macOS app), see `MRSTUDIO_BUNDLE_KMAP` in `packaging/README.md`.
+2. **`MRSTUDIO_KMAP_DIR`** (from source, or to try another map with an installed app): either a built map folder
+   that holds `index.html` (e.g. the map app's `content/student`, which has `vendor/`, `pyodide/`, `build-info.json`),
+   or — as before — the Knowledge Map folder holding `Robotics Knowledge Map - Student Edition/index.html`.
+
+The student app (the public code: no `mrstudio/edition.py`) never embeds a folder with an `x_*.js` file, an
+`instructor` folder or a `build-info.json` whose edition is not `student` (`kmap_links.content_problems`).
+
+| Variable | Effect |
+|---|---|
+| `MRSTUDIO_KMAP_DIR` | map folder (see above); also the local map for browser links when nothing is embedded |
+| `MRSTUDIO_KMAP_EMBED=0` | no embedded tab, even with map content (links open in the browser as before) |
+| `MRSTUDIO_KMAP_URL` | browser links only: used when nothing is embedded |
+| `MRSTUDIO_TEST_KMAP_DIR` | tests only: also run the real-content WebEngine test against this map |
+
+How it works:
+
+* **Before the QApplication** (`app.prepare_kmap` → `kmap_view.prepare`): Qt WebEngine is imported (lazily; if it
+  cannot load — e.g. pip PySide6 on Linux without Chromium's libraries — there is simply no tab), the URL schemes are
+  registered and Qt Quick is switched to OpenGL (`QQuickWindow.setGraphicsApi(OpenGL)`; with the default Metal
+  the web view stays **black** next to the QOpenGLWidget 3-D views on macOS). `AA_ShareOpenGLContexts` stays on.
+* **Schemes.** `kmap` (host syntax; secure, CORS, fetch): `kmap://map/<path>` is served from the map folder —
+  GET only, host `map` only, files inside the folder only (after resolving `..`, `%2e%2e` and symbolic links),
+  with proper MIME types (`.wasm` `application/wasm`, `.js` `text/javascript`, …). `mrstudio` (path syntax) is
+  registered so that page-initiated navigations (`location.href = "mrstudio://…"`, script clicks) reach the
+  navigation policy, not only real mouse clicks; other `mrstudio:` requests are refused.
+* **Offline.** A request interceptor blocks everything that is not `kmap:`, `data:`, `blob:` or `about:` (the
+  page's CDN fallbacks included).
+* **Page globals** (injected at document creation, main frame): `window.kmapApp = {desktop: true, platform:
+  <sys.platform>, edition: <student|instructor>, embedded: true}` (frozen) and `window.KMAP_PYODIDE_BASE = 'pyodide/'`.
+* **Navigation:** `mrstudio://open?…` (the map's "Open in MR Studio") → `MainWindow.open_url` (same as a link from
+  the OS); `http(s)`/`mailto` → the system browser; `kmap:` stays in the tab; `target=_blank` / `window.open` are
+  routed the same way (no extra windows). The failed load Qt reports for a refused navigation is ignored.
+* **Links into the map** (`kmap://map/index.html#map/<node>/learn`, the theory footers) are taken by a
+  `QDesktopServices` URL handler for `kmap:` → `MainWindow.open_map_url`: switch to the tab and set
+  `location.hash` (routes `#map/<id>[/<tab>]`, `#book/<edition>/<id>`, `#<id>`).
+* **Lazy.** The web view, profile and Chromium processes start the first time the tab is shown or a map link is
+  opened.
+* **Storage** (progress, notes, settings of the map): profile `kmap` under MR Studio's data folder
+  (`~/Library/Application Support/MRStudio/MR Studio/kmap-web` on macOS, `%LOCALAPPDATA%\MRStudio\MR Studio\kmap-web`
+  on Windows), next to the settings file when `MRSTUDIO_SETTINGS` is set (tests), off the record in `--screenshot`
+  mode. At exit the page is deleted before its profile.
+* **macOS links while the map runs:** the app is then an `MRStudioApplication` that receives `QFileOpenEvent`s in
+  `event()`; the application-wide Python event filter used otherwise crashed PySide6 next to Qt WebEngine.
+* The tab is **not** in `TABS` / `TAB_ORDER`: tab indexes, `mrstudio://open?tab=<index>`, the tests and the
+  16-screenshot check of the CI build are unchanged. `--screenshot` includes it when it is there (17 PNGs).
 
 ## 2. Map → MR Studio (`mrstudio://` URL scheme)
 

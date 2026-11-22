@@ -93,7 +93,32 @@ console, so read `st.txt`. Normal options also work: `--robot`, `--tab`, `--proj
 * the bundled and example URDFs import;
 * the theory-panel equations render;
 * the ffmpeg binary for the Record button is present;
-* every tab module imports.
+* every tab module imports;
+* with a bundled Knowledge Map only: Qt WebEngine imports, `index.html` and `pyodide/pyodide.js` are served by the
+  `kmap:` scheme handler, `../` is refused, and there is no `x_*.js` or instructor content.
+
+## Optional: the Knowledge Map tab (`MRSTUDIO_BUNDLE_KMAP`, local builds only)
+
+The standard build (GitHub Actions, and every build without the variable) has **no** map and **no** Qt WebEngine.
+The public repository and its CI never contain or bundle map content. To make a local installer with the
+embedded **⑰ Knowledge Map** tab (see `docs/KMAP-LINKING.md`, section 1a):
+
+```bash
+MRSTUDIO_BUNDLE_KMAP="<built map folder, e.g. …/Robotics Knowledge Map App/content/student>" \
+  ./packaging/build_macos.sh
+```
+
+* `MRSTUDIO_KMAP_EDITION` (default `student`) is the edition the map must be. The build **stops** if the folder
+  has no `index.html`, contains any `x_*.js`, a folder called `instructor`, has no `build-info.json` or one whose
+  `edition` differs, or lies inside this repository (`bundle_config.kmap_bundle`).
+* With the variable, `bundle_config` takes Qt WebEngine and what it needs (`WEBENGINE_MODULES`: QtWebEngineCore,
+  QtWebEngineWidgets, QtWebChannel, QtQuick, QtQml, QtQuickWidgets, QtPositioning) out of `EXCLUDES`, adds them as
+  hidden imports (PyInstaller's PySide6 hooks bring `QtWebEngineProcess` and its resources) and copies the map to
+  `kmap/` in the bundle. Expect roughly +300 MB for Qt WebEngine and +200 MB for the map.
+* Without the variable the module, data and exclude lists are exactly the standard ones (`tests/test_packaging.py`
+  executes the spec both ways).
+* Check the result with `--self-test` (the Knowledge Map lines appear only when a map is bundled) and by opening the
+  last tab.
 
 ## Files
 
@@ -114,7 +139,7 @@ console, so read `st.txt`. Normal options also work: `--robot`, `--tab`, `--proj
 What gets bundled:
 * **Data files:** the KUKA iiwa URDF in `mrstudio/data`. From rtb-data (146 MB), only the 9 example URDFs and the
   PUMA 560 and Panda STL folders (about 10 MB), because `rtb.models.DH.Puma560()` and `.Panda()` fail without them.
-* **Excluded:** Qt WebEngine (about 300 MB), Qt Quick, Qt 3D, Qt Multimedia and the other Qt modules MR Studio
+* **Excluded:** Qt WebEngine (about 300 MB; only an `MRSTUDIO_BUNDLE_KMAP` build includes it), Qt Quick, Qt 3D, Qt Multimedia and the other Qt modules MR Studio
   never uses, plus tkinter and the optional Swift and bdsim back-ends of the toolbox.
 * **Expected size:** about 450–600 MB unpacked and 200–250 MB as a `.dmg` or `setup.exe`. Most of it is Qt, SciPy and SymPy.
 
