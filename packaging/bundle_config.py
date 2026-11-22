@@ -141,6 +141,7 @@ SELF_TEST_IMPORTS = [
 # and its CI never contain or bundle map content. Unset (the default) the build is exactly the standard one.
 KMAP_BUNDLE_ENV = "MRSTUDIO_BUNDLE_KMAP"
 KMAP_EDITION_ENV = "MRSTUDIO_KMAP_EDITION"   # edition the map must be (default student; checked in build-info.json)
+KMAP_LEAK_CHECK_ENV = "MRSTUDIO_KMAP_LEAK_CHECK"   # path of the map pipeline's tests/leak_check.py ("skip": tests only)
 KMAP_DEST = "kmap"                           # folder inside the bundle (kmap_links.BUNDLED_KMAP)
 # Qt WebEngine and what it needs; in EXCLUDES for the standard build, bundled with the map
 WEBENGINE_MODULES = [
@@ -151,11 +152,47 @@ KMAP_SELF_TEST_IMPORTS = ["PySide6.QtWebEngineCore", "PySide6.QtWebEngineWidgets
 KMAP_SKIP_FILES = {".DS_Store", "Thumbs.db", "desktop.ini"}
 
 
+def leak_check_problems(root: str, edition: str, environ=None, run=None) -> list[str]:
+    """Run the map pipeline's content leak test (``leak_check.py``, found through ``MRSTUDIO_KMAP_LEAK_CHECK``) on a
+    *student* map folder; [] when it passes. ``content_problems`` only looks at file and folder names; this one reads
+    the data files (answer keys, withheld solutions, exam text). The control folder is the ``instructor`` sibling of
+    ``root`` (``content/instructor`` next to ``content/student``) when it exists. Other editions: nothing to check.
+    Unset for a student map: a problem (the build stops). ``MRSTUDIO_KMAP_LEAK_CHECK=skip``: no check (tests only)."""
+    import os
+    import subprocess
+    import sys
+    if edition != "student":
+        return []
+    env = os.environ if environ is None else environ
+    raw = (env.get(KMAP_LEAK_CHECK_ENV) or "").strip()
+    if raw.lower() == "skip":
+        return []
+    if not raw:
+        return [f"{KMAP_LEAK_CHECK_ENV} is not set: a student map must pass the pipeline's tests/leak_check.py "
+                "before it goes into an installer (set it to the path of that file)"]
+    script = os.path.abspath(os.path.expanduser(raw))
+    if not os.path.isfile(script):
+        return [f"{KMAP_LEAK_CHECK_ENV}={raw!r}: no such file"]
+    cmd = [sys.executable, script, root, "--quiet"]
+    control = os.path.join(os.path.dirname(os.path.abspath(root)), "instructor")
+    if os.path.isdir(control):
+        cmd += ["--control", control]
+    try:
+        r = (run or subprocess.run)(cmd, capture_output=True, text=True, timeout=900)
+    except (OSError, subprocess.SubprocessError) as e:
+        return [f"leak check could not run ({type(e).__name__}: {e})"]
+    if r.returncode != 0:
+        tail = [ln for ln in ((r.stdout or "") + (r.stderr or "")).splitlines() if ln.strip()][-15:]
+        return [f"leak check failed (exit {r.returncode}): " + " | ".join(tail)]
+    return []
+
+
 def kmap_bundle(environ=None) -> dict | None:
     """The map to bundle: None when MRSTUDIO_BUNDLE_KMAP is unset or empty (standard build), else
     ``{"dir": <absolute folder>, "edition": <edition>}``. Refuses (SystemExit, the build stops) a folder without
-    index.html, with any x_*.js, an "instructor" folder, or a build-info.json whose edition is not
-    MRSTUDIO_KMAP_EDITION (default student)."""
+    index.html, with any x_* file, an "instructor" folder, a symbolic link, a build-info.json whose edition is not
+    MRSTUDIO_KMAP_EDITION (default student), or (student edition) a map that fails the pipeline's leak_check.py
+    (``leak_check_problems``; the path comes from MRSTUDIO_KMAP_LEAK_CHECK)."""
     import os
     import sys
     env = os.environ if environ is None else environ
@@ -174,6 +211,8 @@ def kmap_bundle(environ=None) -> dict | None:
     real = os.path.realpath(root)
     if real == repo or real.startswith(repo + os.sep):
         problems.append(f"{root} is inside the MR Studio repository (map content must never be committed)")
+    if not problems:      # the content test reads every data file: only for a student map that passed the cheap checks
+        problems += leak_check_problems(root, edition, env)
     if problems:
         raise SystemExit(f"{KMAP_BUNDLE_ENV}={raw!r}: refusing to bundle this Knowledge Map ({edition} build):\n  - "
                          + "\n  - ".join(problems))

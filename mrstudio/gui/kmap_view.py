@@ -59,6 +59,14 @@ MIME = {
 }
 #: a navigation refused by ``route_navigation`` makes Qt report a failed load; ignore those for this long
 REJECT_GRACE_S = 3.0
+#: a web link opens the system browser only if the user pressed a mouse button / key this recently: Qt reports every
+#: renderer-initiated navigation (a timer's ``location.href = ...`` too) as "link clicked", so the type alone proves nothing
+INPUT_GRACE_S = 2.0
+#: a missing or refused file with one of these suffixes is answered with ``fail()`` (a <script>/<link>/<img>/font
+#: then fires ``onerror``). Anything else (data files fetched with fetch / XHR) gets an empty, finished body instead:
+#: ``fail()`` leaves the body of a fetch() response unfinished, so ``fetch(url).then(r => r.text())`` never settles.
+FAIL_SUFFIXES = frozenset({".js", ".mjs", ".css", ".png", ".jpg", ".jpeg", ".gif", ".webp", ".svg", ".ico", ".woff",
+                           ".woff2", ".ttf", ".otf"})
 
 _STATE: dict = {"prepared": False, "root": None, "error": ""}
 
@@ -146,23 +154,35 @@ def resolve(root, method, host: str, path: str) -> tuple[str, Path | None]:
 def serve(job, root, errors) -> str:
     """Answer a ``QWebEngineUrlRequestJob`` (or anything with the same methods) from the map folder ``root``.
     ``errors`` is ``QWebEngineUrlRequestJob.Error`` (any object with UrlNotFound / RequestDenied / RequestFailed).
-    Returns the outcome (``"ok"``, ``"notfound"``, ``"denied"``, ``"failed"``)."""
+    Returns the outcome (``"ok"``, ``"notfound"``, ``"denied"``, ``"failed"``). A refused or missing file whose
+    suffix is not in ``FAIL_SUFFIXES`` gets an empty, finished body instead of ``fail()`` (see there)."""
     url = job.requestUrl()
     status, p = resolve(root, job.requestMethod(), url.host(),
                         url.path(QtCore.QUrl.ComponentFormattingOption.FullyDecoded))
+    fetch_like = Path(url.path()).suffix.lower() not in FAIL_SUFFIXES
     if status != "ok":
-        job.fail(errors.UrlNotFound if status == "notfound" else errors.RequestDenied)
+        if fetch_like:
+            _reply_bytes(job, b"", "text/plain")
+        else:
+            job.fail(errors.UrlNotFound if status == "notfound" else errors.RequestDenied)
         return status
     try:
         data = p.read_bytes()
     except OSError:
-        job.fail(errors.RequestFailed)
+        if fetch_like:
+            _reply_bytes(job, b"", "text/plain")
+        else:
+            job.fail(errors.RequestFailed)
         return "failed"
+    _reply_bytes(job, data, mime_for(p))
+    return "ok"
+
+
+def _reply_bytes(job, data: bytes, mime: str) -> None:
     buf = QtCore.QBuffer(job)            # owned by the job: freed with it
     buf.setData(QtCore.QByteArray(data))
     buf.open(QtCore.QIODevice.OpenModeFlag.ReadOnly)
-    job.reply(mime_for(p).encode(), buf)
-    return "ok"
+    job.reply(mime.encode(), buf)
 
 
 def classify_navigation(url: QtCore.QUrl) -> str:
@@ -184,17 +204,72 @@ def launch_text(url: QtCore.QUrl) -> str:
         return bytes(url.toEncoded()).decode("ascii", "replace")
 
 
-def route_navigation(url: QtCore.QUrl, on_launch, on_external) -> bool:
+def route_navigation(url: QtCore.QUrl, on_launch, on_external, *, main_frame: bool = True, clicked: bool = True,
+                     scripted: bool = False) -> bool:
     """The page's navigation policy (``QWebEnginePage.acceptNavigationRequest``): True = let the view load it.
-    ``on_launch(text)`` gets ``mrstudio://`` URLs, ``on_external(QUrl)`` web links; both are refused here."""
+
+    * Sub-frames (iframes) never reach a callback: only ``kmap:``/``data:``/``blob:``/``about:`` load in them.
+    * ``on_external(QUrl)`` (system browser / mail) only for a real link click (``clicked``): a script that does
+      ``location.href = "https://..."`` goes nowhere.
+    * ``on_launch(text)`` for ``mrstudio://`` on a click, or ``scripted`` (the map's own "Open in MR Studio" button
+      sets ``location.href``; it only switches a tab of this app, and ``parse_launch_url`` checks the link)."""
     kind = classify_navigation(url)
+    if not main_frame:
+        return kind == "allow"
     if kind == "mrstudio":
-        on_launch(launch_text(url))
+        if clicked or scripted:
+            on_launch(launch_text(url))
         return False
     if kind == "external":
-        on_external(QtCore.QUrl(url))
+        if clicked:
+            on_external(QtCore.QUrl(url))
         return False
     return kind == "allow"
+
+
+def choose_download_path(request_name: str, chooser, default_dir: str | None = None):
+    """Where to save a download: ``chooser(default_path)`` returns the chosen path ('' = cancelled). Returns
+    ``(directory, file name)`` or None. Only the base name of the page-supplied file name is used."""
+    name = os.path.basename((request_name or "").replace("\\", "/")) or "download"
+    folder = default_dir or default_download_dir()
+    chosen = chooser(os.path.join(folder, name))
+    if not chosen:
+        return None
+    chosen = os.path.abspath(os.path.expanduser(str(chosen)))
+    return os.path.dirname(chosen), os.path.basename(chosen)
+
+
+def default_download_dir() -> str:
+    loc = QtCore.QStandardPaths.writableLocation(QtCore.QStandardPaths.StandardLocation.DownloadLocation)
+    return loc or str(Path.home() / "Downloads")
+
+
+def qt_file_chooser(parent=None):
+    """The default chooser: a native "Save as" dialog."""
+    def choose(default_path: str) -> str:
+        path, _filter = QtWidgets.QFileDialog.getSaveFileName(parent, "Save", default_path)
+        return path
+    return choose
+
+
+def handle_download(request, chooser) -> bool:
+    """``QWebEngineProfile.downloadRequested``: ask where to save (``chooser``), then accept or cancel.
+    The map's Export JSON / coverage CSV / SCORM zip are blob downloads."""
+    got = choose_download_path(request.downloadFileName(), chooser)
+    if got is None:
+        request.cancel()
+        return False
+    folder, name = got
+    request.setDownloadDirectory(folder)
+    request.setDownloadFileName(name)
+    request.accept()
+    return True
+
+
+def permission_decision(permission_type_name: str, origin: QtCore.QUrl) -> bool:
+    """Grant only the clipboard, and only to the map's own origin ``kmap://map``; everything else is denied."""
+    return (permission_type_name == "ClipboardReadWrite" and origin.scheme().lower() == SCHEME
+            and origin.host().lower() == HOST)
 
 
 def node_hash(node_id: str, tab: str = "learn") -> str:
@@ -261,6 +336,30 @@ def serve_check(root, rel: str) -> FakeJob:
     return job
 
 
+class InputWatcher(QtCore.QObject):
+    """Event filter that calls ``callback()`` for real user input (mouse buttons, keys, touch) on the objects it is
+    installed on; it never consumes an event."""
+    TYPES = frozenset({QtCore.QEvent.Type.MouseButtonPress, QtCore.QEvent.Type.MouseButtonRelease,
+                       QtCore.QEvent.Type.KeyPress, QtCore.QEvent.Type.TouchBegin, QtCore.QEvent.Type.TouchEnd})
+
+    def __init__(self, callback, parent=None):
+        super().__init__(parent)
+        self._callback = callback
+        self._seen: set = set()
+
+    def eventFilter(self, obj, event):
+        if event.type() in self.TYPES:
+            self._callback()
+        return False
+
+    def watch(self, widget) -> None:
+        """Install on ``widget``, its focus proxy and its child widgets (Qt WebEngine receives input there)."""
+        for w in [widget, widget.focusProxy(), *widget.findChildren(QtWidgets.QWidget)]:
+            if w is not None and id(w) not in self._seen:
+                self._seen.add(id(w))
+                w.installEventFilter(self)
+
+
 class UrlSink(QtCore.QObject):
     """Receiver for ``QDesktopServices.setUrlHandler(SCHEME, sink, "handle")``: map links clicked anywhere in MR
     Studio (theory footers) go to ``callback(QUrl)`` instead of the operating system."""
@@ -305,52 +404,58 @@ def _classes():
                 info.block(True)
 
     class MapPage(QWebEnginePage):
-        def __init__(self, profile, parent, on_launch, on_external):
+        """The map page: navigation policy, permissions, new windows, printing."""
+        def __init__(self, profile, parent, on_launch, on_external, on_print=None):
             super().__init__(profile, parent)
-            self._on_launch, self._on_external = on_launch, on_external
-            self._popups = []
+            self._on_launch, self._on_external, self._on_print = on_launch, on_external, on_print
+            self._input_at = -1e9
+            self.permissionRequested.connect(self._permission)
+            self.newWindowRequested.connect(self._new_window)
+            self.printRequested.connect(self._print)
+
+        def note_input(self):
+            """The user pressed a mouse button / key in the view (``InputWatcher``)."""
+            self._input_at = time.monotonic()
 
         def acceptNavigationRequest(self, url, nav_type, is_main_frame):
-            return route_navigation(url, self._on_launch, self._on_external)
+            return route_navigation(
+                url, self._on_launch, self._on_external, main_frame=is_main_frame,
+                clicked=(nav_type == QWebEnginePage.NavigationType.NavigationTypeLinkClicked
+                         and time.monotonic() - self._input_at < INPUT_GRACE_S),
+                scripted=nav_type in (QWebEnginePage.NavigationType.NavigationTypeLinkClicked,
+                                      QWebEnginePage.NavigationType.NavigationTypeOther,
+                                      QWebEnginePage.NavigationType.NavigationTypeTyped))
 
-        def createWindow(self, _type):
-            """``target=_blank`` / ``window.open``: route the new window's first URL, never open a window."""
-            popup = PopupPage(self)
-            self._popups.append(popup)
-            QtCore.QTimer.singleShot(10_000, popup.done)
-            return popup
-
-    class PopupPage(QWebEnginePage):
-        def __init__(self, owner):
-            super().__init__(owner.profile(), owner)
-            self.owner = owner
-
-        def acceptNavigationRequest(self, url, nav_type, is_main_frame):
-            if url.scheme().lower() == "about":      # window.open() starts with about:blank
-                return True
-            kind = classify_navigation(url)
-            if kind == "allow":
-                self.owner.setUrl(url)               # a map page in a new window: show it in the tab instead
+        def _permission(self, permission):
+            """Clipboard for the map, nothing else (camera, microphone, location, notifications ...)."""
+            if permission_decision(permission.permissionType().name, permission.origin()):
+                permission.grant()
             else:
-                route_navigation(url, self.owner._on_launch, self.owner._on_external)
-            QtCore.QTimer.singleShot(0, self.done)
-            return False
+                permission.deny()
 
-        def done(self):
-            try:
-                if self in self.owner._popups:
-                    self.owner._popups.remove(self)
-                    self.deleteLater()
-            except RuntimeError:   # already deleted with its owner
-                pass
+        def _new_window(self, request):
+            """``target=_blank`` / ``window.open``: never a window. Only a user-initiated request is routed (a map
+            page opens in this tab, mrstudio:// and web links as for a click); a script's popup is dropped."""
+            if not request.isUserInitiated():
+                return
+            url = request.requestedUrl()
+            if classify_navigation(url) == "allow" and url.scheme().lower() not in ("about", "data", "blob"):
+                self.setUrl(url)
+            else:
+                route_navigation(url, self._on_launch, self._on_external, clicked=True)
+
+        def _print(self):
+            if self._on_print is not None:
+                self._on_print()
 
     return types.SimpleNamespace(MapSchemeHandler=MapSchemeHandler, LaunchSchemeHandler=LaunchSchemeHandler,
-                                 Interceptor=Interceptor, MapPage=MapPage, PopupPage=PopupPage)
+                                 Interceptor=Interceptor, MapPage=MapPage)
 
 
-def make_profile(root, edition: str, parent=None):
+def make_profile(root, edition: str, parent=None, download_chooser=None):
     """The map's QWebEngineProfile: named and persistent under ``profile_dir()`` (off the record without one),
-    with the kmap/mrstudio scheme handlers, the offline interceptor and the ``window.kmapApp`` script."""
+    with the kmap/mrstudio scheme handlers, the offline interceptor, the ``window.kmapApp`` script and a "Save as"
+    prompt for downloads (``download_chooser(default_path) -> path or ''``; tests inject one)."""
     from PySide6.QtWebEngineCore import QWebEngineProfile, QWebEngineProfileBuilder, QWebEngineScript
     cls = _classes()
     pdir = profile_dir()
@@ -362,6 +467,8 @@ def make_profile(root, edition: str, parent=None):
         b.setCachePath(str(pdir / "cache"))
         b.setPersistentPermissionsPolicy(QWebEngineProfile.PersistentPermissionsPolicy.AskEveryTime)
         profile = b.createProfile(PROFILE_NAME, parent)
+    chooser = download_chooser or qt_file_chooser(parent if isinstance(parent, QtWidgets.QWidget) else None)
+    profile.downloadRequested.connect(lambda request: handle_download(request, chooser))
     profile.installUrlSchemeHandler(SCHEME.encode(), cls.MapSchemeHandler(root, profile))
     profile.installUrlSchemeHandler(LAUNCH_SCHEME.encode(), cls.LaunchSchemeHandler(profile))
     profile.setUrlRequestInterceptor(cls.Interceptor(profile))
@@ -384,14 +491,17 @@ class KmapTab(QtWidgets.QWidget):
     uses_engine = False
     robot_box_tip = "The Knowledge Map does not use the robot selector"
 
-    def __init__(self, root, on_launch, on_log=None, edition: str | None = None, parent=None):
+    def __init__(self, root, on_launch, on_log=None, edition: str | None = None, parent=None,
+                 download_chooser=None, pdf_chooser=None):
         super().__init__(parent)
         from ..kmap_links import app_edition
         self.root = Path(root)
         self.edition = edition or app_edition()
         self._on_launch_cb = on_launch
+        self._download_chooser, self._pdf_chooser = download_chooser, pdf_chooser
         self._log = on_log or (lambda _text: None)
         self.view = self.page = self.profile = None
+        self._watcher = None
         self.loaded = False
         self.pending_hash: str | None = None
         self._rejected_at = -1e9
@@ -430,12 +540,14 @@ class KmapTab(QtWidgets.QWidget):
         from PySide6.QtWebEngineWidgets import QWebEngineView
         cls = _classes()
         view = QWebEngineView(self)                 # created before the profile: Qt deletes children in order,
-        self.profile = make_profile(self.root, self.edition, self)    # so the page goes before its profile
-        page = cls.MapPage(self.profile, view, self._launch, self._external)
+        self.profile = make_profile(self.root, self.edition, self, self._download_chooser)    # so the page goes before its profile
+        page = cls.MapPage(self.profile, view, self._launch, self._external, self._print_page)
         page.setBackgroundColor(self.palette().color(QtGui.QPalette.ColorRole.Window))
         page.loadFinished.connect(self._load_finished)
         page.renderProcessTerminated.connect(self._render_died)
         view.setPage(page)
+        self._watcher = InputWatcher(page.note_input, view)
+        self._watcher.watch(view)
         self.view, self.page = view, page
         self._stack.addWidget(view)
         self._stack.setCurrentWidget(view)
@@ -450,6 +562,19 @@ class KmapTab(QtWidgets.QWidget):
         self._rejected_at = time.monotonic()
         QtCore.QTimer.singleShot(0, lambda: QtGui.QDesktopServices.openUrl(url))
 
+    def _print_page(self):
+        """``window.print()`` / the map's print buttons: Qt WebEngine has no print preview, so save a PDF."""
+        if self.page is None:
+            return
+        title = (self.page.title() or "Knowledge Map").strip()
+        safe = "".join(c if c.isalnum() or c in " -_." else "_" for c in title)[:80].strip() or "Knowledge Map"
+        chooser = self._pdf_chooser or qt_file_chooser(self)
+        got = choose_download_path(safe + ".pdf", chooser)
+        if got is None:
+            return
+        self.page.printToPdf(os.path.join(*got))
+        self._log(f"Knowledge Map: saving a PDF to {os.path.join(*got)}")
+
     def show_hash(self, fragment: str) -> bool:
         """Show a route of the map (``map/<id>/learn`` …): at once if the page is loaded, else after loading."""
         frag = (fragment or "").lstrip("#")
@@ -462,6 +587,8 @@ class KmapTab(QtWidgets.QWidget):
         return True
 
     def _load_finished(self, ok: bool):
+        if self.view is not None and self._watcher is not None:
+            self._watcher.watch(self.view)          # the web content widget may appear only after the first load
         if ok:
             self.loaded = True
             if self.pending_hash is not None:
@@ -482,6 +609,7 @@ class KmapTab(QtWidgets.QWidget):
         """Delete the page before its profile (Qt warns, and may crash, otherwise)."""
         view, profile = self.view, self.profile
         self.view = self.page = self.profile = None
+        self._watcher = None
         self.loaded = False
         if view is None:
             return

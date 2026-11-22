@@ -83,7 +83,7 @@ def test_resolve_absolute_and_encoded_paths(fake_map):
                 "kmap://map/..%2Fsecret.txt"):
         job = K.FakeJob(raw)
         assert K.serve(job, fake_map, K.FAKE_ERRORS) == "denied", raw
-        assert job.error == "RequestDenied" and job.data is None
+        assert job.data == b"" and job.error is None      # nothing leaked; an empty, finished body (no hanging fetch)
     assert K.resolve(fake_map, "GET", "map", "data/x\x00.js") == ("denied", None)
 
 
@@ -103,7 +103,7 @@ def test_resolve_method_host_and_missing(fake_map):
     assert K.resolve(fake_map, b"GET", "map", "data") == ("notfound", None)          # a folder is not a file
     assert K.resolve(fake_map, b"GET", "map", "")[0] == "ok"                          # / -> index.html
     job = K.FakeJob("kmap://map/index.html", method=b"POST")
-    assert K.serve(job, fake_map, K.FAKE_ERRORS) == "denied" and job.error == "RequestDenied"
+    assert K.serve(job, fake_map, K.FAKE_ERRORS) == "denied" and job.error is None and job.data == b""
     job = K.FakeJob("kmap://map/missing.css")
     assert K.serve(job, fake_map, K.FAKE_ERRORS) == "notfound" and job.error == "UrlNotFound"
 
@@ -370,6 +370,21 @@ def nxt(*_):
     else:
         finish()
 
+def real_click(selector, then):
+    # a real mouse click (QTest) on the element: runJavaScript carries a fake user gesture, a click does not
+    from PySide6.QtTest import QTest
+    def got(r):
+        if not r:                       # the element is not on this page (real map content has no #web link)
+            QtCore.QTimer.singleShot(0, then)
+            return
+        x, y = json.loads(r)
+        w = tab.view.focusProxy() or tab.view
+        QTest.mouseClick(w, QtCore.Qt.MouseButton.LeftButton, QtCore.Qt.KeyboardModifier.NoModifier,
+                         QtCore.QPoint(int(x), int(y)))
+        QtCore.QTimer.singleShot(800, then)
+    tab.page.runJavaScript("(function(){var e=document.querySelector(%s); if(!e) return ''; var r=e.getBoundingClientRect();"
+                           "return JSON.stringify([r.left+r.width/2, r.top+r.height/2])})()" % json.dumps(selector), 0, got)
+
 def s_info():
     js("JSON.stringify({title: document.title, app: window.kmapApp, py: window.KMAP_PYODIDE_BASE,"
        " frozen: Object.isFrozen(window.kmapApp), fake: !!window.FAKE_LOADED, origin: location.origin})",
@@ -384,6 +399,8 @@ def s_click():
        lambda r: QtCore.QTimer.singleShot(800, nxt))
 def s_web():
     js("location.href = 'https://example.org/page'", lambda r: QtCore.QTimer.singleShot(800, nxt))
+def s_web_click():     # a real mouse click on the link goes to the browser; the script above did not
+    real_click("#web", nxt)
 def s_fetch():
     js("fetch('pyodide/pyodide.js').then(r => r.status).catch(e => 'ERR')", lambda r: QtCore.QTimer.singleShot(0, nxt))
 def s_after():
@@ -397,7 +414,7 @@ def s_pixels():
     res["colours"] = len(cols)
     nxt()
 
-steps[:] = [s_info, s_hash, s_launch, s_click, s_web, s_fetch, s_after, s_pixels]
+steps[:] = [s_info, s_hash, s_launch, s_click, s_web, s_web_click, s_fetch, s_after, s_pixels]
 def loaded(ok):
     res.setdefault("loads", []).append(ok)
     if ok and "started" not in res:
@@ -440,7 +457,7 @@ def test_real_webengine_load_and_routing(tmp_path, fake_map):
     assert res["hash"] == "#map/01.03.5/learn"
     # location.href and a script click on an mrstudio:// link both reach the launch callback (once each)
     assert res["launched"] == ["mrstudio://open?tab=FKTab&robot=Planar%203R%20arm"] * 2, res
-    assert res["external"] == ["https://example.org/page"], res
+    assert res["external"] == ["https://example.org/page"], res     # the real click only, not location.href = "https://..."
     assert res["after"]["href"].startswith("kmap://map/index.html") and res["after"]["alive"] == FAKE_TITLE
     assert not [t for t in res.get("log", []) if "did not load" in t], res.get("log")
 
@@ -470,3 +487,339 @@ def test_app_with_map_routes_file_open_events_without_an_app_wide_filter(qapp):
     assert f.pending == ["mrstudio://open?tab=MobileTab"]
     src = (ROOT / "mrstudio" / "gui" / "app.py").read_text(encoding="utf-8")
     assert "app.url_filter = url_filter" in src and "MRStudioApplication if kmap else" in src
+
+
+# ----------------------------------------------------------------------------- unit tests: policy, downloads, content
+def test_route_navigation_subframes_and_scripts():
+    launched, external = [], []
+    r = (lambda u, **kw: K.route_navigation(QtCore.QUrl(u), launched.append, external.append, **kw))
+    # iframes: no callback ever, only the allowed schemes load
+    assert r("https://example.org", main_frame=False) is False
+    assert r("mrstudio://open?tab=FKTab", main_frame=False) is False
+    assert r("mailto:a@b.org", main_frame=False) is False
+    assert r("kmap://map/x.html", main_frame=False) is True and r("data:text/html,x", main_frame=False) is True
+    assert r("file:///etc/passwd", main_frame=False) is False
+    assert not launched and not external
+    # main frame, not a click: web links go nowhere; mrstudio:// only when the page script is the map's own
+    assert r("https://example.org", clicked=False) is False and not external
+    assert r("mrstudio://open?tab=FKTab", clicked=False) is False and not launched
+    assert r("mrstudio://open?tab=FKTab", clicked=False, scripted=True) is False and len(launched) == 1
+    assert r("https://example.org", clicked=True) is False and len(external) == 1
+
+
+def test_permission_decision():
+    own, other = QtCore.QUrl("kmap://map/"), QtCore.QUrl("https://example.org/")
+    assert K.permission_decision("ClipboardReadWrite", own) is True
+    assert K.permission_decision("ClipboardReadWrite", other) is False
+    assert K.permission_decision("ClipboardReadWrite", QtCore.QUrl("kmap://evil/")) is False
+    for name in ("Geolocation", "Notifications", "MediaAudioCapture", "MediaVideoCapture", "MouseLock",
+                 "DesktopVideoCapture", "LocalFontsAccess", "Unsupported"):
+        assert K.permission_decision(name, own) is False, name
+
+
+class FakeDownload:
+    def __init__(self, name):
+        self._name, self.calls = name, []
+
+    def downloadFileName(self):
+        return self._name
+
+    def setDownloadDirectory(self, d):
+        self.calls.append(("dir", d))
+
+    def setDownloadFileName(self, n):
+        self.calls.append(("name", n))
+
+    def accept(self):
+        self.calls.append("accept")
+
+    def cancel(self):
+        self.calls.append("cancel")
+
+
+def test_handle_download_accept_and_cancel(tmp_path):
+    asked = []
+
+    def chooser(default):
+        asked.append(default)
+        return str(tmp_path / "out" / "saved.json")
+    req = FakeDownload("../../etc/map.json")           # a hostile name keeps only its base name
+    assert K.handle_download(req, chooser) is True
+    assert os.path.basename(asked[0]) == "map.json" and os.path.dirname(asked[0]) == K.default_download_dir()
+    assert req.calls == [("dir", str(tmp_path / "out")), ("name", "saved.json"), "accept"]
+    req = FakeDownload("")
+    assert K.handle_download(req, lambda d: "") is False and req.calls == ["cancel"]
+
+
+def test_content_problems_x_files_any_case_and_suffix(tmp_path):
+    for i, name in enumerate(["X_01.js", "x_01.JS", "x_01.js.gz", "x_01.mjs", "X_a.JSON", "x_"]):
+        root = make_fake_map(tmp_path / f"m{i}")
+        (root / "data" / name).write_text("// planted\n", encoding="utf-8")
+        assert any("answer file" in p for p in KL.content_problems(root, "student")), name
+    root = make_fake_map(tmp_path / "fine")
+    (root / "data" / "ax_01.js").write_text("// fine\n", encoding="utf-8")
+    (root / "data" / "box_x_1.js").write_text("// fine\n", encoding="utf-8")
+    assert KL.content_problems(root, "student") == []
+
+
+@pytest.mark.skipif(not hasattr(os, "symlink") or sys.platform == "win32", reason="symlinks")
+def test_content_problems_refuses_symlinks(tmp_path):
+    outside = tmp_path / "outside.txt"
+    outside.write_text("x", encoding="utf-8")
+    root = make_fake_map(tmp_path / "m")
+    (root / "data" / "link.txt").symlink_to(outside)
+    assert any("symbolic link" in p for p in KL.content_problems(root, "student"))
+    root2 = make_fake_map(tmp_path / "m2")
+    (root2 / "dirlink").symlink_to(tmp_path)
+    assert any("symbolic link" in p for p in KL.content_problems(root2, "student"))
+
+
+def test_app_edition_uses_edition_info(monkeypatch):
+    from mrstudio import edition_info
+    monkeypatch.setattr(edition_info, "edition_name", lambda: "Instructor")
+    assert KL.app_edition() == "instructor"
+    monkeypatch.setattr(edition_info, "edition_name", lambda: (_ for _ in ()).throw(RuntimeError("broken")))
+    assert KL.app_edition() == "student"
+    monkeypatch.setattr(edition_info, "edition_name", lambda: "")
+    assert KL.app_edition() == "student"
+
+
+# ----------------------------------------------------------------------------- Qt WebEngine: security behaviour
+SECURITY_PROBE = r"""
+import json, os, sys, time
+sys.path.insert(0, sys.argv[1])
+root, outdir = sys.argv[2], sys.argv[3]
+from PySide6 import QtCore, QtGui, QtWidgets
+from mrstudio.gui import kmap_view as K
+res = {"prepared": K.prepare(root), "err": K.last_error(), "launched": [], "external": [], "chosen": [], "pdf": []}
+app = QtWidgets.QApplication([])
+
+class Sink(QtCore.QObject):
+    @QtCore.Slot(QtCore.QUrl)
+    def handle(self, url):
+        res["external"].append(url.toString())
+sink = Sink()
+for s in ("http", "https", "mailto"):
+    QtGui.QDesktopServices.setUrlHandler(s, sink, "handle")
+
+def chooser(default):
+    res["chosen"].append(os.path.basename(default))
+    return os.path.join(outdir, "saved-" + os.path.basename(default))
+def pdf_chooser(default):
+    res["pdf"].append(os.path.basename(default))
+    return os.path.join(outdir, "printed.pdf")
+tab = K.KmapTab(root, res["launched"].append, on_log=lambda t: None, download_chooser=chooser, pdf_chooser=pdf_chooser)
+win = QtWidgets.QMainWindow(); win.setCentralWidget(tab); win.resize(900, 700); win.show()
+
+def finish(*_):
+    print("RESULT " + json.dumps(res), flush=True)
+    tab.shutdown()
+    app.quit()
+
+def js(code):
+    tab.page.runJavaScript(code)
+
+def real_click(selector, then):
+    # a real mouse click (QTest) on the element: runJavaScript carries a fake user gesture, a click does not
+    from PySide6.QtTest import QTest
+    def got(r):
+        if not r:                       # the element is not on this page (real map content has no #web link)
+            QtCore.QTimer.singleShot(0, then)
+            return
+        x, y = json.loads(r)
+        w = tab.view.focusProxy() or tab.view
+        QTest.mouseClick(w, QtCore.Qt.MouseButton.LeftButton, QtCore.Qt.KeyboardModifier.NoModifier,
+                         QtCore.QPoint(int(x), int(y)))
+        QtCore.QTimer.singleShot(800, then)
+    tab.page.runJavaScript("(function(){var e=document.querySelector(%s); if(!e) return ''; var r=e.getBoundingClientRect();"
+                           "return JSON.stringify([r.left+r.width/2, r.top+r.height/2])})()" % json.dumps(selector), 0, got)
+
+def poll(expr, key, then, limit=6.0):
+    t0 = time.monotonic()
+    def tick():
+        def got(r):
+            if r not in (None, "pending") or time.monotonic() - t0 > limit:
+                res[key] = r
+                then()
+            else:
+                QtCore.QTimer.singleShot(100, tick)
+        tab.page.runJavaScript(expr, 0, got)
+    tick()
+
+steps = []
+def nxt(*_):
+    steps.pop(0)() if steps else finish()
+def later(ms):
+    QtCore.QTimer.singleShot(ms, nxt)
+
+def s_http():
+    js("window.R_http='pending'; fetch('http://127.0.0.1:9/x.js').then(()=>{window.R_http='loaded'},()=>{window.R_http='blocked'});"
+       "window.R_img='pending'; var i=new Image(); i.onload=()=>{window.R_img='loaded'}; i.onerror=()=>{window.R_img='blocked'};"
+       "i.src='http://127.0.0.1:9/a.png';")
+    poll("window.R_http", "http_fetch", lambda: poll("window.R_img", "http_img", nxt))
+def s_iframes():
+    js("for (const u of ['https://example.org/f','mrstudio://open?tab=FKTab','mailto:a@b.org','http://example.org/']) {"
+       " const f=document.createElement('iframe'); f.src=u; document.body.appendChild(f);} ")
+    later(1500)
+def s_snapshot_iframes():
+    res["after_iframes"] = {"launched": list(res["launched"]), "external": list(res["external"])}
+    nxt()
+def s_popup():
+    js("window.open('https://example.org/popup'); window.open('mrstudio://open?tab=MobileTab'); window.open('kmap://map/index.html#x');")
+    later(1500)
+def s_snapshot_popup():
+    res["after_popup"] = {"launched": list(res["launched"]), "external": list(res["external"]),
+                          "href": None}
+    nxt()
+def s_timer_nav():       # no user gesture any more (activation expires after ~5 s): must go nowhere
+    js("setTimeout(()=>{location.href='https://example.org/timer'}, 6000); setTimeout(()=>{window.open('https://example.org/timer2')}, 6000);")
+    later(8000)
+def s_snapshot_timer():
+    res["after_timer"] = {"launched": list(res["launched"]), "external": list(res["external"])}
+    nxt()
+def s_real_click():      # control: a real click on the https link does reach the browser callback
+    real_click("#web", nxt)
+def s_snapshot_click():
+    res["after_click"] = {"launched": list(res["launched"]), "external": list(res["external"])}
+    nxt()
+def s_download():
+    js("window.R_dl='go'; var b=new Blob(['{\\u0022k\\u0022:1}'],{type:'application/json'}); var a=document.createElement('a');"
+       "a.href=URL.createObjectURL(b); a.download='export.json'; document.body.appendChild(a); a.click();")
+    t0 = time.monotonic()
+    def check():
+        f = os.path.join(outdir, "saved-export.json")
+        if (os.path.isfile(f) and os.path.getsize(f) > 0) or time.monotonic() - t0 > 8:
+            res["download_file"] = open(f, encoding="utf-8").read() if os.path.isfile(f) else None
+            nxt()
+        else:
+            QtCore.QTimer.singleShot(100, check)
+    check()
+def s_clipboard():
+    real_click("#h", clip_go)
+def clip_go():
+    js("window.R_clip='pending'; navigator.clipboard.writeText('hello from the map').then(()=>{window.R_clip='resolved'},e=>{window.R_clip='rejected:'+e.name});")
+    poll("window.R_clip", "clipboard", nxt)
+
+def s_perms():
+    js("window.R_geo='pending'; navigator.geolocation.getCurrentPosition(()=>{window.R_geo='granted'},e=>{window.R_geo='error'+e.code});"
+       "window.R_note='pending'; try{Notification.requestPermission().then(p=>{window.R_note=p})}catch(e){window.R_note='n/a'}")
+    poll("window.R_geo", "geolocation", lambda: poll("window.R_note", "notification", nxt))
+def s_404():
+    js("window.R_404='pending'; var t0=performance.now(); fetch('missing-file.txt').then(r=>r.text()).then("
+       "t=>{window.R_404='resolved:'+t.length},e=>{window.R_404='rejected'});"
+       "window.R_403='pending'; fetch('index.html',{method:'POST'}).then(r=>r.text()).then("
+       "t=>{window.R_403='resolved:'+t.length},e=>{window.R_403='rejected'});")
+    js("window.R_scr='pending'; var s=document.createElement('script'); s.src='missing-script.js';"
+       "s.onload=()=>{window.R_scr='loaded'}; s.onerror=()=>{window.R_scr='error'}; document.head.appendChild(s);")
+    poll("window.R_404", "fetch_404", lambda: poll("window.R_403", "fetch_403", lambda: poll("window.R_scr", "script_404", nxt)))
+def s_print():
+    js("window.print()")
+    t0 = time.monotonic()
+    def check():
+        f = os.path.join(outdir, "printed.pdf")
+        if (os.path.isfile(f) and os.path.getsize(f) > 100) or time.monotonic() - t0 > 10:
+            res["pdf_file"] = open(f, "rb").read(5).decode("latin-1") if os.path.isfile(f) else None
+            nxt()
+        else:
+            QtCore.QTimer.singleShot(150, check)
+    check()
+def s_final():
+    res["page_url"] = tab.page.url().toString()
+    nxt()
+
+steps[:] = [s_http, s_iframes, s_snapshot_iframes, s_popup, s_snapshot_popup, s_timer_nav, s_snapshot_timer, s_real_click, s_snapshot_click, s_download, s_clipboard, s_perms,
+            s_404, s_print, s_final]
+def loaded(ok):
+    if ok and "started" not in res:
+        res["started"] = True
+        QtCore.QTimer.singleShot(300, nxt)
+tab.ensure_view()
+tab.page.loadFinished.connect(loaded)
+QtCore.QTimer.singleShot(120_000, lambda: (res.update(timeout=True), finish()))
+app.exec()
+"""
+
+_SEC = {}
+
+
+def _security_result(tmp_path_factory, fake_map_factory):
+    if "res" not in _SEC:
+        need_webengine()
+        tmp = tmp_path_factory.mktemp("sec")
+        root = make_fake_map(tmp / "map")
+        out = tmp / "out"
+        out.mkdir()
+        script = tmp / "sec_probe.py"
+        script.write_text(SECURITY_PROBE, encoding="utf-8")
+        env = dict(os.environ, MRSTUDIO_SETTINGS=str(tmp / "s.ini"), MRSTUDIO_LOG=str(tmp / "m.log"))
+        r = subprocess.run([sys.executable, str(script), str(ROOT), str(root), str(out)], capture_output=True,
+                           text=True, timeout=300, env=env)
+        lines = [ln for ln in r.stdout.splitlines() if ln.startswith("RESULT ")]
+        if not lines:
+            pytest.fail(f"no result (exit {r.returncode}): {r.stderr[-3000:]}")
+        res = json.loads(lines[-1][len("RESULT "):])
+        if not res.get("prepared"):
+            pytest.skip(f"Qt WebEngine not usable here: {res.get('err')}")
+        if res.get("timeout") and "started" not in res:
+            pytest.skip("Qt WebEngine never finished loading on this platform")
+        _SEC["res"] = res
+    return _SEC["res"]
+
+
+@pytest.fixture
+def sec(tmp_path_factory):
+    res = _security_result(tmp_path_factory, None)
+    assert not res.get("timeout"), res
+    return res
+
+
+def test_live_http_subresources_are_blocked(sec):
+    assert sec["http_fetch"] == "blocked" and sec["http_img"] == "blocked", sec
+
+
+def test_live_iframes_never_reach_the_callbacks(sec):
+    assert sec["after_iframes"] == {"launched": [], "external": []}, sec["after_iframes"]
+
+
+def test_live_script_popups_do_not_go_external(sec):
+    assert sec["after_popup"]["external"] == [] and sec["after_popup"]["launched"] == [], sec["after_popup"]
+    assert sec["page_url"].startswith("kmap://map/index.html"), sec["page_url"]
+
+
+def test_live_navigation_without_a_user_gesture_goes_nowhere(sec):
+    assert sec["after_timer"] == {"launched": [], "external": []}, sec["after_timer"]
+    assert sec["after_click"]["external"] == ["https://example.org/page"], sec["after_click"]     # a real click works
+
+
+def test_live_download_reaches_the_chooser_and_writes_a_file(sec):
+    assert sec["chosen"] and sec["chosen"][0] == "export.json", sec["chosen"]
+    assert sec["download_file"] == '{"k":1}', sec
+
+
+def test_live_clipboard_write_settles(sec):
+    assert sec["clipboard"] == "resolved", sec["clipboard"]
+
+
+def test_live_other_permissions_are_denied(sec):
+    assert sec["geolocation"] != "granted" and sec["geolocation"] != "pending", sec["geolocation"]
+    assert sec["notification"] in ("denied", "n/a"), sec["notification"]
+
+
+def test_live_failed_requests_settle(sec):
+    assert sec["fetch_404"] in ("rejected",) or sec["fetch_404"].startswith("resolved:"), sec["fetch_404"]
+    assert sec["fetch_403"] in ("rejected",) or sec["fetch_403"].startswith("resolved:"), sec["fetch_403"]
+    assert sec["script_404"] == "error", sec["script_404"]      # a missing <script> still fires onerror
+
+
+def test_live_print_saves_a_pdf(sec):
+    assert sec["pdf"] and sec["pdf"][0].endswith(".pdf"), sec["pdf"]
+    assert sec["pdf_file"] == "%PDF-", sec["pdf_file"]
+
+
+def test_serve_missing_data_file_gets_an_empty_finished_body_but_scripts_fail(fake_map):
+    job = K.serve_check(fake_map, "missing.json")
+    assert job.error is None and job.data == b"" and job.mime == "text/plain"       # fetch(): body must end
+    job = K.serve_check(fake_map, "missing.js")
+    assert job.error == "UrlNotFound" and job.data is None                         # <script onerror> keeps working
+    job = K.FakeJob("kmap://map/index.html", method=b"POST")
+    assert K.serve(job, fake_map, K.FAKE_ERRORS) == "denied" and job.data == b"" and job.error is None

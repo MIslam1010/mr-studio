@@ -56,6 +56,7 @@ The student app (the public code: no `mrstudio/edition.py`) never embeds a folde
 | `MRSTUDIO_KMAP_DIR` | map folder (see above); also the local map for browser links when nothing is embedded |
 | `MRSTUDIO_KMAP_EMBED=0` | no embedded tab, even with map content (links open in the browser as before) |
 | `MRSTUDIO_KMAP_URL` | browser links only: used when nothing is embedded |
+| `MRSTUDIO_KMAP_LEAK_CHECK` | build only (`packaging/`): path of the map pipeline's `tests/leak_check.py`; a student map bundle must pass it (`skip` = tests only) |
 | `MRSTUDIO_TEST_KMAP_DIR` | tests only: also run the real-content WebEngine test against this map |
 
 How it works:
@@ -73,9 +74,19 @@ How it works:
   page's CDN fallbacks included).
 * **Page globals** (injected at document creation, main frame): `window.kmapApp = {desktop: true, platform:
   <sys.platform>, edition: <student|instructor>, embedded: true}` (frozen) and `window.KMAP_PYODIDE_BASE = 'pyodide/'`.
+* **Downloads and printing.** The map's Export JSON / coverage CSV / SCORM zip are blob downloads: the profile's
+  `downloadRequested` asks with a "Save as" dialog (default `~/Downloads/<name from the page>`, only the base name is
+  used); cancel cancels. `window.print()` / the map's print buttons save a PDF (`printToPdf`, same kind of dialog).
+* **Permissions.** Only the clipboard (`navigator.clipboard.writeText`) is granted, and only to `kmap://map`; camera,
+  microphone, location, notifications and everything else are denied.
+* **Failed requests.** A missing or refused `.js/.css/image/font` fails normally (`onerror` fires); any other missing
+  file (data fetched with `fetch`/XHR) gets an empty, finished body, because Chromium never ends the body of a `fail()`ed
+  response (`fetch(url).then(r => r.text())` would hang).
 * **Navigation:** `mrstudio://open?…` (the map's "Open in MR Studio") → `MainWindow.open_url` (same as a link from
-  the OS); `http(s)`/`mailto` → the system browser; `kmap:` stays in the tab; `target=_blank` / `window.open` are
-  routed the same way (no extra windows). The failed load Qt reports for a refused navigation is ignored.
+  the OS); `http(s)`/`mailto` → the system browser, only for a link the user really clicked (a mouse button or key press
+  within the last 2 s: Qt reports a script's `location.href` as a link click too); `kmap:` stays in the tab.
+  Iframes never reach any callback (only `kmap:`/`data:`/`blob:`/`about:` load there). `target=_blank` /
+  `window.open` open no window: a user-initiated one is routed like a click, a script's popup is dropped. The failed load Qt reports for a refused navigation is ignored.
 * **Links into the map** (`kmap://map/index.html#map/<node>/learn`, the theory footers) are taken by a
   `QDesktopServices` URL handler for `kmap:` → `MainWindow.open_map_url`: switch to the tab and set
   `location.hash` (routes `#map/<id>[/<tab>]`, `#book/<edition>/<id>`, `#<id>`).

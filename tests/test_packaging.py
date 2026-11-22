@@ -485,6 +485,7 @@ def _run_spec(monkeypatch, env: dict) -> dict:
         monkeypatch.setitem(sys.modules, name, mod)
     for k in (cfg.KMAP_BUNDLE_ENV, cfg.KMAP_EDITION_ENV):
         monkeypatch.delenv(k, raising=False)
+    monkeypatch.setenv(cfg.KMAP_LEAK_CHECK_ENV, "skip")          # the content test has its own tests below
     for k, v in env.items():
         monkeypatch.setenv(k, v)
     got = {}
@@ -552,7 +553,7 @@ def test_spec_bundles_kmap_when_asked(monkeypatch, tmp_path):
 def test_kmap_bundle_refuses_leaky_content(tmp_path, plant):
     root = _fake_map(tmp_path / "m", edition=None if plant == "no_build_info" else
                      ("instructor" if plant == "edition" else "student"))
-    env = {cfg.KMAP_BUNDLE_ENV: str(root)}
+    env = {cfg.KMAP_BUNDLE_ENV: str(root), cfg.KMAP_LEAK_CHECK_ENV: "skip"}
     if plant == "x_js":
         (root / "data").mkdir()
         (root / "data" / "x_test.js").write_text("// planted\n", encoding="utf-8")
@@ -569,14 +570,73 @@ def test_kmap_bundle_refuses_leaky_content(tmp_path, plant):
 
 def test_kmap_bundle_accepts_clean_student_map(tmp_path):
     root = _fake_map(tmp_path / "m")
-    got = cfg.kmap_bundle({cfg.KMAP_BUNDLE_ENV: str(root)})
+    got = cfg.kmap_bundle({cfg.KMAP_BUNDLE_ENV: str(root), cfg.KMAP_LEAK_CHECK_ENV: "skip"})
     assert got == {"dir": str(root), "edition": "student"}
     assert ".DS_Store" not in {os.path.basename(s) for s, _ in cfg.kmap_datas(got)}
 
 
 def test_kmap_bundle_refuses_a_folder_inside_the_repo():
     with pytest.raises(SystemExit):
-        cfg.kmap_bundle({cfg.KMAP_BUNDLE_ENV: str(ROOT / "mrstudio" / "data" / "kmap")})
+        cfg.kmap_bundle({cfg.KMAP_BUNDLE_ENV: str(ROOT / "mrstudio" / "data" / "kmap"), cfg.KMAP_LEAK_CHECK_ENV: "skip"})
+
+
+def _fake_leak_check(tmp_path: Path, exit_code: int) -> Path:
+    script = tmp_path / "leak_check.py"
+    script.write_text("import sys\nprint('args', sys.argv[1:])\nprint('FINDING: planted' if %d else 'OK')\n"
+                      "sys.exit(%d)\n" % (exit_code, exit_code), encoding="utf-8")
+    return script
+
+
+def test_leak_check_gate_unset_refuses_a_student_map(tmp_path):
+    root = _fake_map(tmp_path / "content" / "student")
+    with pytest.raises(SystemExit, match=cfg.KMAP_LEAK_CHECK_ENV):
+        cfg.kmap_bundle({cfg.KMAP_BUNDLE_ENV: str(root)})
+    assert cfg.leak_check_problems(str(root), "student", {})                      # unset: a problem
+    assert cfg.leak_check_problems(str(root), "student", {cfg.KMAP_LEAK_CHECK_ENV: "skip"}) == []
+    assert cfg.leak_check_problems(str(root), "student", {cfg.KMAP_LEAK_CHECK_ENV: str(tmp_path / "nope.py")})
+    assert cfg.leak_check_problems(str(root), "instructor", {}) == []             # the gate is for the student edition
+
+
+def test_leak_check_gate_runs_the_script_and_stops_on_failure(tmp_path):
+    root = _fake_map(tmp_path / "content" / "student")
+    ok = _fake_leak_check(tmp_path / "a", 0) if (tmp_path / "a").mkdir() is None else None
+    env = {cfg.KMAP_BUNDLE_ENV: str(root), cfg.KMAP_LEAK_CHECK_ENV: str(ok)}
+    assert cfg.kmap_bundle(env) == {"dir": str(root), "edition": "student"}
+    (tmp_path / "b").mkdir()
+    bad = _fake_leak_check(tmp_path / "b", 1)
+    with pytest.raises(SystemExit, match="leak check failed.*planted"):
+        cfg.kmap_bundle({cfg.KMAP_BUNDLE_ENV: str(root), cfg.KMAP_LEAK_CHECK_ENV: str(bad)})
+
+
+def test_leak_check_gate_passes_the_instructor_sibling_as_control(tmp_path):
+    root = _fake_map(tmp_path / "content" / "student")
+    seen = []
+
+    def run(cmd, **kw):
+        seen.append(cmd)
+        import types
+        return types.SimpleNamespace(returncode=0, stdout="", stderr="")
+    (tmp_path / "s").mkdir()
+    script = _fake_leak_check(tmp_path / "s", 0)
+    env = {cfg.KMAP_LEAK_CHECK_ENV: str(script)}
+    assert cfg.leak_check_problems(str(root), "student", env, run=run) == []
+    assert "--control" not in seen[0] and seen[0][2] == str(root)
+    (tmp_path / "content" / "instructor").mkdir()
+    assert cfg.leak_check_problems(str(root), "student", env, run=run) == []
+    assert seen[1][-2:] == ["--control", str(tmp_path / "content" / "instructor")]
+
+
+def test_kmap_bundle_refuses_x_files_with_any_case_suffix_and_symlinks(tmp_path):
+    for i, name in enumerate(["X_01.js", "x_01.JS", "x_01.js.gz", "x_01.mjs"]):
+        root = _fake_map(tmp_path / f"m{i}")
+        (root / name).write_text("// planted\n", encoding="utf-8")
+        with pytest.raises(SystemExit, match="answer file"):
+            cfg.kmap_bundle({cfg.KMAP_BUNDLE_ENV: str(root), cfg.KMAP_LEAK_CHECK_ENV: "skip"})
+    if hasattr(os, "symlink") and sys.platform != "win32":
+        root = _fake_map(tmp_path / "ml")
+        (root / "link.js").symlink_to(tmp_path / "m0" / "index.html")
+        with pytest.raises(SystemExit, match="symbolic link"):
+            cfg.kmap_bundle({cfg.KMAP_BUNDLE_ENV: str(root), cfg.KMAP_LEAK_CHECK_ENV: "skip"})
 
 
 @pytest.mark.skipif(sys.platform == "win32", reason="the spec needs the conda DLL folders on Windows")

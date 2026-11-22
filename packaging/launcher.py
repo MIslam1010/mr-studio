@@ -150,7 +150,7 @@ def kmap_checks(rep: _Report, root, edition: str = "student") -> None:
             if job.error is not None or not job.data or job.mime != mime:
                 raise AssertionError(f"kmap://map/{rel}: error={job.error} mime={job.mime} bytes={len(job.data or b'')}")
             out.append(f"{rel} {len(job.data)} B")
-        if serve_check(root, "../index.html").error is None:
+        if serve_check(root, "../index.html").data:      # refused: an error, or an empty finished body (no content)
             raise AssertionError("kmap://map/../index.html was served (path traversal)")
         return "; ".join(out)
     _step(rep, "Knowledge Map: kmap: scheme handler serves index.html and pyodide/pyodide.js", _served)
@@ -160,7 +160,7 @@ def kmap_checks(rep: _Report, root, edition: str = "student") -> None:
         bad = content_problems(root, edition)
         if bad:
             raise AssertionError("; ".join(bad[:5]))
-        return f"no x_*.js, no instructor folder, edition {edition}"
+        return f"no x_* file, no instructor folder, no symlink, edition {edition}"
     _step(rep, "Knowledge Map: no instructor content", _clean)
 
 

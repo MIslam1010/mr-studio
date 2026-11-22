@@ -179,12 +179,13 @@ def map_url(node_id: str, tab: str = MAP_TAB) -> str:
 
 # ----------------------------------------------------------------------------- embedded map content
 def app_edition() -> str:
-    """``"student"`` (public repository: there is no ``mrstudio/edition.py``) or the private copy's edition."""
+    """``"student"`` (public repository: there is no ``mrstudio/edition.py``) or ``"instructor"`` -- the answer of
+    ``edition_info.edition_name()`` (lower-cased; any problem falls back to the student edition)."""
     try:
-        from . import edition   # only in the private instructor copy
-    except ImportError:
+        from .edition_info import edition_name
+        return (str(edition_name()) or "student").strip().lower() or "student"
+    except Exception:  # noqa: BLE001 -- broad on purpose: an unreadable edition must mean the safe one
         return "student"
-    return str(getattr(edition, "EDITION", "student") or "student")
 
 
 def _map_folder(d: Path | None) -> Path | None:
@@ -214,10 +215,15 @@ def bundled_kmap_dir() -> Path | None:
     return None
 
 
+#: instructor-only answer files: ``x_`` + anything, any case, any extension or suffix
+X_FILE_RE = re.compile(r"^x_", re.IGNORECASE)
+
+
 def content_problems(root: Path, edition: str = "student", require_build_info: bool = False) -> list[str]:
     """Why the map folder ``root`` must not go into (or be shown by) an app of ``edition``; [] if it is fine.
 
-    Refused: any ``x_*.js`` (instructor-only answer files), a folder called ``instructor``, and a
+    Refused: any ``x_*`` file whatever its case or suffix (``x_01.js``, ``X_01.JS``, ``x_01.js.gz``, ``x_01.mjs``:
+    instructor-only answer files), a folder called ``instructor``, a symbolic link anywhere in the folder, and a
     ``build-info.json`` whose ``edition`` is not ``edition`` (a missing ``build-info.json`` is a problem only with
     ``require_build_info``; the Student Edition web folder has none)."""
     root = Path(root)
@@ -228,8 +234,12 @@ def content_problems(root: Path, edition: str = "student", require_build_info: b
         for d in dirnames:
             if d.lower() == "instructor":
                 out.append(f"instructor folder: {Path(dirpath, d)}")
+            if Path(dirpath, d).is_symlink():
+                out.append(f"symbolic link in the map folder: {Path(dirpath, d)}")
         for f in filenames:
-            if f.startswith("x_") and f.endswith(".js"):
+            if Path(dirpath, f).is_symlink():
+                out.append(f"symbolic link in the map folder: {Path(dirpath, f)}")
+            if X_FILE_RE.match(f):
                 out.append(f"instructor answer file: {Path(dirpath, f)}")
     info = root / "build-info.json"
     if info.is_file():
