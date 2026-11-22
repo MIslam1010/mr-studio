@@ -4,9 +4,9 @@ This folder turns MR Studio into installers that need no Python:
 
 | Platform | Result (in `packaging/dist/`) | What students do |
 |---|---|---|
-| macOS 14 or later (Apple Silicon) | `MR-Studio-1.0.0-macOS-arm64.dmg` | open the .dmg and drag **MR Studio** onto **Applications** |
-| Windows 10/11 (64-bit) | `MR-Studio-1.0.0-Windows-x64-setup.exe` | double-click it: Next, Next, Finish (no administrator rights needed) |
-| Windows, no install | `MR-Studio-1.0.0-Windows-x64.zip` | unzip it and double-click `MRStudio\MRStudio.exe` |
+| macOS 14 or later (Apple Silicon) | `MR-Studio-2026.12.0-macOS-arm64.dmg` | open the .dmg and drag **MR Studio** onto **Applications** |
+| Windows 10/11 (64-bit) | `MR-Studio-2026.12.0-Windows-x64-setup.exe` | double-click it: Next, Next, Finish (no administrator rights needed) |
+| Windows, no install | `MR-Studio-2026.12.0-Windows-x64.zip` | unzip it and double-click `MRStudio\MRStudio.exe` |
 
 PyInstaller freezes Python 3.11 and every library (Pinocchio, Robotics Toolbox, TOPP-RA, PySide6, …)
 into one folder. You can only build an installer **on the platform it is for**, so you cannot make the
@@ -29,7 +29,7 @@ Windows installer on a Mac. Use GitHub Actions (option A) to get both without ow
    `--self-test`, and makes the installers.
 3. Open the repository on github.com, then **Actions**, then the latest run. Download **MR-Studio-Windows** and
    **MR-Studio-macOS** from the *Artifacts* box. Each is a zip that contains the installer and the self-test report.
-4. Optional: `git tag v1.0.0 && git push --tags` also attaches the installers to a GitHub *Release*
+4. Optional: `git tag v2026.12.0 && git push --tags` also attaches the installers to a GitHub *Release*
    page that you can give to students.
 
 A run takes about 20–30 minutes. You can start one by hand with **Actions**, then **build installers**, then **Run workflow**.

@@ -1,13 +1,13 @@
 ; Inno Setup 6 script: turns packaging\dist\MRStudio\ (PyInstaller one-folder build) into a
 ; one-click Windows installer  packaging\dist\MR-Studio-<version>-Windows-x64-setup.exe
 ;
-;   iscc /DMyAppVersion=1.0.0 packaging\mrstudio.iss        (build_windows.ps1 does this for you)
+;   iscc /DMyAppVersion=2026.12.0 packaging\mrstudio.iss        (build_windows.ps1 does this for you)
 ;
 ; Installs per user (no administrator rights needed) into %LOCALAPPDATA%\Programs\MR Studio,
 ; adds Start-menu and optional desktop shortcuts and an uninstaller.
 
 #ifndef MyAppVersion
-  #define MyAppVersion "1.0.0"
+  #define MyAppVersion "2026.12.0"
 #endif
 #define MyAppName "MR Studio"
 #define MyAppExe "MRStudio.exe"

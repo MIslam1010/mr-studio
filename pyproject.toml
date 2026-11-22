@@ -1,6 +1,6 @@
 [project]
 name = "mr-studio"
-version = "1.0.0"   # keep equal to VERSION in packaging/bundle_config.py (CI checks the tag against that file)
+version = "2026.12.0"   # keep equal to VERSION in packaging/bundle_config.py (CI checks the tag against that file)
 description = "Interactive teaching app for robot kinematics, dynamics, control and planning (Modern Robotics)"
 requires-python = ">=3.11,<3.12"
 readme = "README.md"

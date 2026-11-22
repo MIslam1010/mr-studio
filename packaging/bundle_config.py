@@ -9,7 +9,7 @@ from __future__ import annotations
 APP_NAME = "MR Studio"            # window / bundle display name
 EXE_NAME = "MRStudio"             # executable and dist folder name (no space: simpler on Windows)
 BUNDLE_ID = "org.mrstudio.app"    # macOS CFBundleIdentifier
-VERSION = "1.0.0"
+VERSION = "2026.12.0"
 
 # Packages whose *every* submodule is bundled. MR Studio imports its tabs by name at run time
 # (gui/app.py: importlib.import_module), so PyInstaller's static analysis cannot see them.
