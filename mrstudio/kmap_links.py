@@ -7,6 +7,8 @@ Two directions:
   ``<map>#map/<node id>/<map tab>``; the map itself is the local student edition in the folder named by the
   environment variable ``MRSTUDIO_KMAP_DIR`` if that is set and holds one, else the published artifact
   (``MRSTUDIO_KMAP_URL`` overrides both).  There is no built-in local path.
+  When MR Studio embeds the map (a "Knowledge Map" tab, ``gui/kmap_view.py``), the links point at the embedded
+  page instead (``kmap://map/index.html#map/<node id>/learn``, see ``set_embedded``) and open in that tab.
 * **Map -> MR Studio.** The map can open MR Studio on the right tab with
   ``mrstudio://open?tab=<class or 0-based index>&robot=<name>&preset=<key>``; ``parse_launch_url`` reads such a
   URL and ``launch_url`` writes one.
@@ -22,6 +24,7 @@ import html
 import json
 import os
 import re
+import sys
 from functools import lru_cache
 from pathlib import Path
 from urllib.parse import parse_qs, quote, urlencode, urlsplit
@@ -100,6 +103,13 @@ SCHEME_TEMPLATE = "mrstudio://open?tab={tab}&robot={robot}&preset={preset}"
 FOOTER_MAX = 8
 NO_LINKS_ENV = "MRSTUDIO_NO_KMAP_LINKS"
 
+# embedded map (Knowledge Map tab, gui/kmap_view.py) -------------------------------------------------------------
+EMBED_URL = "kmap://map/index.html"    # the map page as the embedded view serves it (custom URL scheme)
+EMBED_ENV = "MRSTUDIO_KMAP_EMBED"      # "0" turns the embedded tab off (links then open in the browser again)
+BUNDLED_KMAP = "kmap"                  # folder of the map inside a frozen build (MRSTUDIO_BUNDLE_KMAP, packaging/)
+STUDENT_EDITION_FOLDER = "Robotics Knowledge Map - Student Edition"
+_EMBED = {"on": False}
+
 
 # ----------------------------------------------------------------------------- MR section -> tab
 def tab_for_section(section: str) -> tuple[str, str | None, str | None] | None:
@@ -137,8 +147,21 @@ def kmap_dir() -> Path | None:
     return Path(env).expanduser() if env else None
 
 
+def set_embedded(on: bool) -> None:
+    """Make ``map_url`` point at the embedded map (``EMBED_URL``) -- set by the main window when it has a
+    Knowledge Map tab, before the tabs (and their theory footers) are built."""
+    _EMBED["on"] = bool(on)
+
+
+def embedded() -> bool:
+    return _EMBED["on"]
+
+
 def map_base_url() -> str:
-    """URL of the map page: ``MRSTUDIO_KMAP_URL``, else the local student edition, else the published artifact."""
+    """URL of the map page: the embedded map (Knowledge Map tab) if there is one, else ``MRSTUDIO_KMAP_URL``,
+    else the local student edition, else the published artifact."""
+    if _EMBED["on"]:
+        return EMBED_URL
     env = os.environ.get("MRSTUDIO_KMAP_URL", "").strip()
     if env:
         return env.split("#", 1)[0]
@@ -152,6 +175,92 @@ def map_base_url() -> str:
 def map_url(node_id: str, tab: str = MAP_TAB) -> str:
     """Deep link that opens the map on ``node_id`` (e.g. ``"04.01.1"``) and its ``tab``."""
     return f"{map_base_url()}#map/{quote(node_id, safe='.')}/{tab}"
+
+
+# ----------------------------------------------------------------------------- embedded map content
+def app_edition() -> str:
+    """``"student"`` (public repository: there is no ``mrstudio/edition.py``) or the private copy's edition."""
+    try:
+        from . import edition   # only in the private instructor copy
+    except ImportError:
+        return "student"
+    return str(getattr(edition, "EDITION", "student") or "student")
+
+
+def _map_folder(d: Path | None) -> Path | None:
+    """``d`` itself if it holds ``index.html`` (a built map folder), else its Student Edition sub-folder if that holds
+    one (the layout ``MRSTUDIO_KMAP_DIR`` has always had: the Knowledge Map folder), else None."""
+    if d is None:
+        return None
+    for cand in (d, d / STUDENT_EDITION_FOLDER):
+        try:
+            if (cand / "index.html").is_file():
+                return cand.resolve()
+        except OSError:
+            pass
+    return None
+
+
+def bundled_kmap_dir() -> Path | None:
+    """The map bundled with a frozen MR Studio (``kmap/`` in ``sys._MEIPASS`` or next to the executable, or in
+    ``Contents/Resources`` of the macOS app); None when running from source or when nothing was bundled."""
+    if not getattr(sys, "frozen", False):
+        return None
+    exe_dir = Path(sys.executable).resolve().parent
+    bases = [getattr(sys, "_MEIPASS", None), exe_dir, exe_dir.parent / "Resources"]
+    for b in bases:
+        if b and (Path(b) / BUNDLED_KMAP / "index.html").is_file():
+            return (Path(b) / BUNDLED_KMAP).resolve()
+    return None
+
+
+def content_problems(root: Path, edition: str = "student", require_build_info: bool = False) -> list[str]:
+    """Why the map folder ``root`` must not go into (or be shown by) an app of ``edition``; [] if it is fine.
+
+    Refused: any ``x_*.js`` (instructor-only answer files), a folder called ``instructor``, and a
+    ``build-info.json`` whose ``edition`` is not ``edition`` (a missing ``build-info.json`` is a problem only with
+    ``require_build_info``; the Student Edition web folder has none)."""
+    root = Path(root)
+    out = []
+    if not (root / "index.html").is_file():
+        out.append(f"no index.html in {root}")
+    for dirpath, dirnames, filenames in os.walk(root):
+        for d in dirnames:
+            if d.lower() == "instructor":
+                out.append(f"instructor folder: {Path(dirpath, d)}")
+        for f in filenames:
+            if f.startswith("x_") and f.endswith(".js"):
+                out.append(f"instructor answer file: {Path(dirpath, f)}")
+    info = root / "build-info.json"
+    if info.is_file():
+        try:
+            got = json.loads(info.read_text(encoding="utf-8")).get("edition")
+        except (OSError, ValueError, AttributeError) as e:
+            got = f"unreadable ({type(e).__name__})"
+        if got != edition:
+            out.append(f"build-info.json says edition {got!r}, expected {edition!r}")
+    elif require_build_info:
+        out.append(f"no build-info.json in {root} (cannot tell which edition it is)")
+    return out
+
+
+def embedded_content_dir() -> Path | None:
+    """Folder of the map to embed as a Knowledge Map tab, or None (no tab: links open in the browser as before).
+
+    Order: the map bundled with a frozen app (``kmap/``), then ``MRSTUDIO_KMAP_DIR`` -- a built map folder holding
+    ``index.html`` (e.g. the map app's ``content/student``), or the Knowledge Map folder with the
+    ``Robotics Knowledge Map - Student Edition`` sub-folder. ``MRSTUDIO_KMAP_EMBED=0`` turns embedding off. The
+    student app never embeds a map with instructor content (``content_problems``)."""
+    if os.environ.get(EMBED_ENV, "").strip().lower() in ("0", "false", "no", "off"):
+        return None
+    edition = app_edition()
+    for cand in (bundled_kmap_dir(), _map_folder(kmap_dir())):
+        if cand is None:
+            continue
+        if edition == "student" and content_problems(cand, "student"):
+            continue
+        return cand
+    return None
 
 
 # ----------------------------------------------------------------------------- mrstudio:// launch URLs
@@ -251,5 +360,6 @@ def theory_footer(tab_cls: str, targets: dict | None = None) -> str:
         cite = f" <small>(MR §{mr})</small>" if mr and mr[0].isdigit() else ""
         items.append(f'<li><a href="{html.escape(map_url(nid), quote=True)}">{label}</a>{cite}</li>')
     more = f" {total} map nodes link to this tab; a few of them:" if total > len(picks) else ""
-    return (head + f"<p>Related nodes in the Robotics Knowledge Map (opens in the browser).{more}</p>"
+    where = "the Knowledge Map tab" if _EMBED["on"] else "the browser"
+    return (head + f"<p>Related nodes in the Robotics Knowledge Map (opens in {where}).{more}</p>"
             + "<ul>" + "".join(items) + "</ul>")

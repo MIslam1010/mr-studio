@@ -175,7 +175,10 @@ class ValidationTab(BaseTab):
         self.table.setAlternatingRowColors(True)
         self.table.setWordWrap(False)
         self.table.setShowGrid(False)
-        self.table.setStyleSheet("QTableWidget { font-family: -apple-system, 'Helvetica Neue', 'Segoe UI', sans-serif; }"
+        # the system UI font (not the theme's fixed-width table font); a family Qt knows, not CSS's -apple-system /
+        # sans-serif, which made Qt scan all font aliases at start-up on macOS
+        ui_family = QtWidgets.QApplication.font().family().replace("'", "")
+        self.table.setStyleSheet(f"QTableWidget {{ font-family: '{ui_family}'; }}"
                                  "QTableWidget::item { padding: 0 6px; }")
         hh = self.table.horizontalHeader()
         for col, mode in enumerate([QtWidgets.QHeaderView.ResizeToContents, QtWidgets.QHeaderView.Stretch,

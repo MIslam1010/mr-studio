@@ -12,6 +12,8 @@ chrome should use the accessors ``text_color()``, ``muted_color()``, ``link_colo
 ``warn_color()``, ``good_color()``, ``bad_color()`` (they return darker variants in the light palette);
 text drawn on a dark canvas uses ``canvas_text_color()``.
 """
+import sys
+
 from PySide6 import QtCore, QtGui, QtWidgets
 
 VIEW_BG = "#14171c"
@@ -149,6 +151,18 @@ def notifier() -> _Notifier:
     return _notifier
 
 
+def mono_css() -> str:
+    """Fixed-width font list for style sheets. Not the generic ``monospace``: Qt has no family of that name, so on
+    macOS every use made it scan all font aliases at start-up ("Populating font family aliases took 110 ms. Replace
+    uses of missing font family "Monospace"...")."""
+    if sys.platform == "darwin":
+        return "Menlo"
+    fixed = ""
+    if QtGui.QGuiApplication.instance() is not None:
+        fixed = QtGui.QFontDatabase.systemFont(QtGui.QFontDatabase.SystemFont.FixedFont).family()
+    return f"Menlo, '{fixed}'" if fixed and "'" not in fixed else "Menlo, Consolas, 'DejaVu Sans Mono'"
+
+
 def make_stylesheet(projector: bool = False, light: bool = False) -> str:
     s = PROJ_FONT_SCALE if projector else 1.0
     if light:
@@ -174,13 +188,13 @@ QPushButton#primary {{ background: #1f6f8b; border-color: {ACCENT}; font-weight:
 QToolButton#rec {{ padding-right: {f(22)}px; }}
 QToolButton#rec:checked {{ background: #6b1d24; border-color: {BAD}; color: #ffffff; }}
 QTextBrowser {{ background: #181b20; border: 1px solid #2c323b; border-radius: 6px; }}
-QTableWidget {{ background: #181b20; gridline-color: #2c323b; font-family: Menlo, monospace; }}
+QTableWidget {{ background: #181b20; gridline-color: #2c323b; font-family: {mono_css()}; }}
 QHeaderView::section {{ background: #222730; color: {muted}; border: 0px; padding: 3px; }}
-QLabel#value {{ font-family: Menlo, monospace; color: {text}; }}
+QLabel#value {{ font-family: {mono_css()}; color: {text}; }}
 QLabel#title {{ font-size: {f(16)}px; font-weight: 700; color: {text}; }}
 QLabel#muted {{ color: {muted}; }}
 QLabel#rec {{ color: #ffffff; background: #c62828; border-radius: 4px; padding: 2px 8px; font-weight: 700;
-              font-family: Menlo, monospace; }}
+              font-family: {mono_css()}; }}
 QSplitter::handle {{ background: #22272e; }}
 """
 
@@ -206,13 +220,13 @@ QPushButton#primary {{ background: #cde7f2; border-color: {LIGHT_ACCENT}; font-w
 QToolButton#rec {{ padding-right: {f(22)}px; }}
 QToolButton#rec:checked {{ background: #f6d3d6; border-color: {LIGHT_BAD}; color: {LIGHT_BAD}; }}
 QTextBrowser {{ background: {LIGHT_BASE}; color: {LIGHT_TEXT}; border: 1px solid #8a94a0; border-radius: 6px; }}
-QTableWidget {{ background: #181b20; gridline-color: #2c323b; font-family: Menlo, monospace; }}
+QTableWidget {{ background: #181b20; gridline-color: #2c323b; font-family: {mono_css()}; }}
 QHeaderView::section {{ background: #222730; color: {PROJ_MUTED}; border: 0px; padding: 3px; }}
-QLabel#value {{ font-family: Menlo, monospace; color: {LIGHT_TEXT}; }}
+QLabel#value {{ font-family: {mono_css()}; color: {LIGHT_TEXT}; }}
 QLabel#title {{ font-size: {f(16)}px; font-weight: 700; color: {LIGHT_TEXT}; }}
 QLabel#muted {{ color: {LIGHT_MUTED}; }}
 QLabel#rec {{ color: #ffffff; background: #b0101c; border-radius: 4px; padding: 2px 8px; font-weight: 700;
-              font-family: Menlo, monospace; }}
+              font-family: {mono_css()}; }}
 QSplitter::handle {{ background: #c4ccd5; }}
 """
 
