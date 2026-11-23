@@ -56,7 +56,7 @@ The student app (the public code: no `mrstudio/edition.py`) never embeds a folde
 | `MRSTUDIO_KMAP_DIR` | map folder (see above); also the local map for browser links when nothing is embedded |
 | `MRSTUDIO_KMAP_EMBED=0` | no embedded tab, even with map content (links open in the browser as before) |
 | `MRSTUDIO_KMAP_URL` | browser links only: used when nothing is embedded |
-| `MRSTUDIO_KMAP_LEAK_CHECK` | build only (`packaging/`): path of the map pipeline's `tests/leak_check.py`; a student map bundle must pass it (`skip` = tests only) |
+| `MRSTUDIO_KMAP_LEAK_CHECK` | build only (`packaging/`): path of the map pipeline's `tests/leak_check.py`; a student map bundle must pass it (`skip` is honoured only inside pytest; a real build refuses it) |
 | `MRSTUDIO_TEST_KMAP_DIR` | tests only: also run the real-content WebEngine test against this map |
 
 How it works:
@@ -78,10 +78,12 @@ How it works:
   `downloadRequested` asks with a "Save as" dialog (default `~/Downloads/<name from the page>`, only the base name is
   used); cancel cancels. `window.print()` / the map's print buttons save a PDF (`printToPdf`, same kind of dialog).
 * **Permissions.** Only the clipboard (`navigator.clipboard.writeText`) is granted, and only to `kmap://map`; camera,
-  microphone, location, notifications and everything else are denied.
+  microphone, location, notifications and everything else are denied. Qt has no write-only clipboard permission, so the
+  grant (`ClipboardReadWrite`) also lets the map page read the clipboard; the map itself never reads it.
 * **Failed requests.** A missing or refused `.js/.css/image/font` fails normally (`onerror` fires); any other missing
   file (data fetched with `fetch`/XHR) gets an empty, finished body, because Chromium never ends the body of a `fail()`ed
-  response (`fetch(url).then(r => r.text())` would hang).
+  response (`fetch(url).then(r => r.text())` would hang). That empty answer carries the header
+  `X-Kmap-Missing: notfound|denied|failed` and is logged (`mrstudio.kmap` logger), so a broken bundle is diagnosable.
 * **Navigation:** `mrstudio://open?…` (the map's "Open in MR Studio") → `MainWindow.open_url` (same as a link from
   the OS); `http(s)`/`mailto` → the system browser, only for a link the user really clicked (a mouse button or key press
   within the last 2 s: Qt reports a script's `location.href` as a link click too); `kmap:` stays in the tab.

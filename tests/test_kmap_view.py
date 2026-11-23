@@ -705,8 +705,8 @@ def s_perms():
        "window.R_note='pending'; try{Notification.requestPermission().then(p=>{window.R_note=p})}catch(e){window.R_note='n/a'}")
     poll("window.R_geo", "geolocation", lambda: poll("window.R_note", "notification", nxt))
 def s_404():
-    js("window.R_404='pending'; var t0=performance.now(); fetch('missing-file.txt').then(r=>r.text()).then("
-       "t=>{window.R_404='resolved:'+t.length},e=>{window.R_404='rejected'});"
+    js("window.R_404='pending'; var t0=performance.now(); fetch('missing-file.txt').then(r=>r.text().then(t=>[t,r.headers.get('X-Kmap-Missing')])).then("
+       "a=>{window.R_404='resolved:'+a[0].length+':'+a[1]},e=>{window.R_404='rejected'});"
        "window.R_403='pending'; fetch('index.html',{method:'POST'}).then(r=>r.text()).then("
        "t=>{window.R_403='resolved:'+t.length},e=>{window.R_403='rejected'});")
     js("window.R_scr='pending'; var s=document.createElement('script'); s.src='missing-script.js';"
@@ -806,7 +806,7 @@ def test_live_other_permissions_are_denied(sec):
 
 
 def test_live_failed_requests_settle(sec):
-    assert sec["fetch_404"] in ("rejected",) or sec["fetch_404"].startswith("resolved:"), sec["fetch_404"]
+    assert sec["fetch_404"] == "resolved:0:notfound", sec["fetch_404"]      # ends, empty, marked X-Kmap-Missing
     assert sec["fetch_403"] in ("rejected",) or sec["fetch_403"].startswith("resolved:"), sec["fetch_403"]
     assert sec["script_404"] == "error", sec["script_404"]      # a missing <script> still fires onerror
 
@@ -823,3 +823,11 @@ def test_serve_missing_data_file_gets_an_empty_finished_body_but_scripts_fail(fa
     assert job.error == "UrlNotFound" and job.data is None                         # <script onerror> keeps working
     job = K.FakeJob("kmap://map/index.html", method=b"POST")
     assert K.serve(job, fake_map, K.FAKE_ERRORS) == "denied" and job.data == b"" and job.error is None
+
+
+def test_missing_data_file_is_marked_and_logged(fake_map, caplog):
+    with caplog.at_level("WARNING", logger="mrstudio.kmap"):
+        job = K.serve_check(fake_map, "missing.json")
+    assert job.data == b"" and job.headers == {"X-Kmap-Missing": "notfound"}
+    assert "missing.json" in caplog.text
+    assert K.serve_check(fake_map, "index.html").headers == {}

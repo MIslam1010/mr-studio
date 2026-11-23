@@ -114,7 +114,8 @@ MRSTUDIO_KMAP_LEAK_CHECK="<path of the map pipeline's tests/leak_check.py>" \
   instructor folder>` when one exists next to it, e.g. `content/instructor`) and **stops** if it reports anything;
   it also stops if the variable is unset or the file is missing. The name checks below only see file names; this
   one reads the data files (answer keys, withheld solutions, exam text). `MRSTUDIO_KMAP_LEAK_CHECK=skip` turns it
-  off and is for tests only. It does not apply to a map built for the instructor edition.
+  off inside the test suite only (a real build refuses it). The build prints
+  `Knowledge Map bundle: <folder> (<edition>); leak check: passed (<script>, control yes|no)` so the log shows the gate ran. It does not apply to a map built for the instructor edition.
 
 * `MRSTUDIO_KMAP_EDITION` (default `student`) is the edition the map must be. The build **stops** if the folder
   has no `index.html`, contains any `x_*` file (any case, any suffix: `X_01.JS`, `x_01.js.gz`, `x_01.mjs`), a folder called `instructor`, a symbolic link, has no `build-info.json` or one whose

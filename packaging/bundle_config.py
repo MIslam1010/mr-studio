@@ -152,20 +152,29 @@ KMAP_SELF_TEST_IMPORTS = ["PySide6.QtWebEngineCore", "PySide6.QtWebEngineWidgets
 KMAP_SKIP_FILES = {".DS_Store", "Thumbs.db", "desktop.ini"}
 
 
+LEAK_CHECK_RESULT = "not run"      # set by leak_check_problems; printed by kmap_bundle (build logs show the gate ran)
+
+
 def leak_check_problems(root: str, edition: str, environ=None, run=None) -> list[str]:
     """Run the map pipeline's content leak test (``leak_check.py``, found through ``MRSTUDIO_KMAP_LEAK_CHECK``) on a
     *student* map folder; [] when it passes. ``content_problems`` only looks at file and folder names; this one reads
     the data files (answer keys, withheld solutions, exam text). The control folder is the ``instructor`` sibling of
     ``root`` (``content/instructor`` next to ``content/student``) when it exists. Other editions: nothing to check.
-    Unset for a student map: a problem (the build stops). ``MRSTUDIO_KMAP_LEAK_CHECK=skip``: no check (tests only)."""
+    Unset for a student map: a problem (the build stops). ``MRSTUDIO_KMAP_LEAK_CHECK=skip``: no check, honoured only inside pytest
+    (``PYTEST_CURRENT_TEST``); a real build refuses it. The outcome is kept in ``LEAK_CHECK_RESULT``."""
     import os
     import subprocess
     import sys
+    global LEAK_CHECK_RESULT
     if edition != "student":
+        LEAK_CHECK_RESULT = f"not needed ({edition} edition)"
         return []
     env = os.environ if environ is None else environ
     raw = (env.get(KMAP_LEAK_CHECK_ENV) or "").strip()
     if raw.lower() == "skip":
+        if "PYTEST_CURRENT_TEST" not in os.environ:      # a real build can never skip the content test
+            return [f"{KMAP_LEAK_CHECK_ENV}=skip is only allowed inside the test suite"]
+        LEAK_CHECK_RESULT = "SKIPPED (test suite)"
         return []
     if not raw:
         return [f"{KMAP_LEAK_CHECK_ENV} is not set: a student map must pass the pipeline's tests/leak_check.py "
@@ -184,6 +193,7 @@ def leak_check_problems(root: str, edition: str, environ=None, run=None) -> list
     if r.returncode != 0:
         tail = [ln for ln in ((r.stdout or "") + (r.stderr or "")).splitlines() if ln.strip()][-15:]
         return [f"leak check failed (exit {r.returncode}): " + " | ".join(tail)]
+    LEAK_CHECK_RESULT = f"passed ({script}, control {'yes' if '--control' in cmd else 'no'})"
     return []
 
 
@@ -216,6 +226,7 @@ def kmap_bundle(environ=None) -> dict | None:
     if problems:
         raise SystemExit(f"{KMAP_BUNDLE_ENV}={raw!r}: refusing to bundle this Knowledge Map ({edition} build):\n  - "
                          + "\n  - ".join(problems))
+    print(f"Knowledge Map bundle: {root} ({edition}); leak check: {LEAK_CHECK_RESULT}", file=sys.stderr)
     return {"dir": root, "edition": edition}
 
 

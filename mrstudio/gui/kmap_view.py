@@ -26,6 +26,7 @@ How it works
 from __future__ import annotations
 
 import json
+import logging
 import mimetypes
 import os
 import sys
@@ -151,6 +152,21 @@ def resolve(root, method, host: str, path: str) -> tuple[str, Path | None]:
     return "ok", p
 
 
+_log = logging.getLogger("mrstudio.kmap")
+MISSING_HEADER = b"X-Kmap-Missing"
+
+
+def _reply_missing(job, url, status: str) -> None:
+    """Empty finished body for a refused/missing fetch-like file, marked with ``X-Kmap-Missing: <status>`` and logged,
+    so a broken bundle is diagnosable (Qt 6.12 cannot finish a body with a 404 status)."""
+    try:
+        job.setAdditionalResponseHeaders({QtCore.QByteArray(MISSING_HEADER): [QtCore.QByteArray(status.encode())]})  # QMultiMap: list of values
+    except (AttributeError, TypeError):
+        pass
+    _log.warning("Knowledge Map: %s %s (empty body)", status, url.toString())
+    _reply_bytes(job, b"", "text/plain")
+
+
 def serve(job, root, errors) -> str:
     """Answer a ``QWebEngineUrlRequestJob`` (or anything with the same methods) from the map folder ``root``.
     ``errors`` is ``QWebEngineUrlRequestJob.Error`` (any object with UrlNotFound / RequestDenied / RequestFailed).
@@ -162,7 +178,7 @@ def serve(job, root, errors) -> str:
     fetch_like = Path(url.path()).suffix.lower() not in FAIL_SUFFIXES
     if status != "ok":
         if fetch_like:
-            _reply_bytes(job, b"", "text/plain")
+            _reply_missing(job, url, status)
         else:
             job.fail(errors.UrlNotFound if status == "notfound" else errors.RequestDenied)
         return status
@@ -170,7 +186,7 @@ def serve(job, root, errors) -> str:
         data = p.read_bytes()
     except OSError:
         if fetch_like:
-            _reply_bytes(job, b"", "text/plain")
+            _reply_missing(job, url, "failed")
         else:
             job.fail(errors.RequestFailed)
         return "failed"
@@ -310,6 +326,10 @@ class FakeJob(QtCore.QObject):
         self.error = None
         self.mime = None
         self.data = None
+        self.headers = {}
+
+    def setAdditionalResponseHeaders(self, headers):
+        self.headers = {bytes(k).decode(): ",".join(bytes(x).decode() for x in v) for k, v in headers.items()}
 
     def requestUrl(self):
         return self._url

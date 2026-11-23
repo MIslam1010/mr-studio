@@ -689,3 +689,18 @@ def test_launcher_points_qt_webengine_at_the_bundled_helper(tmp_path, monkeypatc
     monkeypatch.setenv("QTWEBENGINEPROCESS_PATH", "/mine")      # a user's own setting stays
     launcher._webengine_paths()
     assert os.environ["QTWEBENGINEPROCESS_PATH"] == "/mine"
+
+
+def test_leak_check_skip_is_refused_outside_the_test_suite(tmp_path, monkeypatch):
+    root = _fake_map(tmp_path / "content" / "student")
+    monkeypatch.delenv("PYTEST_CURRENT_TEST", raising=False)
+    got = cfg.leak_check_problems(str(root), "student", {cfg.KMAP_LEAK_CHECK_ENV: "skip"})
+    assert got and "only allowed inside the test suite" in got[0]
+
+
+def test_kmap_bundle_prints_the_leak_check_result(tmp_path, capsys):
+    root = _fake_map(tmp_path / "content" / "student")
+    script = _fake_leak_check(tmp_path, 0)
+    cfg.kmap_bundle({cfg.KMAP_BUNDLE_ENV: str(root), cfg.KMAP_LEAK_CHECK_ENV: str(script)})
+    err = capsys.readouterr().err
+    assert "leak check: passed (" in err and "control no" in err
